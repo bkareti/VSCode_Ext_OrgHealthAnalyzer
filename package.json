@@ -1,0 +1,212 @@
+{
+  "name": "sf-health-analyzer",
+  "displayName": "Salesforce Org Health Analyzer",
+  "description": "Analyze Salesforce org health including Apex code quality, automation complexity, data model health, and query performance",
+  "version": "0.0.1",
+  "publisher": "salesforce-tools",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/sf-health-analyzer"
+  },
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "salesforce",
+    "apex",
+    "lwc",
+    "health",
+    "analyzer",
+    "code quality"
+  ],
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "workspaceContains:**/sfdx-project.json",
+    "onCommand:sfHealthAnalyzer.analyzeOrg",
+    "onCommand:sfHealthAnalyzer.analyzeCurrentFile",
+    "onCommand:sfHealthAnalyzer.openDashboard",
+    "onCommand:sfHealthAnalyzer.exportReport"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sfHealthAnalyzer.analyzeOrg",
+        "title": "Run Org Health Analyzer",
+        "category": "Salesforce"
+      },
+      {
+        "command": "sfHealthAnalyzer.analyzeCurrentFile",
+        "title": "Analyze Current File",
+        "category": "Salesforce"
+      },
+      {
+        "command": "sfHealthAnalyzer.openDashboard",
+        "title": "Open Health Dashboard",
+        "category": "Salesforce"
+      },
+      {
+        "command": "sfHealthAnalyzer.exportReport",
+        "title": "Export Health Report",
+        "category": "Salesforce"
+      },
+      {
+        "command": "sfHealthAnalyzer.refreshResults",
+        "title": "Refresh Results",
+        "icon": "$(refresh)",
+        "category": "Salesforce"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "sfHealthAnalyzer.results",
+          "name": "Org Health Results",
+          "when": "sfHealthAnalyzer.hasResults"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "sfHealthAnalyzer.results",
+        "contents": "No analysis results yet.\n[Run Analysis](command:sfHealthAnalyzer.analyzeOrg)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "sfHealthAnalyzer.refreshResults",
+          "when": "view == sfHealthAnalyzer.results",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "sfHealthAnalyzer.analyzeCurrentFile",
+          "when": "resourceExtname == .cls || resourceExtname == .trigger",
+          "group": "salesforce"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Salesforce Org Health Analyzer",
+      "properties": {
+        "sfHealthAnalyzer.rules.maxTriggersPerObject": {
+          "type": "number",
+          "default": 1,
+          "description": "Maximum number of triggers allowed per object"
+        },
+        "sfHealthAnalyzer.rules.maxFlowsPerObject": {
+          "type": "number",
+          "default": 3,
+          "description": "Maximum number of flows allowed per object"
+        },
+        "sfHealthAnalyzer.rules.maxTriggerLines": {
+          "type": "number",
+          "default": 200,
+          "description": "Maximum lines of code allowed in a trigger"
+        },
+        "sfHealthAnalyzer.rules.maxClassLines": {
+          "type": "number",
+          "default": 500,
+          "description": "Maximum lines of code allowed in a class"
+        },
+        "sfHealthAnalyzer.rules.maxMethodLines": {
+          "type": "number",
+          "default": 50,
+          "description": "Maximum lines of code allowed in a method"
+        },
+        "sfHealthAnalyzer.rules.maxValidationRulesPerObject": {
+          "type": "number",
+          "default": 10,
+          "description": "Maximum validation rules allowed per object"
+        },
+        "sfHealthAnalyzer.rules.maxProcessBuildersPerObject": {
+          "type": "number",
+          "default": 1,
+          "description": "Maximum Process Builders allowed per object (should be 0 - use Flows)"
+        },
+        "sfHealthAnalyzer.rules.enabled": {
+          "type": "array",
+          "default": [
+            "soql-in-loop",
+            "dml-in-loop",
+            "hardcoded-id",
+            "trigger-size",
+            "trigger-logic",
+            "missing-bulkification",
+            "non-selective-query",
+            "automation-complexity",
+            "unused-fields"
+          ],
+          "description": "List of enabled rule IDs"
+        },
+        "sfHealthAnalyzer.severity.threshold": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warning",
+            "info"
+          ],
+          "default": "warning",
+          "description": "Minimum severity level to display"
+        },
+        "sfHealthAnalyzer.scoring.weights": {
+          "type": "object",
+          "default": {
+            "codeQuality": 30,
+            "automationDesign": 25,
+            "dataModel": 20,
+            "performance": 25
+          },
+          "description": "Weights for each health score category (must sum to 100)"
+        },
+        "sfHealthAnalyzer.analysis.includeOrgMetadata": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include metadata from connected Salesforce org in analysis"
+        },
+        "sfHealthAnalyzer.analysis.largeDataVolumeThreshold": {
+          "type": "number",
+          "default": 1000000,
+          "description": "Record count threshold to flag large data volume risks"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.2.0",
+    "jsforce": "^3.6.3"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/vscode": "^1.110.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "esbuild": "^0.27.3",
+    "eslint": "^9.39.3",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.1"
+  }
+}

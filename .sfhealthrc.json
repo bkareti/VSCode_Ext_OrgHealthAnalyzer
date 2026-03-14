@@ -1,0 +1,23 @@
+{
+  "$schema": "./sfhealthrc.schema.json",
+  "rules": {
+    "no-soql-in-loop": "error",
+    "no-dml-in-loop": "error",
+    "no-hardcoded-ids": "warning",
+    "max-trigger-lines": ["warning", { "maxLines": 200 }],
+    "no-business-logic-in-trigger": "warning",
+    "separation-of-concerns": "warning",
+    "max-flows-per-object": ["error", { "maxFlows": 3 }],
+    "max-triggers-per-object": ["error", { "maxTriggers": 1 }]
+  },
+  "exclude": [
+    "**/test/**",
+    "**/*Test.cls",
+    "**/*_Test.cls"
+  ],
+  "thresholds": {
+    "minHealthScore": 70,
+    "maxCriticalIssues": 0,
+    "maxHighIssues": 5
+  }
+}
