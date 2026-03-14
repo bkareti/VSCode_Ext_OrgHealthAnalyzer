@@ -3,6 +3,8 @@
 out/**
 node_modules/**
 src/**
+.github/**
+.sfhealthrc.json
 .gitignore
 .yarnrc
 esbuild.js

@@ -2,7 +2,7 @@
  * Salesforce Service - Handles connections and API calls to Salesforce
  */
 
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as vscode from 'vscode';
 import {
@@ -13,7 +13,6 @@ import {
   ValidationRule,
   CustomField,
   EntityDefinition,
-  SalesforceQueryResult,
 } from '../types';
 import {
   SalesforceAuthError,
@@ -24,7 +23,17 @@ import {
 } from '../utils/errors';
 import { logInfo, logError, logDebug, logWarning } from '../utils/logger';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+const API_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*$/;
+
+async function runSfJson(args: string[]): Promise<unknown> {
+  const { stdout } = await execFileAsync('sf', args, { maxBuffer: 10 * 1024 * 1024 });
+  return JSON.parse(stdout);
+}
+
+function isValidApiName(value: string): boolean {
+  return API_NAME_REGEX.test(value);
+}
 
 /**
  * Salesforce Service class for interacting with Salesforce orgs
@@ -68,8 +77,18 @@ export class SalesforceService {
    * Get current org information from SF CLI
    */
   async getOrgInfo(): Promise<OrgInfo> {
-    const { stdout } = await execAsync('sf org display --json');
-    const result = JSON.parse(stdout);
+    const result = await runSfJson(['org', 'display', '--json']) as {
+      status: number;
+      message?: string;
+      result: {
+        id: string;
+        accessToken: string;
+        instanceUrl: string;
+        username: string;
+        alias?: string;
+        apiVersion?: string;
+      };
+    };
     
     if (result.status !== 0) {
       throw new SalesforceAuthError(result.message || 'Failed to get org info');
@@ -90,8 +109,12 @@ export class SalesforceService {
    */
   async listOrgs(): Promise<OrgInfo[]> {
     try {
-      const { stdout } = await execAsync('sf org list --json');
-      const result = JSON.parse(stdout);
+      const result = await runSfJson(['org', 'list', '--json']) as {
+        result?: {
+          nonScratchOrgs?: Record<string, string>[];
+          scratchOrgs?: Record<string, string>[];
+        };
+      };
       
       const orgs: OrgInfo[] = [];
       
@@ -130,13 +153,19 @@ export class SalesforceService {
   async toolingQuery<T>(query: string): Promise<T[]> {
     return withRetry(async () => {
       logDebug(`Executing Tooling API query: ${query}`);
-      
-      const escapedQuery = query.replace(/"/g, '\\"');
-      const { stdout } = await execAsync(
-        `sf data query --query "${escapedQuery}" --use-tooling-api --json`
-      );
-      
-      const result = JSON.parse(stdout);
+
+      const result = await runSfJson([
+        'data',
+        'query',
+        '--query',
+        query,
+        '--use-tooling-api',
+        '--json',
+      ]) as {
+        status: number;
+        message?: string;
+        result: { records: T[] };
+      };
       
       if (result.status !== 0) {
         throw new SalesforceQueryError(result.message || 'Query failed', query);
@@ -152,13 +181,18 @@ export class SalesforceService {
   async query<T>(query: string): Promise<T[]> {
     return withRetry(async () => {
       logDebug(`Executing SOQL query: ${query}`);
-      
-      const escapedQuery = query.replace(/"/g, '\\"');
-      const { stdout } = await execAsync(
-        `sf data query --query "${escapedQuery}" --json`
-      );
-      
-      const result = JSON.parse(stdout);
+
+      const result = await runSfJson([
+        'data',
+        'query',
+        '--query',
+        query,
+        '--json',
+      ]) as {
+        status: number;
+        message?: string;
+        result: { records: T[] };
+      };
       
       if (result.status !== 0) {
         throw new SalesforceQueryError(result.message || 'Query failed', query);
@@ -231,8 +265,14 @@ export class SalesforceService {
     let query = `SELECT QualifiedApiName, Label, IsCustomizable FROM EntityDefinition WHERE IsCustomizable = true`;
     
     if (objectNames && objectNames.length > 0) {
-      const names = objectNames.map(n => `'${n}'`).join(',');
-      query += ` AND QualifiedApiName IN (${names})`;
+      const validNames = objectNames.filter(isValidApiName);
+      if (validNames.length > 0) {
+        const names = validNames.map((name) => `'${name}'`).join(',');
+        query += ` AND QualifiedApiName IN (${names})`;
+      }
+      if (validNames.length !== objectNames.length) {
+        logWarning('Some invalid object API names were ignored in EntityDefinition query.');
+      }
     }
     
     return this.toolingQuery<EntityDefinition>(query);
@@ -243,6 +283,11 @@ export class SalesforceService {
    */
   async getRecordCount(objectName: string): Promise<number> {
     try {
+      if (!isValidApiName(objectName)) {
+        logWarning(`Invalid object API name skipped: ${objectName}`);
+        return -1;
+      }
+
       const result = await this.query<{ expr0: number }>(
         `SELECT COUNT() FROM ${objectName}`
       );
@@ -296,7 +341,7 @@ export function getSalesforceService(): SalesforceService {
  */
 export async function isSfCliInstalled(): Promise<boolean> {
   try {
-    await execAsync('sf --version');
+    await execFileAsync('sf', ['--version']);
     return true;
   } catch {
     return false;

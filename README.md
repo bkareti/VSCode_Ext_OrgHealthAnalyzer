@@ -41,7 +41,7 @@ A VS Code extension that analyzes Salesforce org health, identifying code qualit
 
 ## Requirements
 
-- **VS Code** 1.110.0 or higher
+- **VS Code** 1.100.0 or higher
 - **Salesforce CLI (sf)** installed and configured
 - **Authenticated Salesforce org** (DevHub, Sandbox, or Production)
 

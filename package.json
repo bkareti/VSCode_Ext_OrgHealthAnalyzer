@@ -5,9 +5,13 @@
   "version": "0.0.1",
   "publisher": "babukareti",
   "license": "MIT",
+  "homepage": "https://github.com/bkareti/VSCode_Ext_OrgHealthAnalyzer#readme",
+  "bugs": {
+    "url": "https://github.com/bkareti/VSCode_Ext_OrgHealthAnalyzer/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/bkareti/VSCode_Ext_OrgHealthAnalyzer"
+    "url": "https://github.com/bkareti/VSCode_Ext_OrgHealthAnalyzer.git"
   },
   "engines": {
     "vscode": "^1.100.0"
@@ -26,11 +30,7 @@
   ],
   "icon": "media/icon.png",
   "activationEvents": [
-    "workspaceContains:**/sfdx-project.json",
-    "onCommand:sfHealthAnalyzer.analyzeOrg",
-    "onCommand:sfHealthAnalyzer.analyzeCurrentFile",
-    "onCommand:sfHealthAnalyzer.openDashboard",
-    "onCommand:sfHealthAnalyzer.exportReport"
+    "workspaceContains:**/sfdx-project.json"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -58,7 +58,6 @@
       {
         "command": "sfHealthAnalyzer.refreshResults",
         "title": "Refresh Results",
-        "icon": "$(refresh)",
         "category": "Salesforce"
       }
     ],
@@ -67,6 +66,7 @@
         {
           "id": "sfHealthAnalyzer.results",
           "name": "Org Health Results",
+          "icon": "media/icon.png",
           "when": "sfHealthAnalyzer.hasResults"
         }
       ]
