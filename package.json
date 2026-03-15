@@ -2,7 +2,7 @@
   "name": "sf-health-analyzer",
   "displayName": "Salesforce Org Health Analyzer",
   "description": "Analyze Salesforce org health including Apex code quality, automation complexity, data model health, and query performance",
-  "version": "0.0.2",
+  "version": "0.0.4",
   "publisher": "babukareti",
   "license": "MIT",
   "homepage": "https://github.com/bkareti/VSCode_Ext_OrgHealthAnalyzer#readme",
