@@ -19,12 +19,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
           cache: "npm"
@@ -48,12 +48,25 @@ jobs:
           echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
           echo "Publishing version: $RELEASE_VERSION"
 
+      - name: Publish preflight checks
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${VSCE_PAT:-}" ]; then
+            echo "::error::VSCE_PAT secret is missing. Configure it in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          PUBLISHER=$(node -p "require('./package.json').publisher || ''")
+          if [ -z "$PUBLISHER" ]; then
+            echo "::error::package.json publisher is empty."
+            exit 1
+          fi
+          echo "Publisher detected: $PUBLISHER"
+
       - name: Publish to VS Code Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
-          if [ -z "$VSCE_PAT" ]; then
-            echo "VSCE_PAT secret is not set. Add it in GitHub: Settings > Secrets and variables > Actions."
-            exit 1
-          fi
-          npx @vscode/vsce publish "${{ steps.version.outputs.release_version }}" -p "$VSCE_PAT"
+          npx @vscode/vsce publish "${{ steps.version.outputs.release_version }}" --pat "$VSCE_PAT"
