@@ -4,9 +4,10 @@ on:
   push:
     branches:
       - master
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   publish:
@@ -31,28 +32,23 @@ jobs:
       - name: Build extension
         run: npm run compile
 
-      - name: Bump patch version
-        id: bump
+      - name: Compute release version
+        id: version
         shell: bash
         run: |
-          npm version patch --no-git-tag-version
-          VERSION=$(npm pkg get version | tr -d '"')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Commit version bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json
-          git commit -m "chore: bump version to v${{ steps.bump.outputs.version }} [skip ci]"
-          git push origin master
+          BASE_VERSION=$(node -p "require('./package.json').version")
+          MAJOR=$(echo "$BASE_VERSION" | cut -d. -f1)
+          MINOR=$(echo "$BASE_VERSION" | cut -d. -f2)
+          RELEASE_VERSION="${MAJOR}.${MINOR}.${GITHUB_RUN_NUMBER}"
+          echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $RELEASE_VERSION"
 
       - name: Publish to VS Code Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
           if [ -z "$VSCE_PAT" ]; then
-            echo "VSCE_PAT secret is not set."
+            echo "VSCE_PAT secret is not set. Add it in GitHub: Settings > Secrets and variables > Actions."
             exit 1
           fi
-          npx @vscode/vsce publish "${{ steps.bump.outputs.version }}" -p "$VSCE_PAT"
+          npx @vscode/vsce publish "${{ steps.version.outputs.release_version }}" -p "$VSCE_PAT"
