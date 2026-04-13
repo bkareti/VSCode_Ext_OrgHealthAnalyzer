@@ -21,7 +21,7 @@
   // Per-panel sort/page state: panelId → { sortCol, sortDir, page, pageSize }
   const issueTableState = {};
   const ISSUE_PAGE_SIZE = 10;
-  // Per-data-table page state: tableId → { page }
+  // Per-data-table page+sort state: tableId → { page, sortCol, sortDir }
   const dataTablePageState = {};
   const DATA_TABLE_PAGE_SIZE = 10;
 
@@ -175,6 +175,19 @@
         issueTableState[panel].page = parseInt(el.dataset.pg, 10);
         refreshIssueTable(panel);
       }
+    } else if (a === "dt-sort") {
+      const tid = el.dataset.table;
+      const col = parseInt(el.dataset.col, 10);
+      if (!dataTablePageState[tid]) dataTablePageState[tid] = { page: 0 };
+      const st = dataTablePageState[tid];
+      if (st.sortCol === col) {
+        st.sortDir = st.sortDir === "asc" ? "desc" : "asc";
+      } else {
+        st.sortCol = col;
+        st.sortDir = "asc";
+      }
+      st.page = 0;
+      refreshDataTable(tid);
     } else if (a === "dt-page-prev") {
       const tid = el.dataset.table;
       if (dataTablePageState[tid] && dataTablePageState[tid].page > 0) {
@@ -283,37 +296,90 @@
    * @param {string} tableId   Unique id for this table.
    * @param {string[]} headers Column headers.
    * @param {string[][]} rows  Array of row arrays (pre-escaped HTML strings).
-   * @param {object} [opts]    { pageSize, emptyMsg }
+   * @param {object} [opts]    { pageSize, emptyMsg, sortable }
    * @returns {string} HTML
    */
+
+  /**
+   * Renders a collapsible info banner for a tab.
+   * @param {string} id      Unique id suffix for the toggle.
+   * @param {string[]} items Bullet point strings (6-7 recommended).
+   * @returns {string} HTML
+   */
+  function renderTabInfo(id, items) {
+    const listHtml = items
+      .map((s) => `<li style="margin-bottom:4px">${s}</li>`)
+      .join("");
+    return `
+      <details id="tab-info-${id}" style="margin-bottom:20px;background:var(--vscode-textBlockQuote-background,rgba(128,128,128,0.1));border-left:3px solid var(--vscode-focusBorder,#007acc);border-radius:4px;padding:10px 14px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--sf-text-muted);list-style:none;display:flex;align-items:center;gap:6px">
+          <span>ℹ️</span><span>About this tab — how data is fetched &amp; filtered</span>
+          <span style="margin-left:auto;opacity:.5;font-size:11px">click to expand</span>
+        </summary>
+        <ul style="margin:10px 0 2px 0;padding-left:18px;font-size:12px;color:var(--sf-text-muted);line-height:1.7">
+          ${listHtml}
+        </ul>
+      </details>`;
+  }
+
   function renderPaginatedDataTable(tableId, headers, rows, opts) {
     opts = opts || {};
     const PAGE = opts.pageSize || DATA_TABLE_PAGE_SIZE;
     const emptyMsg = opts.emptyMsg || "No data available";
+    const sortable = opts.sortable !== false; // sortable by default
 
     if (!dataTablePageState[tableId]) dataTablePageState[tableId] = { page: 0 };
     const st = dataTablePageState[tableId];
-    const totalPages = Math.max(1, Math.ceil(rows.length / PAGE));
+
+    // Sort rows if sort state is set
+    let sortedRows = rows;
+    if (sortable && st.sortCol != null) {
+      const col = st.sortCol;
+      const dir = st.sortDir === "desc" ? -1 : 1;
+      sortedRows = rows.slice().sort((a, b) => {
+        // Strip HTML tags for comparison
+        const strip = (s) =>
+          String(s || "")
+            .replace(/<[^>]*>/g, "")
+            .trim();
+        const av = strip(a[col]);
+        const bv = strip(b[col]);
+        // Numeric comparison if both look like numbers
+        const an = parseFloat(av),
+          bn = parseFloat(bv);
+        if (!isNaN(an) && !isNaN(bn)) return (an - bn) * dir;
+        return av.localeCompare(bv) * dir;
+      });
+    }
+
+    const totalPages = Math.max(1, Math.ceil(sortedRows.length / PAGE));
     if (st.page >= totalPages) st.page = totalPages - 1;
 
     const start = st.page * PAGE;
-    const pageRows = rows.slice(start, start + PAGE);
+    const pageRows = sortedRows.slice(start, start + PAGE);
 
-    const headHtml = `<tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr>`;
+    const headHtml = `<tr>${headers
+      .map((h, i) => {
+        if (!sortable) return `<th>${h}</th>`;
+        const isSorted = st.sortCol === i;
+        const arrow = isSorted ? (st.sortDir === "asc" ? " ▲" : " ▼") : " ⇅";
+        return `<th data-action="dt-sort" data-table="${tableId}" data-col="${i}" style="cursor:pointer;user-select:none" title="Click to sort">${h}<span style="opacity:${isSorted ? 1 : 0.3};font-size:10px">${arrow}</span></th>`;
+      })
+      .join("")}</tr>`;
     const bodyHtml = pageRows.length
       ? pageRows
           .map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`)
           .join("")
       : `<tr><td colspan="${headers.length}" style="text-align:center;padding:20px;color:var(--sf-text-muted)">${emptyMsg}</td></tr>`;
 
-    const showingFrom = rows.length ? start + 1 : 0;
-    const showingTo = Math.min(start + PAGE, rows.length);
+    const showingFrom = sortedRows.length ? start + 1 : 0;
+    const showingTo = Math.min(start + PAGE, sortedRows.length);
 
     const pagHtml =
       totalPages > 1
         ? `
       <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid var(--vscode-widget-border);font-size:12px">
-        <span style="opacity:.6">${showingFrom}–${showingTo} of ${rows.length}</span>
+        <span style="opacity:.6">${showingFrom}–${showingTo} of ${sortedRows.length}</span>
         <span style="flex:1"></span>
         <button class="btn btn-ghost" style="padding:3px 10px;font-size:11px" data-action="dt-page-prev" data-table="${tableId}" ${st.page === 0 ? 'disabled style="opacity:.4;padding:3px 10px;font-size:11px"' : ""}>‹ Prev</button>
         ${Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
@@ -330,7 +396,7 @@
       </div>`
         : "";
 
-    // Store config for refresh
+    // Store config for refresh (raw unsorted rows for re-sort on click)
     dataTableRegistry[tableId] = { headers, rows, opts };
 
     return `<div class="data-table-wrap" id="dt-wrap-${tableId}">
@@ -2413,6 +2479,16 @@
     const debt = results.debtSummary;
     const s = results.scores || {};
 
+    const tabInfo = renderTabInfo("codequality", [
+      "<strong>Data source</strong>: All active Apex Classes and Apex Triggers via Tooling API (<code>ApexClass WHERE Status='Active' AND NamespacePrefix=null</code>). Managed-package classes are excluded.",
+      "<strong>Anti-pattern detection</strong> scans Apex class bodies for: missing <code>with sharing</code> / <code>without sharing</code>, SOQL/DML inside loops, bare try-catch blocks, hardcoded IDs, and God Classes (classes >500 lines).",
+      "<strong>Test coverage</strong> is read from <code>ApexCodeCoverageAggregate</code>. Classes below 75% are flagged as warnings; below 0% test presence is an error.",
+      "<strong>Technical Debt score</strong> is calculated by weighting issue counts by severity (error=10, warning=3, info=1) against total lines of Apex code analysed.",
+      "<strong>Issues are categorised</strong> as: <em>code-quality</em> (structural problems in Apex) and <em>technical-debt</em> (maintainability concerns like missing descriptions, complex nesting).",
+      "<strong>Apex Trigger rules</strong> enforce one-trigger-per-object, no DML/SOQL in trigger bodies, and no logic directly in the trigger (prefer handler classes).",
+      "<strong>Scoring</strong>: Code Quality score starts at 100 and deducts points for each issue weighted by severity and the proportion of your codebase affected.",
+    ]);
+
     const errors = allIssues.filter((i) => i.severity === "error");
     const warnings = allIssues.filter((i) => i.severity === "warning");
     const infos = allIssues.filter((i) => i.severity === "info");
@@ -2458,6 +2534,7 @@
       .slice(0, 10);
 
     return `
+      ${tabInfo}
       <!-- CTA-Style Summary -->
       <div class="mb-24">
         <div class="section-title">💻 Code Quality Summary</div>
@@ -2575,6 +2652,16 @@
       (i) => i.category === "automation-design",
     );
 
+    const tabInfo = renderTabInfo("automation", [
+      "<strong>Data source</strong>: Active Apex Triggers (Tooling API <code>ApexTrigger</code>), Active Flows (<code>Flow</code> object, falls back to <code>FlowDefinition</code>), and Validation Rules (<code>ValidationRule</code>) — all limited to non-managed-package records.",
+      "<strong>Flows</strong> include all <em>ProcessType</em> variants: Screen Flows, Record-Triggered Flows, Scheduled Flows, Platform Event Flows, and Auto-Launched Flows. Trigger object is resolved via <code>FlowVersion.TriggerObjectOrEventReference</code>.",
+      "<strong>Object Heatmap</strong> shows how many automation issues each object has, colour-coded: green=1, amber=2-3, orange=4-5, red >5.",
+      "<strong>Automation Inventory</strong> groups all automations by object, counting triggers, flows, and validation rules per object. Objects with multiple triggers per object are flagged as <em>Critical</em>.",
+      "<strong>Complexity scoring</strong>: objects with more than 8 combined automations (triggers + flows + validation rules) are considered over-automated and flagged for review.",
+      "<strong>Inactive flows</strong> are excluded — only <em>Status = Active</em> flows are shown. Deactivated flows should be cleaned up via Salesforce Setup → Flows.",
+      "<strong>Standard objects</strong> (Account, Contact, etc.) appear only if they have at least one trigger, flow, or validation rule attached.",
+    ]);
+
     // Build heatmap data from issues
     const objectMap = {};
     for (const iss of autoIssues) {
@@ -2600,6 +2687,7 @@
     );
 
     return `
+      ${tabInfo}
       <div class="mb-24">
         <div class="section-title">⚡ Automation Complexity Heatmap</div>
         <div class="heatmap-wrap">
@@ -2665,6 +2753,16 @@
     const stats = results.dataModelStats || [];
     const autoSum = results.automationSummary || {};
     const autoMap = autoSum.objectMap || {};
+
+    const tabInfo = renderTabInfo("datamodel", [
+      "<strong>Objects fetched via</strong> <code>EntityDefinition</code> (Tooling API) — all <em>IsCustomizable=true</em> objects including standard and custom.",
+      "<strong>Standard objects</strong> (e.g. Account, Contact) are shown only when they have custom fields, flows, triggers, or validation rules. All <code>__c</code> custom objects are always included.",
+      "<strong>Field counts</strong>: Std Fields = total fields − custom fields (via parallel <code>FieldDefinition COUNT GROUP BY</code> queries). Custom Fields uses <code>CustomField WHERE NamespacePrefix = null</code> to exclude managed-package fields.",
+      "<strong>Unused fields</strong> are estimated by counting custom fields on an object that have no matching reference (<code>Object.Field__c</code>) in the local workspace source code. This is a code-reference heuristic — it does not scan page layouts, reports, or formula fields.",
+      "<strong>Triggers, Flows, Validation Rules</strong> are aggregate counts from <code>ApexTrigger</code>, <code>Flow</code>, and <code>ValidationRule</code> Tooling API objects grouped by <code>EntityDefinitionId</code>.",
+      "<strong>Field Limit %</strong> = Custom Fields ÷ 800 × 100. Objects above 25% are flagged in the Governor Limit Risk table above the main matrix.",
+      "<strong>Managed-package objects</strong> are filtered out in JavaScript: custom objects with a namespace prefix pattern (<code>ns__Name__c</code>) are excluded from the results.",
+    ]);
 
     // ── Summary KPIs ──────────────────────────────────────────────────────
     const totalStdFields = stats.reduce(
@@ -2927,7 +3025,10 @@
       </div>`;
   }
 
-  /** Export the Object Health Matrix table data as CSV */
+  /** Export the Object Health Matrix table data as CSV.
+   * URL.createObjectURL is blocked in VS Code webviews — we send the CSV
+   * content to the extension host which writes it via the VS Code file API.
+   */
   function exportDataModelCsv() {
     if (!results) return;
     const stats = results.dataModelStats || [];
@@ -2973,15 +3074,11 @@
         `"${r.obj}","${r.objLabel}",${r.stdFields},${r.custFields},${r.unusedFields},${r.triggers},${r.flows},${r.validations},${r.fieldLimitPct}`,
     );
     const csv = [csvHeaders, ...csvRows].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "data-model-health.csv";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    // Send to extension host — VS Code webviews block URL.createObjectURL
+    vscode.postMessage({
+      command: "exportDataModelCsv",
+      data: { csv, fileName: "data-model-health.csv" },
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2998,6 +3095,16 @@
     const simData = (results && results.limitsSimulatorData) || [];
     const entryPoints = (results && results.entryPoints) || [];
     const recordCounts = (results && results.objectRecordCounts) || {};
+
+    const tabInfo = renderTabInfo("performance", [
+      "<strong>Data source</strong>: Apex class bodies are scanned locally for patterns like SOQL in loops, DML in loops, missing LIMIT clauses, and non-selective queries.",
+      "<strong>SOQL in Loops</strong>: Detected when a SOQL statement (<code>[SELECT ...]</code>) appears inside a <code>for</code>, <code>while</code>, or <code>do-while</code> block. Each loop iteration consumes one of your 100 SOQL query governor limit slots.",
+      "<strong>Non-selective Queries</strong>: SOQL queries without a WHERE clause on an indexed field or with a leading wildcard (<code>LIKE '%term'</code>) are flagged. These cause full table scans on large data volumes (LDV).",
+      "<strong>Governor Limits Simulator</strong>: Uses static analysis of SOQL/DML call counts per Apex entry point and projects usage at configurable record volumes (200, 1k, 5k, 50k).",
+      "<strong>Record counts</strong> are fetched via <code>COUNT()</code> SOQL on key objects to provide LDV context for each object in the simulator.",
+      "<strong>Query Plan</strong>: The EXPLAIN query plan feature calls the Tooling API <code>QueryPlan</code> resource to reveal cardinality and index usage for specific SOQL queries.",
+      "<strong>Scoring</strong>: Performance score deducts points for SOQL-in-loop (−10 each), DML-in-loop (−8 each), non-selective queries (−5 each), and queries without LIMIT (−3 each).",
+    ]);
 
     // Initialize simulator data
     SIM_DATA = simData;
@@ -3101,6 +3208,7 @@
       .sort((a, b) => b[1] - a[1]);
 
     return `
+      ${tabInfo}
       <!-- Performance Summary -->
       ${
         summaryItems.length
@@ -3367,6 +3475,16 @@
     const profSum = results.profileSummary;
     const s = results.scores || {};
 
+    const tabInfo = renderTabInfo("security", [
+      "<strong>Data source</strong>: Active User records (<code>User WHERE IsActive=true</code>), Profiles with user counts, and PermissionSet assignments — via standard SOQL (not Tooling API). Security mode must be <em>Standard</em> or <em>Advanced</em> to fetch profile/permission data.",
+      "<strong>Dormant Users</strong>: Users whose <code>LastLoginDate</code> is more than 90 days ago (or null). These are active licensed seats consuming cost with no recent activity.",
+      "<strong>Dangerous Permissions</strong>: Profiles/PermSets granting <em>ModifyAllData</em>, <em>ViewAllData</em>, <em>ManageUsers</em>, or <em>AuthorApex</em> are flagged — these bypass record-level sharing entirely.",
+      "<strong>Profile vs. Permission Set</strong>: The analyser checks how many users are on each profile and flags profiles with zero users (cleanup candidates) or profiles with excessive admin permissions.",
+      "<strong>Safe Mode</strong>: In Safe Mode, user and profile data is not fetched. Switch to Standard mode to enable Security analysis. Data is processed in-memory and never stored outside the VS Code session.",
+      "<strong>Guest User risks</strong>: If Guest User profiles exist with broad object/field access, they are flagged as critical — Guest Users bypass standard sharing rules.",
+      "<strong>Scoring</strong>: Security score deducts points for ModifyAllData grants (−15), dormant-user ratio (up to −20), missing MFA indicators (−10), and broad profile permissions.",
+    ]);
+
     const dormantPct =
       userSum && userSum.totalActiveUsers
         ? Math.round((userSum.dormantUsers / userSum.totalActiveUsers) * 100)
@@ -3401,9 +3519,10 @@
     ];
 
     return `
+      ${tabInfo}
       <!-- Summary KPIs -->
       <div class="mb-24">
-        <div class="section-title">🛡️ Security & Access Overview</div>
+        <div class="section-title">🛡️ Security &amp; Access Overview</div>
         <div class="lwc-summary-cards">
           <div class="lwc-summary-card">
             <div class="lwc-summary-num">${s.security || 0}</div>

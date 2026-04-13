@@ -226,6 +226,24 @@ export class HealthDashboardPanel {
         break;
       }
 
+      case 'exportDataModelCsv': {
+        const { csv, fileName } = message.data as { csv: string; fileName: string };
+        const defaultUri = vscode.Uri.joinPath(
+          vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(require('os').homedir()),
+          fileName || 'data-model-health.csv'
+        );
+        const uri = await vscode.window.showSaveDialog({
+          defaultUri,
+          filters: { 'CSV Files': ['csv'] },
+          title: 'Save Data Model CSV',
+        });
+        if (uri) {
+          await vscode.workspace.fs.writeFile(uri, Buffer.from(csv, 'utf8'));
+          vscode.window.showInformationMessage(`Data model exported to ${uri.fsPath}`);
+        }
+        break;
+      }
+
       case 'runCtaReview': {
         if (this.securityMode === 'safe') {
           break; // CTA review disabled in Safe mode — webview handles UI
