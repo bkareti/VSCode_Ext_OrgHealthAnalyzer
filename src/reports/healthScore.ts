@@ -10,6 +10,7 @@ import {
   Severity,
   AnalysisResult,
   AnalysisMetadata,
+  ScoringWeights,
 } from '../types';
 import { getScoringWeights } from '../utils/config';
 import { logInfo, logSection } from '../utils/logger';
@@ -49,47 +50,34 @@ export class HealthScoreCalculator {
   calculate(issues: Issue[]): HealthScores {
     logSection('Health Score Calculation');
 
-    // Group issues by category
     const issuesByCategory = this.groupByCategory(issues);
 
-    // Calculate category scores
-    const codeQualityScore = this.calculateCategoryScore(
-      'code-quality',
-      issuesByCategory.get('code-quality') || []
-    );
-    
-    const automationScore = this.calculateCategoryScore(
-      'automation-design',
-      issuesByCategory.get('automation-design') || []
-    );
-    
-    const dataModelScore = this.calculateCategoryScore(
-      'data-model',
-      issuesByCategory.get('data-model') || []
-    );
-    
-    const performanceScore = this.calculateCategoryScore(
-      'performance',
-      issuesByCategory.get('performance') || []
-    );
+    const codeQualityScore = this.calculateCategoryScore('code-quality', issuesByCategory.get('code-quality') || []);
+    const automationScore = this.calculateCategoryScore('automation-design', issuesByCategory.get('automation-design') || []);
+    const dataModelScore = this.calculateCategoryScore('data-model', issuesByCategory.get('data-model') || []);
+    const performanceScore = this.calculateCategoryScore('performance', issuesByCategory.get('performance') || []);
+    const securityScore = this.calculateCategoryScore('security', issuesByCategory.get('security') || []);
+    const testingScore = this.calculateCategoryScore('testing', issuesByCategory.get('testing') || []);
+    const integrationScore = this.calculateCategoryScore('integration', issuesByCategory.get('integration') || []);
 
-    // Calculate overall weighted score
-    const overall = this.calculateOverallScore({
+    const partial: Omit<HealthScores, 'overall'> = {
       codeQuality: codeQualityScore.score,
       automationDesign: automationScore.score,
       dataModel: dataModelScore.score,
       performance: performanceScore.score,
-    });
-
-    const scores: HealthScores = {
-      codeQuality: codeQualityScore.score,
-      automationDesign: automationScore.score,
-      dataModel: dataModelScore.score,
-      performance: performanceScore.score,
-      overall,
+      security: securityScore.score,
+      testing: testingScore.score,
+      integration: integrationScore.score,
     };
 
-    logInfo(`Health Scores: Code=${scores.codeQuality}, Automation=${scores.automationDesign}, Data=${scores.dataModel}, Performance=${scores.performance}, Overall=${scores.overall}`);
+    const overall = this.calculateOverallScore(partial);
+
+    const scores: HealthScores = { ...partial, overall };
+
+    logInfo(
+      `Scores: Code=${scores.codeQuality}, Auto=${scores.automationDesign}, Data=${scores.dataModel}, ` +
+      `Perf=${scores.performance}, Sec=${scores.security}, Test=${scores.testing}, Int=${scores.integration}, Overall=${scores.overall}`
+    );
 
     return scores;
   }
@@ -152,19 +140,21 @@ export class HealthScoreCalculator {
    * Calculate overall weighted score
    */
   private calculateOverallScore(scores: Omit<HealthScores, 'overall'>): number {
+    const w = this.weights;
     const weighted = 
-      (scores.codeQuality * this.weights.codeQuality) +
-      (scores.automationDesign * this.weights.automationDesign) +
-      (scores.dataModel * this.weights.dataModel) +
-      (scores.performance * this.weights.performance);
+      (scores.codeQuality * w.codeQuality) +
+      (scores.automationDesign * w.automationDesign) +
+      (scores.dataModel * w.dataModel) +
+      (scores.performance * w.performance) +
+      (scores.security * w.security) +
+      (scores.testing * w.testing) +
+      (scores.integration * w.integration);
     
     const totalWeight = 
-      this.weights.codeQuality +
-      this.weights.automationDesign +
-      this.weights.dataModel +
-      this.weights.performance;
+      w.codeQuality + w.automationDesign + w.dataModel + w.performance +
+      w.security + w.testing + w.integration;
     
-    return Math.round(weighted / totalWeight);
+    return Math.round(weighted / (totalWeight || 100));
   }
 
   /**
@@ -193,6 +183,19 @@ export class HealthScoreCalculator {
       'automation-design': 0,
       'data-model': 0,
       'performance': 0,
+      'security': 0,
+      'testing': 0,
+      'integration': 0,
+      'lwc-quality': 0,
+      'governor-limits': 0,
+      'technical-debt': 0,
+      'dependencies': 0,
+      'user-governance': 0,
+      'profile-security': 0,
+      'stale-metadata': 0,
+      'org-inventory': 0,
+      'aura-quality': 0,
+      'cta-review': 0,
     };
 
     const byObject: Record<string, number> = {};
@@ -202,23 +205,14 @@ export class HealthScoreCalculator {
     let infoCount = 0;
 
     for (const issue of issues) {
-      // Count by severity
       switch (issue.severity) {
-        case 'error':
-          errorCount++;
-          break;
-        case 'warning':
-          warningCount++;
-          break;
-        case 'info':
-          infoCount++;
-          break;
+        case 'error': errorCount++; break;
+        case 'warning': warningCount++; break;
+        case 'info': infoCount++; break;
       }
 
-      // Count by category
-      byCategory[issue.category]++;
+      byCategory[issue.category] = (byCategory[issue.category] || 0) + 1;
 
-      // Count by object
       if (issue.object) {
         byObject[issue.object] = (byObject[issue.object] || 0) + 1;
       }
@@ -263,22 +257,24 @@ export class HealthScoreCalculator {
   }
 
   /**
-   * Format scores for display
+   * Format scores for display in output channel
    */
   formatScores(scores: HealthScores): string {
     const lines = [
-      '╔════════════════════════════════════════╗',
-      '║      Org Architecture Health Score     ║',
-      '╠════════════════════════════════════════╣',
-      `║  Code Quality:      ${this.formatScore(scores.codeQuality)}  ║`,
-      `║  Automation Design: ${this.formatScore(scores.automationDesign)}  ║`,
-      `║  Data Model:        ${this.formatScore(scores.dataModel)}  ║`,
-      `║  Performance:       ${this.formatScore(scores.performance)}  ║`,
-      '╠════════════════════════════════════════╣',
-      `║  Overall Score:     ${this.formatScore(scores.overall)}  ║`,
-      '╚════════════════════════════════════════╝',
+      '╔══════════════════════════════════════════╗',
+      '║    Salesforce Org Architecture Health    ║',
+      '╠══════════════════════════════════════════╣',
+      `║  Code Quality:       ${this.formatScore(scores.codeQuality)}  ║`,
+      `║  Automation Design:  ${this.formatScore(scores.automationDesign)}  ║`,
+      `║  Data Model:         ${this.formatScore(scores.dataModel)}  ║`,
+      `║  Performance:        ${this.formatScore(scores.performance)}  ║`,
+      `║  Security:           ${this.formatScore(scores.security)}  ║`,
+      `║  Test Coverage:      ${this.formatScore(scores.testing)}  ║`,
+      `║  Integration:        ${this.formatScore(scores.integration)}  ║`,
+      '╠══════════════════════════════════════════╣',
+      `║  Overall Score:      ${this.formatScore(scores.overall)}  ║`,
+      '╚══════════════════════════════════════════╝',
     ];
-
     return lines.join('\n');
   }
 

@@ -96,6 +96,7 @@ export class RuleEngine {
    * Run all enabled rules against data
    */
   run<T>(ruleIds: string[], data: T, options: { filePath?: string; objectName?: string } = {}): Issue[] {
+    this.reset();
     const issues: Issue[] = [];
     const config = getRuleConfig();
 

@@ -171,7 +171,70 @@ export class ApexAnalyzer {
           { filePath: fileData.filePath, objectName: trigger.TableEnumOrId }
         );
         result.issues.push(...issues);
+
+        // Callout-in-trigger detection
+        const calloutPatterns = [
+          /\bnew\s+HttpRequest\s*\(/gi,
+          /\bnew\s+Http\s*\(\s*\)/gi,
+          /\bContinuation\s*\(/gi,
+          /@future\s*\(\s*callout\s*=\s*true\s*\)/gi,
+        ];
+        for (const pattern of calloutPatterns) {
+          if (pattern.test(trigger.Body)) {
+            result.issues.push({
+              id: `callout-in-trigger-${trigger.Name}`,
+              ruleId: 'callout-in-trigger',
+              category: 'cta-review',
+              severity: 'error',
+              message: `Callout inside Apex Trigger: Trigger "${trigger.Name}" contains HTTP callout logic. Callouts in trigger context cause mixed DML and callout errors and are an architectural anti-pattern.`,
+              file: `org://${trigger.Name}.trigger`,
+              line: 1,
+              suggestion: 'Move callout logic to a Queueable or @future(callout=true) class invoked asynchronously from the trigger.',
+            });
+            break;
+          }
+        }
+
+        // Heap-risk: unbounded date-range SOQL without QueryLocator
+        const hasQueryLocator = /Database\.getQueryLocator/i.test(trigger.Body);
+        const heapRiskPattern = /\[\s*SELECT\b[^\]]*WHERE\b[^\]]*\b(TODAY|LAST_N_DAYS|THIS_MONTH|LAST_MONTH|THIS_YEAR|LAST_N_YEARS)\b/gi;
+        if (!hasQueryLocator && heapRiskPattern.test(trigger.Body)) {
+          result.issues.push({
+            id: `heap-risk-trigger-${trigger.Name}`,
+            ruleId: 'heap-risk-unbounded-query',
+            category: 'cta-review',
+            severity: 'error',
+            message: `Heap-Risk — Unbounded Date-Range SOQL in Trigger: "${trigger.Name}" contains a SOQL query with an unbounded date literal (TODAY, LAST_N_DAYS, etc.) that may return thousands of records, risking heap limit exceptions.`,
+            file: `org://${trigger.Name}.trigger`,
+            line: 1,
+            suggestion: 'Move bulk data processing to a Batchable class. Use Database.QueryLocator or add selective WHERE clauses with explicit IDs.',
+          });
+        }
+
         result.filesAnalyzed++;
+      }
+    }
+
+    // Heap-risk detection in classes
+    for (const cls of classes) {
+      if (cls.Body) {
+        const isBatch = /implements\s+Database\.Batchable/i.test(cls.Body);
+        if (!isBatch) {
+          const hasQueryLocator = /Database\.getQueryLocator/i.test(cls.Body);
+          const heapRiskPattern = /\[\s*SELECT\b[^\]]*WHERE\b[^\]]*\b(TODAY|LAST_N_DAYS|THIS_MONTH|LAST_MONTH|THIS_YEAR|LAST_N_YEARS)\b/gi;
+          if (!hasQueryLocator && heapRiskPattern.test(cls.Body)) {
+            result.issues.push({
+              id: `heap-risk-class-${cls.Name}`,
+              ruleId: 'heap-risk-unbounded-query',
+              category: 'cta-review',
+              severity: 'warning',
+              message: `Heap-Risk — Unbounded Date-Range SOQL in Non-Batch Class: "${cls.Name}" queries with unbounded date literals outside a Batchable context. In high-volume orgs this may exceed heap limits.`,
+              file: `org://${cls.Name}.cls`,
+              line: 1,
+              suggestion: 'Refactor to use a Batchable or Queueable class. Scope queries with selective filters or paginate with LIMIT/OFFSET.',
+            });
+          }
+        }
       }
     }
 

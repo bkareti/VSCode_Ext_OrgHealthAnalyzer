@@ -28,10 +28,25 @@ interface AutomationAnalysisResult {
   totalFlows: number;
   totalProcessBuilders: number;
   totalValidationRules: number;
+  /** Count of screen flows (user-interactive) */
+  totalScreenFlows: number;
+  /** Count of scheduled flows */
+  totalScheduledFlows: number;
+  /** Count of platform-event-triggered flows */
+  totalEventFlows: number;
+  /** Full flow list with type data */
+  flowInventory: Array<{
+    name: string;
+    processType: string;
+    triggerType?: string;
+    objectApiName?: string;
+    isActive: boolean;
+  }>;
 }
 
 interface FlowMetadata extends FlowDefinition {
   TriggerObjectOrEvent?: string;
+  ObjectApiName?: string;
 }
 
 // ============================================================================
@@ -58,6 +73,10 @@ export class AutomationAnalyzer {
       totalFlows: 0,
       totalProcessBuilders: 0,
       totalValidationRules: 0,
+      totalScreenFlows: 0,
+      totalScheduledFlows: 0,
+      totalEventFlows: 0,
+      flowInventory: [],
     };
 
     try {
@@ -72,6 +91,31 @@ export class AutomationAnalyzer {
       result.totalFlows = flows.filter(f => f.ProcessType === 'AutoLaunchedFlow' || f.ProcessType === 'RecordTriggeredFlow').length;
       result.totalProcessBuilders = flows.filter(f => f.ProcessType === 'Workflow').length;
       result.totalValidationRules = validationRules.length;
+      result.totalScreenFlows = flows.filter(f => f.ProcessType === 'Flow').length;
+      result.totalScheduledFlows = flows.filter(f => f.TriggerType === 'Scheduled').length;
+      result.totalEventFlows = flows.filter(f => f.TriggerType === 'PlatformEvent').length;
+
+      // Build flow inventory
+      result.flowInventory = flows.map(f => ({
+        name: f.DeveloperName,
+        processType: f.ProcessType || 'Unknown',
+        triggerType: f.TriggerType,
+        objectApiName: f.ObjectApiName,
+        isActive: !!f.ActiveVersionId,
+      }));
+
+      // Issue: Process Builders found (deprecated)
+      if (result.totalProcessBuilders > 0) {
+        result.issues.push({
+          id: 'automation-process-builder-found',
+          ruleId: 'process-builder-deprecated',
+          severity: 'warning',
+          category: 'automation-design',
+          message: `${result.totalProcessBuilders} Process Builder(s) detected — Salesforce has announced retirement in Winter '26`,
+          description: 'Process Builders are deprecated. Migrate to Record-Triggered Flows before the retirement deadline.',
+          suggestion: 'Use Salesforce\'s "Migrate to Flow" tool in Setup to convert Process Builders automatically.',
+        });
+      }
 
       logInfo(`Found ${result.totalTriggers} triggers, ${result.totalFlows} flows, ${result.totalProcessBuilders} process builders, ${result.totalValidationRules} validation rules`);
 
@@ -114,6 +158,10 @@ export class AutomationAnalyzer {
       totalFlows: 0,
       totalProcessBuilders: 0,
       totalValidationRules: 0,
+      totalScreenFlows: 0,
+      totalScheduledFlows: 0,
+      totalEventFlows: 0,
+      flowInventory: [],
     };
 
     try {
@@ -217,7 +265,7 @@ export class AutomationAnalyzer {
   }
 
   /**
-   * Group automation by object
+   * Group automation by object using resolved API names
    */
   private groupByObject(
     triggers: ApexTrigger[],
@@ -226,7 +274,7 @@ export class AutomationAnalyzer {
   ): ObjectAutomationSummary[] {
     const objectMap = new Map<string, ObjectAutomationSummary>();
 
-    // Process triggers
+    // Process triggers – TableEnumOrId is the sObject API name for non-managed triggers
     for (const trigger of triggers) {
       const objectName = trigger.TableEnumOrId;
       const summary = this.getOrCreateSummary(objectMap, objectName);
@@ -234,26 +282,32 @@ export class AutomationAnalyzer {
       summary.totalAutomations++;
     }
 
-    // Process flows
+    // Process flows – use ObjectApiName resolved from FlowVersion.TriggerObjectOrEventReference
     for (const flow of flows) {
-      // Try to determine the object from flow metadata
-      const objectName = flow.TriggerObjectOrEvent || flow.TriggerObjectOrEventId || 'Unknown';
+      const objectName = flow.ObjectApiName || flow.TriggerObjectOrEvent || null;
       
-      if (objectName !== 'Unknown') {
-        const summary = this.getOrCreateSummary(objectMap, objectName);
-        
-        if (flow.ProcessType === 'Workflow') {
-          summary.processBuilders++;
-        } else {
-          summary.flows++;
-        }
-        summary.totalAutomations++;
+      if (!objectName || objectName === 'Unknown') {
+        // Screen flows and non-record-triggered flows have no object; skip for object grouping
+        continue;
       }
+      
+      const summary = this.getOrCreateSummary(objectMap, objectName);
+      
+      if (flow.ProcessType === 'Workflow') {
+        summary.processBuilders++;
+      } else {
+        summary.flows++;
+      }
+      summary.totalAutomations++;
     }
 
-    // Process validation rules
+    // Process validation rules – use joined EntityDefinition.QualifiedApiName
     for (const rule of validationRules) {
-      const objectName = rule.EntityDefinitionId;
+      // The Tooling API returns EntityDefinition.QualifiedApiName as a nested object
+      const entityDef = (rule as unknown as {
+        EntityDefinition?: { QualifiedApiName?: string }
+      }).EntityDefinition;
+      const objectName = entityDef?.QualifiedApiName || rule.EntityDefinitionId;
       const summary = this.getOrCreateSummary(objectMap, objectName);
       summary.validationRules++;
     }
@@ -264,7 +318,9 @@ export class AutomationAnalyzer {
       summary.risks = this.calculateRisks(summary, config);
     }
 
-    return Array.from(objectMap.values());
+    return Array.from(objectMap.values()).sort(
+      (a, b) => b.totalAutomations - a.totalAutomations
+    );
   }
 
   /**

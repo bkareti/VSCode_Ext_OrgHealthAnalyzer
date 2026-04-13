@@ -456,6 +456,19 @@ export class ReportGenerator {
       'automation-design': 'Automation Design',
       'data-model': 'Data Model',
       'performance': 'Performance',
+      'security': 'Security',
+      'testing': 'Testing',
+      'integration': 'Integration',
+      'lwc-quality': 'LWC Quality',
+      'governor-limits': 'Governor Limits',
+      'technical-debt': 'Technical Debt',
+      'dependencies': 'Dependencies',
+      'user-governance': 'User Governance',
+      'profile-security': 'Profile Security',
+      'stale-metadata': 'Stale Metadata',
+      'org-inventory': 'Org Inventory',
+      'aura-quality': 'Aura Quality',
+      'cta-review': 'CTA Review',
     };
     return names[category] || category;
   }
@@ -487,6 +500,137 @@ export class ReportGenerator {
     return lines.join('\n');
   }
 
+  // ── SARIF 2.1.0 Export ──────────────────────────────────────────────────────
+
+  /**
+   * Generate a SARIF 2.1.0 report compatible with GitHub Code Scanning.
+   * https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html
+   */
+  generateSarifReport(result: AnalysisResult): string {
+    // Build a de-duplicated rule registry
+    const ruleMap = new Map<string, {
+      id: string; name: string; shortDescription: string;
+      helpText: string; level: string;
+    }>();
+
+    for (const issue of result.issues) {
+      if (!ruleMap.has(issue.ruleId)) {
+        ruleMap.set(issue.ruleId, {
+          id:               issue.ruleId,
+          name:             this.ruleIdToName(issue.ruleId),
+          shortDescription: issue.message,
+          helpText:         issue.description || issue.message,
+          level:            this.toSarifLevel(issue.severity),
+        });
+      }
+    }
+
+    const rules = Array.from(ruleMap.values()).map(r => ({
+      id:   r.id,
+      name: r.name,
+      shortDescription: { text: r.shortDescription },
+      helpUri: 'https://github.com/bkareti/VSCode_Ext_OrgHealthAnalyzer',
+      properties: { tags: ['salesforce'] },
+    }));
+
+    const results = result.issues.map((issue, idx) => {
+      const sarifResult: Record<string, unknown> = {
+        ruleId:  issue.ruleId,
+        level:   this.toSarifLevel(issue.severity),
+        message: { text: issue.message },
+        properties: {
+          category:   issue.category,
+          suggestion: issue.suggestion || '',
+        },
+      };
+
+      // Physical location (file-based issues)
+      const filePath = issue.file && !issue.file.startsWith('org://')
+        ? issue.file
+        : null;
+
+      if (filePath) {
+        sarifResult['locations'] = [{
+          physicalLocation: {
+            artifactLocation: {
+              uri:       filePath.replace(/\\/g, '/'),
+              uriBaseId: '%SRCROOT%',
+            },
+            region: {
+              startLine:   issue.line   || 1,
+              startColumn: issue.column || 1,
+              endLine:     issue.endLine   || issue.line   || 1,
+              endColumn:   issue.endColumn || issue.column || 80,
+            },
+          },
+        }];
+      } else if (issue.object) {
+        // Logical location for org-metadata issues
+        sarifResult['locations'] = [{
+          logicalLocations: [{
+            name:              issue.object,
+            kind:              'module',
+            fullyQualifiedName: issue.object,
+          }],
+        }];
+      }
+
+      // Attach fix suggestion if present
+      if (issue.suggestion) {
+        sarifResult['fixes'] = [{
+          description: { text: issue.suggestion },
+        }];
+      }
+
+      void idx; // suppress unused var
+      return sarifResult;
+    });
+
+    const sarif = {
+      $schema:  'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json',
+      version:  '2.1.0',
+      runs: [{
+        tool: {
+          driver: {
+            name:           'Salesforce Architecture Intelligence Platform',
+            version:        '1.3.0',
+            informationUri: 'https://github.com/bkareti/VSCode_Ext_OrgHealthAnalyzer',
+            rules,
+          },
+        },
+        invocations: [{
+          executionSuccessful: true,
+          endTimeUtc: new Date(result.timestamp).toISOString(),
+        }],
+        results,
+        properties: {
+          orgUsername:      result.metadata.orgUsername,
+          orgAlias:         result.metadata.orgAlias,
+          overallScore:     result.scores.overall,
+          analyzedClasses:  result.metadata.analyzedClasses,
+          analyzedTriggers: result.metadata.analyzedTriggers,
+        },
+      }],
+    };
+
+    return JSON.stringify(sarif, null, 2);
+  }
+
+  private ruleIdToName(ruleId: string): string {
+    return ruleId
+      .split('-')
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+      .join('');
+  }
+
+  private toSarifLevel(severity: string): string {
+    switch (severity) {
+      case 'error':   return 'error';
+      case 'warning': return 'warning';
+      default:        return 'note';
+    }
+  }
+
   /**
    * Format file path for display
    */
@@ -495,6 +639,238 @@ export class ReportGenerator {
     const parts = filePath.split('/');
     const relevantParts = parts.slice(-3); // Last 3 parts
     return relevantParts.join('/');
+  }
+
+  /**
+   * Generate Architect Report — executive HTML with radar chart, sprint plan, and dependency hotspots
+   */
+  generateArchitectReport(result: AnalysisResult): string {
+    const s = result.scores;
+    const meta = result.metadata;
+    const grade = healthScoreCalculator.getGrade(s.overall);
+    const ts = result.timestamp.toLocaleString();
+
+    /* Inline SVG radar chart — 7 axes */
+    const axes = [
+      { key: 'codeQuality',      label: 'Code',  angle: 0 },
+      { key: 'automationDesign', label: 'Auto',  angle: 1 },
+      { key: 'dataModel',        label: 'Data',  angle: 2 },
+      { key: 'performance',      label: 'Perf',  angle: 3 },
+      { key: 'security',         label: 'Sec',   angle: 4 },
+      { key: 'testing',          label: 'Test',  angle: 5 },
+      { key: 'integration',      label: 'Int',   angle: 6 },
+    ];
+    const N = axes.length;
+    const CX = 160; const CY = 160; const R = 120;
+
+    const ptFn = (axIdx: number, val: number): [number, number] => {
+      const angle = (axIdx / N) * 2 * Math.PI - Math.PI / 2;
+      const r = (val / 100) * R;
+      return [CX + r * Math.cos(angle), CY + r * Math.sin(angle)];
+    };
+
+    const rings = [20, 40, 60, 80, 100].map(lv => {
+      const pts = axes.map((_, i) => ptFn(i, lv).join(',')).join(' ');
+      return `<polygon points="${pts}" fill="none" stroke="#e2e8f0" stroke-width="1"/>`;
+    }).join('');
+
+    const axLines = axes.map((ax, i) => {
+      const [x, y] = ptFn(i, 100);
+      return `<line x1="${CX}" y1="${CY}" x2="${x}" y2="${y}" stroke="#cbd5e1" stroke-width="1"/>`;
+    }).join('');
+
+    const scoreMap = s as unknown as Record<string, number>;
+    const dataPoints = axes.map((ax, i) => ptFn(i, scoreMap[ax.key] || 0));
+    const polyPts = dataPoints.map(p => p.join(',')).join(' ');
+    const axLabels = axes.map((ax, i) => {
+      const [x, y] = ptFn(i, 135);
+      return `<text x="${x}" y="${y}" text-anchor="middle" dominant-baseline="middle" font-size="11" fill="#475569">${ax.label}</text>`;
+    }).join('');
+
+    const radarSvg = `<svg viewBox="0 0 320 320" style="width:260px;height:260px">
+      ${rings}${axLines}
+      <polygon points="${polyPts}" fill="rgba(59,130,246,0.18)" stroke="#3b82f6" stroke-width="2"/>
+      ${dataPoints.map(([x, y]) => `<circle cx="${x}" cy="${y}" r="4" fill="#3b82f6"/>`).join('')}
+      ${axLabels}
+      <text x="${CX}" y="${CY}" text-anchor="middle" dominant-baseline="middle" font-size="20" font-weight="700" fill="#1e3a5f">${s.overall}</text>
+    </svg>`;
+
+    /* Score colour helper */
+    const col = (v: number) => v >= 90 ? '#16a34a' : v >= 80 ? '#65a30d' : v >= 70 ? '#ca8a04' : v >= 60 ? '#ea580c' : '#dc2626';
+
+    /* Category table rows */
+    const catRows = [
+      { label: 'Code Quality',     key: 'codeQuality',      weight: 25 },
+      { label: 'Automation',       key: 'automationDesign', weight: 20 },
+      { label: 'Data Model',       key: 'dataModel',        weight: 15 },
+      { label: 'Performance',      key: 'performance',      weight: 20 },
+      { label: 'Security',         key: 'security',         weight: 10 },
+      { label: 'Testing',          key: 'testing',          weight: 5  },
+      { label: 'Integration',      key: 'integration',      weight: 5  },
+      { label: 'Gov Limits',       key: 'governorLimits',   weight: 0  },
+      { label: 'LWC Quality',      key: 'lwcQuality',       weight: 0  },
+      { label: 'Technical Debt',   key: 'technicalDebt',    weight: 0  },
+    ].filter(c => scoreMap[c.key] !== undefined);
+
+    const catHtml = catRows.map(c => {
+      const v = scoreMap[c.key] || 0;
+      return `<tr>
+        <td style="padding:6px 12px;border-bottom:1px solid #e2e8f0">${this.escapeHtml(c.label)}</td>
+        <td style="padding:6px 12px;border-bottom:1px solid #e2e8f0;color:${col(v)};font-weight:700;font-size:16px">${v}</td>
+        <td style="padding:6px 12px;border-bottom:1px solid #e2e8f0">
+          <div style="width:100px;height:8px;background:#e2e8f0;border-radius:4px;overflow:hidden">
+            <div style="width:${v}%;height:100%;background:${col(v)};border-radius:4px"></div>
+          </div>
+        </td>
+        ${c.weight ? `<td style="padding:6px 12px;border-bottom:1px solid #e2e8f0;color:#94a3b8;font-size:11px">${c.weight}%</td>` : '<td style="padding:6px 12px;border-bottom:1px solid #e2e8f0;color:#94a3b8;font-size:11px">—</td>'}
+      </tr>`;
+    }).join('');
+
+    /* Top critical issues */
+    const topErrors = result.issues.filter(i => i.severity === 'error').slice(0, 10);
+    const errorRows = topErrors.map(i =>
+      `<tr>
+        <td style="padding:6px 12px;border-bottom:1px solid #e2e8f0;font-size:12px">${this.escapeHtml(this.formatCategory(i.category))}</td>
+        <td style="padding:6px 12px;border-bottom:1px solid #e2e8f0;font-size:12px">${this.escapeHtml(i.message)}</td>
+        <td style="padding:6px 12px;border-bottom:1px solid #e2e8f0;font-size:11px;color:#64748b">${this.escapeHtml(i.file ? i.file.split('/').slice(-1)[0] : i.object || '—')}</td>
+      </tr>`
+    ).join('');
+
+    /* Debt sprint table */
+    let sprintHtml = '';
+    if (result.debtSummary) {
+      const d = result.debtSummary;
+      sprintHtml = `
+        <h2 style="margin:32px 0 12px;font-size:16px;color:#1e3a5f">🗓️ Technical Debt Sprint Plan</h2>
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead>
+            <tr style="background:#f1f5f9">
+              <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #e2e8f0">Metric</th>
+              <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td style="padding:6px 12px;border-bottom:1px solid #e2e8f0">Total Estimated Hours</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #e2e8f0;font-weight:700">${d.totalHours}h</td></tr>
+            <tr><td style="padding:6px 12px;border-bottom:1px solid #e2e8f0">Sprint Cycles Required</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #e2e8f0;font-weight:700">${d.sprintCycles}</td></tr>
+            <tr><td style="padding:6px 12px;border-bottom:1px solid #e2e8f0">Quick Wins (&lt;1h each)</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #e2e8f0">${(d.quickWins || []).length}</td></tr>
+            <tr><td style="padding:6px 12px;border-bottom:1px solid #e2e8f0">Medium Items (1–4h)</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #e2e8f0">${(d.mediumItems || []).length}</td></tr>
+            <tr><td style="padding:6px 12px;border-bottom:1px solid #e2e8f0">Large Items (&gt;4h)</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #e2e8f0">${(d.largeItems || []).length}</td></tr>
+          </tbody>
+        </table>`;
+    }
+
+    /* Dependency hotspots */
+    let depHtml = '';
+    if (result.dependencyGraph && result.dependencyGraph.nodes.length) {
+      const topNodes = [...result.dependencyGraph.nodes]
+        .sort((a, b) => ((b.fanIn || 0) + (b.fanOut || 0)) - ((a.fanIn || 0) + (a.fanOut || 0)))
+        .slice(0, 5);
+      depHtml = `
+        <h2 style="margin:32px 0 12px;font-size:16px;color:#1e3a5f">🕸️ Dependency Hotspots</h2>
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead>
+            <tr style="background:#f1f5f9">
+              <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #e2e8f0">Component</th>
+              <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #e2e8f0">Type</th>
+              <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Fan-In</th>
+              <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #e2e8f0">Fan-Out</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${topNodes.map(n => `<tr>
+              <td style="padding:6px 12px;border-bottom:1px solid #e2e8f0;font-weight:600">${this.escapeHtml(n.label || n.id)}</td>
+              <td style="padding:6px 12px;border-bottom:1px solid #e2e8f0;color:#64748b">${this.escapeHtml(n.type)}</td>
+              <td style="padding:6px 12px;text-align:right;border-bottom:1px solid #e2e8f0">${n.fanIn || 0}</td>
+              <td style="padding:6px 12px;text-align:right;border-bottom:1px solid #e2e8f0">${n.fanOut || 0}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OrgPulse — Architect Report</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1e293b; max-width: 900px; margin: 0 auto; padding: 40px 24px; background: #f8fafc; }
+    h1   { font-size: 24px; color: #1e3a5f; margin: 0 0 4px; }
+    h2   { font-size: 16px; color: #1e3a5f; margin: 32px 0 12px; }
+    table { border-collapse: collapse; width: 100%; }
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 24px; margin-bottom: 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+    .score-badge { display: inline-block; font-size: 48px; font-weight: 800; color: ${col(s.overall)}; }
+    .grade-badge { display: inline-block; font-size: 20px; font-weight: 700; margin-left: 12px; color: ${col(s.overall)}; vertical-align: bottom; margin-bottom: 8px; }
+    .meta { font-size: 12px; color: #94a3b8; margin-top: 4px; }
+    @media print { body { background: white; } .card { box-shadow: none; } }
+  </style>
+</head>
+<body>
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+    <span style="font-size:28px">💓</span>
+    <div>
+      <h1>OrgPulse — Architect Report</h1>
+      <div class="meta">Generated: ${this.escapeHtml(ts)} · Org: ${this.escapeHtml(meta.orgUsername || meta.orgAlias || 'Unknown')} · ${result.summary.totalIssues} issues</div>
+    </div>
+  </div>
+
+  <!-- Executive Summary -->
+  <div class="card" style="display:flex;gap:32px;align-items:flex-start;flex-wrap:wrap">
+    <div>
+      <div class="score-badge">${s.overall}</div>
+      <div class="grade-badge">${grade.grade} — ${grade.description}</div>
+      <div class="meta">${result.summary.errorCount} errors · ${result.summary.warningCount} warnings · ${result.summary.infoCount} info</div>
+      <div class="meta" style="margin-top:8px">
+        ${meta.analyzedClasses || 0} Apex Classes ·
+        ${meta.analyzedTriggers || 0} Triggers ·
+        ${meta.analyzedFlows || 0} Flows ·
+        ${meta.analyzedObjects || 0} Objects
+        ${meta.analyzedLwcComponents ? ` · ${meta.analyzedLwcComponents} LWC` : ''}
+      </div>
+    </div>
+    <div>${radarSvg}</div>
+  </div>
+
+  <!-- Health Scores Table -->
+  <div class="card">
+    <h2 style="margin-top:0">📊 Health Scores</h2>
+    <table>
+      <thead>
+        <tr style="background:#f1f5f9">
+          <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #e2e8f0">Category</th>
+          <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #e2e8f0">Score</th>
+          <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #e2e8f0">Bar</th>
+          <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #e2e8f0">Weight</th>
+        </tr>
+      </thead>
+      <tbody>${catHtml}</tbody>
+    </table>
+  </div>
+
+  <!-- Top Critical Issues -->
+  ${topErrors.length ? `
+  <div class="card">
+    <h2 style="margin-top:0">🚨 Top Critical Issues</h2>
+    <table>
+      <thead>
+        <tr style="background:#f1f5f9">
+          <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #e2e8f0">Category</th>
+          <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #e2e8f0">Issue</th>
+          <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #e2e8f0">Location</th>
+        </tr>
+      </thead>
+      <tbody>${errorRows}</tbody>
+    </table>
+  </div>` : ''}
+
+  ${sprintHtml ? `<div class="card">${sprintHtml}</div>` : ''}
+  ${depHtml    ? `<div class="card">${depHtml}</div>`    : ''}
+
+  <div style="text-align:center;color:#94a3b8;font-size:11px;margin-top:32px">
+    Generated by OrgPulse v1.3.0 · ${this.escapeHtml(ts)}
+  </div>
+</body>
+</html>`;
   }
 
   /**

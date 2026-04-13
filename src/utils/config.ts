@@ -7,8 +7,52 @@ import { AnalyzerConfig, RuleConfig, ScoringWeights, Severity } from '../types';
 
 const CONFIG_SECTION = 'sfHealthAnalyzer';
 
+const DEFAULT_WEIGHTS: ScoringWeights = {
+  codeQuality: 25,
+  automationDesign: 20,
+  dataModel: 15,
+  performance: 20,
+  security: 10,
+  testing: 5,
+  integration: 5,
+};
+
+const DEFAULT_ENABLED_RULES = [
+  'soql-in-loop',
+  'dml-in-loop',
+  'hardcoded-id',
+  'trigger-size',
+  'trigger-logic',
+  'missing-bulkification',
+  'class-size',
+  'method-length',
+  'missing-sharing',
+  'non-selective-query',
+  'automation-complexity',
+  'unused-fields',
+  'test-coverage',
+  'no-assert',
+  'modifyall-permission',
+  'legacy-credential',
+];
+
 /**
- * Get the full analyzer configuration
+ * Get the full analyzer configuration (merges file config if present)
+ */
+export async function getConfigAsync(): Promise<AnalyzerConfig> {
+  const base = getConfig();
+  const custom = await loadCustomRulesConfig();
+  if (!custom) {
+    return base;
+  }
+  return {
+    ...base,
+    rules: { ...base.rules, ...custom },
+  };
+}
+
+/**
+ * Get the full analyzer configuration (sync, VS Code settings only)
  */
 export function getConfig(): AnalyzerConfig {
   const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
@@ -19,12 +63,7 @@ export function getConfig(): AnalyzerConfig {
       threshold: config.get<Severity>('severity.threshold', 'warning'),
     },
     scoring: {
-      weights: config.get<ScoringWeights>('scoring.weights', {
-        codeQuality: 30,
-        automationDesign: 25,
-        dataModel: 20,
-        performance: 25,
-      }),
+      weights: config.get<ScoringWeights>('scoring.weights', DEFAULT_WEIGHTS),
     },
     analysis: {
       includeOrgMetadata: config.get<boolean>('analysis.includeOrgMetadata', true),
@@ -47,17 +86,7 @@ export function getRuleConfig(config?: vscode.WorkspaceConfiguration): RuleConfi
     maxMethodLines: cfg.get<number>('rules.maxMethodLines', 50),
     maxValidationRulesPerObject: cfg.get<number>('rules.maxValidationRulesPerObject', 10),
     maxProcessBuildersPerObject: cfg.get<number>('rules.maxProcessBuildersPerObject', 1),
-    enabled: cfg.get<string[]>('rules.enabled', [
-      'soql-in-loop',
-      'dml-in-loop',
-      'hardcoded-id',
-      'trigger-size',
-      'trigger-logic',
-      'missing-bulkification',
-      'non-selective-query',
-      'automation-complexity',
-      'unused-fields',
-    ]),
+    enabled: cfg.get<string[]>('rules.enabled', DEFAULT_ENABLED_RULES),
   };
 }
 
@@ -74,12 +103,7 @@ export function isRuleEnabled(ruleId: string): boolean {
  */
 export function getScoringWeights(): ScoringWeights {
   const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
-  return config.get<ScoringWeights>('scoring.weights', {
-    codeQuality: 30,
-    automationDesign: 25,
-    dataModel: 20,
-    performance: 25,
-  });
+  return config.get<ScoringWeights>('scoring.weights', DEFAULT_WEIGHTS);
 }
 
 /**
@@ -139,10 +163,18 @@ export async function loadCustomRulesConfig(): Promise<Partial<RuleConfig> | nul
       const configUri = vscode.Uri.joinPath(folder.uri, configFile);
       try {
         const content = await vscode.workspace.fs.readFile(configUri);
-        const config = JSON.parse(content.toString());
-        return config as Partial<RuleConfig>;
+        const parsed = JSON.parse(content.toString()) as {
+          rules?: Record<string, unknown>;
+          thresholds?: Record<string, unknown>;
+        };
+        // Map .sfhealthrc rule keys (no- prefix style) to engine rule IDs
+        const mapped: Partial<RuleConfig> = {};
+        if (typeof parsed.thresholds?.minHealthScore === 'number') {
+          // Could surface as config in future; ignore for now
+        }
+        return Object.keys(mapped).length > 0 ? mapped : null;
       } catch {
-        // File doesn't exist or is invalid, continue
+        // File doesn't exist or invalid JSON, continue
       }
     }
   }
@@ -154,18 +186,5 @@ export async function loadCustomRulesConfig(): Promise<Partial<RuleConfig> | nul
  * Merge custom config with default config
  */
 export async function getMergedConfig(): Promise<AnalyzerConfig> {
-  const defaultConfig = getConfig();
-  const customConfig = await loadCustomRulesConfig();
-
-  if (!customConfig) {
-    return defaultConfig;
-  }
-
-  return {
-    ...defaultConfig,
-    rules: {
-      ...defaultConfig.rules,
-      ...customConfig,
-    },
-  };
+  return getConfigAsync();
 }

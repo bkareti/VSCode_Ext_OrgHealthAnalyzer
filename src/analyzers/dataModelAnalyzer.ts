@@ -3,11 +3,14 @@
  */
 
 import * as vscode from 'vscode';
-import { Issue, CustomField } from '../types';
+import { Issue, CustomField, FieldDefinitionInfo } from '../types';
 import { SalesforceService, getSalesforceService } from '../services/salesforceService';
 import { ruleEngine } from '../rules/engine';
 import { logInfo, logSection, logWarning, logDebug } from '../utils/logger';
 import { AnalysisError, getErrorMessage } from '../utils/errors';
+
+// Governor limit: maximum custom fields per SObject
+const CUSTOM_FIELD_LIMIT = 800;
 
 // ============================================================================
 // Types
@@ -26,6 +29,25 @@ interface DataModelAnalysisResult {
   fieldsAnalyzed: number;
   unusedFields: FieldUsageData[];
   objectsAnalyzed: number;
+  /** Per-object field statistics */
+  objectFieldStats: Array<{
+    objectName: string;
+    objectLabel: string;
+    totalFields: number;
+    standardFields: number;
+    customFields: number;
+    unusedFields: number;
+    fieldsWithoutDescription: number;
+    fieldTypes: Record<string, number>;
+    relationshipCount: number;
+    lookupFields: number;
+    masterDetailFields: number;
+    fieldLimitPct: number;
+    /** Validation rules on this object (from EntityDefinition aggregate) */
+    validationRules: number;
+    /** Apex triggers on this object (from EntityDefinition aggregate) */
+    triggers: number;
+  }>;
 }
 
 // ============================================================================
@@ -43,60 +65,136 @@ export class DataModelAnalyzer {
   }
 
   /**
-   * Analyze data model health
+   * Analyze data model health using object-first aggregate queries.
+   * Follows the OrgCheck pattern: EntityDefinition → parallel COUNT aggregates.
+   * This ensures ALL customizable objects (standard + custom) are discovered,
+   * not just objects that happen to have custom fields.
    */
   async analyze(): Promise<DataModelAnalysisResult> {
     logSection('Data Model Health Analysis');
-    
+
     const result: DataModelAnalysisResult = {
       issues: [],
       fieldsAnalyzed: 0,
       unusedFields: [],
       objectsAnalyzed: 0,
+      objectFieldStats: [],
     };
 
     try {
-      // First, scan workspace for field references
+      // Step 1: scan workspace for custom field references (Object.Field__c)
       await this.scanWorkspaceForFieldReferences();
-      
-      // Get custom fields from org
-      const customFields = await this.fetchCustomFields();
-      logInfo(`Found ${customFields.length} custom fields`);
 
-      // Group fields by object
-      const fieldsByObject = this.groupFieldsByObject(customFields);
-      result.objectsAnalyzed = fieldsByObject.size;
+      // Step 2: object-first aggregate fetch (all 7 queries run in parallel)
+      const objectCounts = await this.salesforceService.getObjectDataModelCounts();
+      logInfo(`Found ${objectCounts.length} customizable objects via EntityDefinition`);
 
-      // Analyze each field
-      for (const [objectName, fields] of fieldsByObject) {
-        for (const field of fields) {
-          result.fieldsAnalyzed++;
-          
-          const fieldKey = `${objectName}.${field.DeveloperName}__c`;
-          const references = this.fieldReferences.get(fieldKey.toLowerCase()) || [];
-          
-          const fieldData: FieldUsageData = {
-            fieldName: `${field.DeveloperName}__c`,
-            objectName,
-            isReferenced: references.length > 0,
-            referencedIn: references,
-          };
+      result.objectsAnalyzed = objectCounts.length;
 
-          if (!fieldData.isReferenced) {
-            result.unusedFields.push(fieldData);
-            
-            // Run unused field rule
-            const issues = ruleEngine.run(
-              ['unused-fields'],
-              fieldData,
-              { objectName }
-            );
-            result.issues.push(...issues);
+      for (const obj of objectCounts) {
+        result.fieldsAnalyzed += obj.customFields;
+
+        // Step 3: count unused custom fields via workspace references
+        // We can't enumerate individual field names from aggregate results,
+        // so we check the fieldReferences map for any keys matching "objectName.*__c"
+        const objPrefix = obj.objectName.toLowerCase() + '.';
+        let unusedCount = 0;
+        for (const [key] of this.fieldReferences) {
+          if (key.startsWith(objPrefix) && key.endsWith('__c')) {
+            // field IS referenced → not unused
           }
+        }
+        // Count unreferenced: iterate all keys we know are custom fields for this object
+        // from the workspace references map (reverse: fields in the map are referenced)
+        // We approximate: unusedCount = customFields that have NO workspace reference
+        // Since we don't have individual field names from aggregate, we use the
+        // referenced field count to estimate unreferenced ones
+        const referencedForObj = Array.from(this.fieldReferences.keys()).filter(
+          k => k.startsWith(objPrefix) && k.endsWith('__c')
+        ).length;
+        unusedCount = Math.max(0, obj.customFields - referencedForObj);
+
+        // Step 4: build objectFieldStats entry
+        result.objectFieldStats.push({
+          objectName: obj.objectName,
+          objectLabel: obj.objectLabel,
+          totalFields: obj.totalFields,
+          standardFields: obj.standardFields,
+          customFields: obj.customFields,
+          unusedFields: unusedCount,
+          fieldsWithoutDescription: 0, // not available from aggregate queries
+          fieldTypes: {},               // not available from aggregate queries
+          relationshipCount: obj.lookupFields + obj.masterDetailFields,
+          lookupFields: obj.lookupFields,
+          masterDetailFields: obj.masterDetailFields,
+          fieldLimitPct: obj.fieldLimitPct,
+          validationRules: obj.validationRules,
+          triggers: obj.triggers,
+        });
+
+        // Step 5: emit data-model issues
+        // Isolated custom objects (no relationships)
+        if (obj.lookupFields + obj.masterDetailFields === 0 && obj.objectName.endsWith('__c')) {
+          result.issues.push({
+            id: `dm-isolated-${obj.objectName}`,
+            ruleId: 'isolated-custom-object',
+            severity: 'info',
+            category: 'data-model',
+            message: `${obj.objectName} has no lookup or master-detail relationships`,
+            description: 'Custom objects without relationships may indicate orphaned data or an incomplete data model.',
+            suggestion: 'Verify whether this object should be related to other entities via Lookup or Master-Detail.',
+            object: obj.objectName,
+          });
+        }
+
+        // Over-coupled objects (>15 relationships)
+        if (obj.lookupFields + obj.masterDetailFields > 15) {
+          result.issues.push({
+            id: `dm-overcoupled-${obj.objectName}`,
+            ruleId: 'over-coupled-object',
+            severity: 'warning',
+            category: 'data-model',
+            message: `${obj.objectName} has ${obj.lookupFields + obj.masterDetailFields} relationships — potential coupling risk`,
+            description: 'Objects with many relationships increase SOQL complexity and trigger/flow execution scope.',
+            suggestion: 'Consider junction objects or polymorphic lookups to reduce direct coupling.',
+            object: obj.objectName,
+          });
+        }
+
+        // Field sprawl — approaching governor limit
+        if (obj.customFields > 400) {
+          const severity = obj.customFields > 600 ? 'error' : 'warning';
+          result.issues.push({
+            id: `dm-field-limit-${obj.objectName}`,
+            ruleId: 'field-limit-risk',
+            severity,
+            category: 'data-model',
+            message: `${obj.objectName} has ${obj.customFields} custom fields (${obj.fieldLimitPct}% of the 800-field limit)`,
+            description: 'Objects approaching the 800-custom-field governor limit risk deployment failures when adding new fields.',
+            suggestion: 'Audit unused fields for removal. Move rarely-used fields to a related extension object.',
+            object: obj.objectName,
+          });
         }
       }
 
-      logInfo(`Analyzed ${result.fieldsAnalyzed} fields, found ${result.unusedFields.length} potentially unused`);
+      // Filter: keep ALL custom objects; standard objects only if they have
+      // custom fields, triggers, or validation rules (flows are merged in the dashboard).
+      result.objectFieldStats = result.objectFieldStats.filter(o =>
+        o.objectName.endsWith('__c') ||
+        o.customFields > 0 ||
+        o.triggers > 0 ||
+        o.validationRules > 0
+      );
+
+      // Sort: custom objects first, then by custom field count descending
+      result.objectFieldStats.sort((a, b) => {
+        const aCustom = a.objectName.endsWith('__c') ? 1 : 0;
+        const bCustom = b.objectName.endsWith('__c') ? 1 : 0;
+        if (aCustom !== bCustom) { return bCustom - aCustom; }
+        return b.customFields - a.customFields;
+      });
+
+      logInfo(`Data model: ${result.objectsAnalyzed} objects, ${result.fieldsAnalyzed} custom fields analysed`);
     } catch (error) {
       throw new AnalysisError(
         `Failed to analyze data model: ${getErrorMessage(error)}`,
@@ -119,6 +217,7 @@ export class DataModelAnalyzer {
       fieldsAnalyzed: 0,
       unusedFields: [],
       objectsAnalyzed: 0,
+      objectFieldStats: [],
     };
 
     try {
@@ -257,13 +356,14 @@ export class DataModelAnalyzer {
   }
 
   /**
-   * Group fields by object
+   * Group fields by object using resolved EntityDefinition QualifiedApiName
    */
   private groupFieldsByObject(fields: CustomField[]): Map<string, CustomField[]> {
     const grouped = new Map<string, CustomField[]>();
     
     for (const field of fields) {
-      const objectName = field.TableEnumOrId;
+      // Prefer the joined EntityDefinition.QualifiedApiName over the raw TableEnumOrId
+      const objectName = (field.EntityDefinition?.QualifiedApiName) || field.TableEnumOrId;
       
       if (!grouped.has(objectName)) {
         grouped.set(objectName, []);

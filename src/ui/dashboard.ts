@@ -1,11 +1,17 @@
 /**
- * Health Dashboard - Webview panel for displaying analysis results
+ * Health Dashboard — Webview panel (Phase 3)
+ *
+ * The TypeScript layer is a thin shell:
+ *   - Creates / reveals the WebviewPanel
+ *   - Injects CSP-compliant nonces and media-file URIs
+ *   - Proxies messages between the extension and the webview
+ *   - All UI logic lives in media/dashboard.js + media/dashboard.css
  */
 
 import * as vscode from 'vscode';
 import { AnalysisResult, Issue, DashboardMessage } from '../types';
 import { reportGenerator } from '../reports/reportGenerator';
-import { healthScoreCalculator } from '../reports/healthScore';
+import { getAIService, AIExplanation } from '../services/aiService';
 
 // ============================================================================
 // Dashboard Panel
@@ -19,46 +25,37 @@ export class HealthDashboardPanel {
   private readonly extensionUri: vscode.Uri;
   private disposables: vscode.Disposable[] = [];
   private currentResult: AnalysisResult | null = null;
+  private securityMode: 'safe' | 'standard' | 'advanced' | null = null;
 
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
-    this.panel = panel;
+    this.panel        = panel;
     this.extensionUri = extensionUri;
 
-    // Set initial content
-    this.panel.webview.html = this.getHtmlContent();
+    this.panel.webview.html = this.buildHtml();
 
-    // Handle messages from webview
     this.panel.webview.onDidReceiveMessage(
-      async (message: DashboardMessage) => {
-        await this.handleMessage(message);
-      },
+      async (message: DashboardMessage) => this.handleMessage(message),
       null,
       this.disposables
     );
 
-    // Handle panel disposal
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
   }
 
-  /**
-   * Create or show the dashboard panel
-   */
-  public static createOrShow(extensionUri: vscode.Uri): HealthDashboardPanel {
-    const column = vscode.window.activeTextEditor
-      ? vscode.window.activeTextEditor.viewColumn
-      : undefined;
+  // ── Public API ─────────────────────────────────────────────────────────────
 
-    // If we already have a panel, show it
+  public static createOrShow(extensionUri: vscode.Uri): HealthDashboardPanel {
+    const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
+
     if (HealthDashboardPanel.currentPanel) {
       HealthDashboardPanel.currentPanel.panel.reveal(column);
       return HealthDashboardPanel.currentPanel;
     }
 
-    // Create a new panel
     const panel = vscode.window.createWebviewPanel(
       HealthDashboardPanel.viewType,
-      'Salesforce Org Health',
-      column || vscode.ViewColumn.One,
+      'OrgPulse',  
+      column,
       {
         enableScripts: true,
         retainContextWhenHidden: true,
@@ -73,86 +70,208 @@ export class HealthDashboardPanel {
     return HealthDashboardPanel.currentPanel;
   }
 
-  /**
-   * Update the dashboard with analysis results
-   */
+  /** Push full analysis results into the webview. */
   public updateResults(result: AnalysisResult): void {
     this.currentResult = result;
-    this.panel.webview.postMessage({
-      type: 'analysisResults',
-      data: result,
-    });
+    this.postMessage({ type: 'analysisResults', data: result });
   }
 
-  /**
-   * Show loading state
-   */
-  public showLoading(): void {
-    this.panel.webview.postMessage({
-      type: 'loading',
-      data: true,
-    });
+  /** Show the spinner / progress screen. */
+  public showLoading(step?: number): void {
+    this.postMessage({ type: 'loading', data: true, step: step ?? null });
   }
 
-  /**
-   * Handle messages from webview
-   */
+  /** Push an AI explanation into the currently-open drill-down panel. */
+  public postAIExplanation(explanation: AIExplanation): void {
+    this.postMessage({ type: 'aiExplanation', data: explanation });
+  }
+
+  /** Generic message post helper (used by extension commands). */
+  public postMessage(msg: Record<string, unknown>): void {
+    this.panel.webview.postMessage(msg);
+  }
+
+  /** Get the current security mode chosen by the user */
+  public getSecurityMode(): 'safe' | 'standard' | 'advanced' | null {
+    return this.securityMode;
+  }
+
+  // ── Private: message routing ───────────────────────────────────────────
+
   private async handleMessage(message: DashboardMessage): Promise<void> {
     switch (message.command) {
-      case 'runAnalysis':
-        await vscode.commands.executeCommand('sfHealthAnalyzer.analyzeOrg');
+      case 'setSecurityMode': {
+        const mode = (message.data as { mode: string })?.mode;
+        if (mode === 'safe' || mode === 'standard' || mode === 'advanced') {
+          this.securityMode = mode;
+        }
         break;
+      }
 
-      case 'openFile':
-        const data = message.data as { file: string; line?: number };
-        await this.openFile(data.file, data.line);
+      case 'runAnalysis': {
+        // force=true means Re-Analyse (bypass cache), force=false/undefined means normal run
+        const force = (message.data as { force?: boolean })?.force ?? false;
+        if (force) {
+          await vscode.commands.executeCommand('sfHealthAnalyzer.refreshResults');
+        } else {
+          await vscode.commands.executeCommand('sfHealthAnalyzer.analyzeOrg');
+        }
         break;
+      }
 
-      case 'exportReport':
-        const format = (message.data as { format: string }).format;
-        await this.exportReport(format);
+      case 'openFile': {
+        const { file, line } = message.data as { file: string; line?: number };
+        await this.openFile(file, line);
         break;
+      }
+
+      case 'exportReport': {
+        const { format, fileName } = message.data as { format: string; fileName?: string };
+        await this.exportReport(format, fileName);
+        break;
+      }
+
+      case 'generateAiPdfReport': {
+        if (this.securityMode === 'safe') {
+          this.panel.webview.postMessage({ type: 'aiPdfSummary', data: null });
+          break;
+        }
+        const ai = getAIService();
+        if (!ai) {
+          // No AI — just tell the webview to proceed without summary
+          this.panel.webview.postMessage({ type: 'aiPdfSummary', data: null });
+          break;
+        }
+        try {
+          // Build a category-aware prompt from the sanitised results the webview sent us
+          const reportData = (message.data as { results: unknown }).results as Record<string, unknown>;
+          const scores   = reportData?.scores  as Record<string, number> | undefined;
+          const summary  = reportData?.summary as Record<string, number> | undefined;
+          const inv      = reportData?.orgInventory as Record<string, number> | undefined;
+          const byCategory = reportData?.issuesByCategory as Record<string, Array<{ message: string; ruleId: string; object: string }>> | undefined;
+
+          function catScore(key: string) { return Math.round((scores?.[key] ?? 0) as number); }
+          function catIssues(cat: string) {
+            return (byCategory?.[cat] || []).slice(0, 3).map((i: { message: string }) => `  • ${i.message}`).join('\n') || '  • No critical issues';
+          }
+
+          const prompt = [
+            'You are a Salesforce Certified Technical Architect (CTA) preparing a 200-word executive summary for a leadership health report.',
+            'Write in professional, non-technical language suitable for a CTO, COO, or VP of Technology.',
+            'Structure your response as: 1) A 2-sentence overall health statement, 2) The 2-3 highest-risk domains with a specific finding each, 3) A 2-sentence investment recommendation.',
+            '',
+            `Org: ${(reportData?.metadata as Record<string, unknown>)?.orgAlias ?? (reportData?.metadata as Record<string, unknown>)?.orgUsername ?? 'Salesforce Org'}`,
+            `Overall Health Score: ${catScore('overall')}/100`,
+            `Total Issues: ${summary?.totalIssues ?? 0} (${summary?.errorCount ?? 0} critical, ${summary?.warningCount ?? 0} warnings)`,
+            '',
+            'Domain Scores:',
+            `  Code Quality: ${catScore('codeQuality')}/100`,
+            `  Automation Design: ${catScore('automationDesign')}/100`,
+            `  Data Model: ${catScore('dataModel')}/100`,
+            `  Performance: ${catScore('performance')}/100`,
+            `  Security: ${catScore('security')}/100`,
+            `  Test Coverage: ${catScore('testing')}/100`,
+            '',
+            'Sample Critical Issues by Domain:',
+            `Code Quality:\n${catIssues('code-quality')}`,
+            `Automation Design:\n${catIssues('automation-design')}`,
+            `Performance:\n${catIssues('performance')}`,
+            `Security:\n${catIssues('security')}`,
+            '',
+            inv ? `Org Size: ${inv.apexClassCount ?? 0} Apex classes, ${inv.flowCount ?? 0} flows, ${inv.customObjectCount ?? 0} custom objects, ${inv.customFieldCount ?? 0} custom fields.` : '',
+          ].filter(Boolean).join('\n');
+
+          const fakeIssue = {
+            id: 'pdf-summary', ruleId: 'exec-summary', severity: 'info' as const,
+            category: 'code-quality' as const,
+            message: prompt, description: prompt,
+          };
+          const explanation = await ai.explainIssue(fakeIssue);
+          const text = typeof explanation === 'string' ? explanation : (explanation as AIExplanation)?.summary ?? '';
+          this.panel.webview.postMessage({ type: 'aiPdfSummary', data: text });
+        } catch {
+          this.panel.webview.postMessage({ type: 'aiPdfSummary', data: null });
+        }
+        break;
+      }
+
+      case 'explainIssue': {
+        if (this.securityMode === 'safe') {
+          this.panel.webview.postMessage({
+            type: 'aiExplanation',
+            data: null,
+            error: 'AI explanations are disabled in Safe Mode. Switch to Standard or Advanced mode to enable AI-powered insights.',
+          });
+          break;
+        }
+        const issue = message.data as Issue;
+        const ai = getAIService();
+        if (!ai) {
+          this.panel.webview.postMessage({
+            type: 'aiExplanation',
+            data: null,
+            error: 'AI service not available. Ensure GitHub Copilot is installed and enabled.',
+          });
+          break;
+        }
+        // Post a loading state first so the UI can show a spinner
+        this.panel.webview.postMessage({ type: 'aiExplanationLoading', data: true });
+        try {
+          const explanation = await ai.explainIssue(issue);
+          this.panel.webview.postMessage({ type: 'aiExplanation', data: explanation });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.panel.webview.postMessage({ type: 'aiExplanation', data: null, error: msg });
+        }
+        break;
+      }
+
+      case 'runCtaReview': {
+        if (this.securityMode === 'safe') {
+          break; // CTA review disabled in Safe mode — webview handles UI
+        }
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runCtaReview', message.model ?? 'auto');
+        break;
+      }
+
+      case 'cancelAnalysis': {
+        await vscode.commands.executeCommand('sfHealthAnalyzer.cancelAnalysis');
+        break;
+      }
 
       case 'refresh':
-        await vscode.commands.executeCommand('sfHealthAnalyzer.analyzeOrg');
+        await vscode.commands.executeCommand('sfHealthAnalyzer.refreshResults');
         break;
     }
   }
 
-  /**
-   * Open a file at a specific line
-   */
+  // ── Private: open file ─────────────────────────────────────────────────────
+
   private async openFile(filePath: string, line?: number): Promise<void> {
+    if (!filePath) { return; }
+    if (filePath.startsWith('org://')) {
+      vscode.window.showInformationMessage(
+        `This resource lives in the org: ${filePath.replace('org://', '')}`
+      );
+      return;
+    }
     try {
-      // Handle org:// paths
-      if (filePath.startsWith('org://')) {
-        vscode.window.showInformationMessage(
-          `This file is from the org: ${filePath.replace('org://', '')}`
-        );
-        return;
-      }
-
-      const uri = vscode.Uri.file(filePath);
+      const uri      = vscode.Uri.file(filePath);
       const document = await vscode.workspace.openTextDocument(uri);
-      const editor = await vscode.window.showTextDocument(document);
-
+      const editor   = await vscode.window.showTextDocument(document);
       if (line) {
-        const position = new vscode.Position(line - 1, 0);
-        editor.selection = new vscode.Selection(position, position);
-        editor.revealRange(
-          new vscode.Range(position, position),
-          vscode.TextEditorRevealType.InCenter
-        );
+        const pos = new vscode.Position(line - 1, 0);
+        editor.selection = new vscode.Selection(pos, pos);
+        editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
       }
-    } catch (error) {
+    } catch {
       vscode.window.showErrorMessage(`Could not open file: ${filePath}`);
     }
   }
 
-  /**
-   * Export the current report
-   */
-  private async exportReport(format: string): Promise<void> {
+  // ── Private: export report ─────────────────────────────────────────────────
+
+  private async exportReport(format: string, fileName?: string): Promise<void> {
     if (!this.currentResult) {
       vscode.window.showWarningMessage('No analysis results to export');
       return;
@@ -164,21 +283,24 @@ export class HealthDashboardPanel {
 
     switch (format) {
       case 'html':
-        content = reportGenerator.generateHtmlReport(this.currentResult);
-        defaultName = 'org-health-report.html';
-        filters = { 'HTML': ['html'] };
+        content     = reportGenerator.generateHtmlReport(this.currentResult);
+        defaultName = (fileName ? fileName : 'org-health-report') + '.html';
+        filters     = { HTML: ['html'] };
         break;
       case 'json':
-        content = reportGenerator.generateJsonReport(this.currentResult);
-        defaultName = 'org-health-report.json';
-        filters = { 'JSON': ['json'] };
+        content     = reportGenerator.generateJsonReport(this.currentResult);
+        defaultName = (fileName ? fileName : 'org-health-report') + '.json';
+        filters     = { JSON: ['json'] };
         break;
-      case 'text':
+      case 'sarif':
+        content     = reportGenerator.generateSarifReport(this.currentResult);
+        defaultName = (fileName ? fileName : 'org-health-report') + '.sarif';
+        filters     = { SARIF: ['sarif', 'json'] };
+        break;
       default:
-        content = reportGenerator.generateTextReport(this.currentResult);
-        defaultName = 'org-health-report.txt';
-        filters = { 'Text': ['txt'] };
-        break;
+        content     = reportGenerator.generateTextReport(this.currentResult);
+        defaultName = (fileName ? fileName : 'org-health-report') + '.txt';
+        filters     = { Text: ['txt'] };
     }
 
     const uri = await vscode.window.showSaveDialog({
@@ -192,613 +314,78 @@ export class HealthDashboardPanel {
     }
   }
 
-  /**
-   * Get HTML content for the webview
-   */
-  private getHtmlContent(): string {
-    const nonce = this.getNonce();
+  // ── Private: HTML shell ────────────────────────────────────────────────────
+
+  private buildHtml(): string {
+    const webview = this.panel.webview;
+    const nonce   = this.getNonce();
+
+    const cssUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.css')
+    );
+    const jsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.js')
+    );
+    const iconUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.png')
+    );
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
-  <title>Salesforce Org Health</title>
-  <style>
-    :root {
-      --vscode-font-family: var(--vscode-editor-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif);
-      --bg-primary: var(--vscode-editor-background);
-      --bg-secondary: var(--vscode-sideBar-background);
-      --text-primary: var(--vscode-editor-foreground);
-      --text-secondary: var(--vscode-descriptionForeground);
-      --accent: var(--vscode-textLink-foreground);
-      --error: var(--vscode-errorForeground, #f14c4c);
-      --warning: var(--vscode-editorWarning-foreground, #cca700);
-      --info: var(--vscode-editorInfo-foreground, #3794ff);
-      --button-bg: var(--vscode-button-background);
-      --button-fg: var(--vscode-button-foreground);
-      --button-hover: var(--vscode-button-hoverBackground);
-      --input-bg: var(--vscode-input-background);
-      --input-border: var(--vscode-input-border);
-      --border: var(--vscode-panel-border);
-    }
-    
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    
-    body {
-      font-family: var(--vscode-font-family);
-      background: var(--bg-primary);
-      color: var(--text-primary);
-      padding: 20px;
-      line-height: 1.5;
-    }
-    
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 24px;
-      padding-bottom: 16px;
-      border-bottom: 1px solid var(--border);
-    }
-    
-    .header h1 {
-      font-size: 24px;
-      font-weight: 600;
-    }
-    
-    .header-actions {
-      display: flex;
-      gap: 8px;
-    }
-    
-    button {
-      background: var(--button-bg);
-      color: var(--button-fg);
-      border: none;
-      padding: 8px 16px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 13px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    
-    button:hover {
-      background: var(--button-hover);
-    }
-    
-    button.secondary {
-      background: transparent;
-      border: 1px solid var(--border);
-      color: var(--text-primary);
-    }
-    
-    .loading {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: 300px;
-      gap: 16px;
-    }
-    
-    .spinner {
-      width: 40px;
-      height: 40px;
-      border: 3px solid var(--border);
-      border-top-color: var(--accent);
-      border-radius: 50%;
-      animation: spin 1s linear infinite;
-    }
-    
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-    
-    .empty-state {
-      text-align: center;
-      padding: 60px 20px;
-      color: var(--text-secondary);
-    }
-    
-    .empty-state h2 {
-      margin-bottom: 12px;
-      color: var(--text-primary);
-    }
-    
-    .empty-state button {
-      margin-top: 20px;
-    }
-    
-    .scores-section {
-      margin-bottom: 32px;
-    }
-    
-    .scores-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 16px;
-    }
-    
-    .score-card {
-      background: var(--bg-secondary);
-      border-radius: 8px;
-      padding: 20px;
-      text-align: center;
-    }
-    
-    .score-card.overall {
-      grid-column: span 2;
-    }
-    
-    .score-value {
-      font-size: 36px;
-      font-weight: 700;
-      margin-bottom: 4px;
-    }
-    
-    .score-label {
-      font-size: 13px;
-      color: var(--text-secondary);
-    }
-    
-    .score-grade {
-      font-size: 14px;
-      margin-top: 8px;
-      font-weight: 500;
-    }
-    
-    .summary-section {
-      margin-bottom: 32px;
-    }
-    
-    .summary-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 16px;
-    }
-    
-    .summary-card {
-      background: var(--bg-secondary);
-      border-radius: 8px;
-      padding: 16px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    
-    .summary-icon {
-      font-size: 24px;
-    }
-    
-    .summary-content {
-      flex: 1;
-    }
-    
-    .summary-value {
-      font-size: 24px;
-      font-weight: 600;
-    }
-    
-    .summary-label {
-      font-size: 12px;
-      color: var(--text-secondary);
-      text-transform: uppercase;
-    }
-    
-    h2 {
-      font-size: 18px;
-      font-weight: 600;
-      margin-bottom: 16px;
-      color: var(--accent);
-    }
-    
-    .issues-section {
-      margin-bottom: 32px;
-    }
-    
-    .issues-filters {
-      display: flex;
-      gap: 12px;
-      margin-bottom: 16px;
-    }
-    
-    .issues-filters select {
-      background: var(--input-bg);
-      border: 1px solid var(--input-border);
-      color: var(--text-primary);
-      padding: 6px 12px;
-      border-radius: 4px;
-      font-size: 13px;
-    }
-    
-    .issues-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    
-    .issue-item {
-      background: var(--bg-secondary);
-      border-radius: 8px;
-      padding: 12px 16px;
-      border-left: 4px solid;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-    
-    .issue-item:hover {
-      background: var(--vscode-list-hoverBackground);
-    }
-    
-    .issue-item.error { border-color: var(--error); }
-    .issue-item.warning { border-color: var(--warning); }
-    .issue-item.info { border-color: var(--info); }
-    
-    .issue-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 4px;
-    }
-    
-    .issue-severity {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      padding: 2px 8px;
-      border-radius: 4px;
-    }
-    
-    .issue-severity.error { background: var(--error); color: white; }
-    .issue-severity.warning { background: var(--warning); color: black; }
-    .issue-severity.info { background: var(--info); color: white; }
-    
-    .issue-location {
-      font-size: 12px;
-      color: var(--text-secondary);
-    }
-    
-    .issue-message {
-      font-weight: 500;
-      margin-bottom: 4px;
-    }
-    
-    .issue-description {
-      font-size: 13px;
-      color: var(--text-secondary);
-    }
-    
-    .issue-suggestion {
-      font-size: 12px;
-      margin-top: 8px;
-      padding: 8px;
-      background: rgba(55, 148, 255, 0.1);
-      border-radius: 4px;
-    }
-    
-    .category-badge {
-      font-size: 11px;
-      padding: 2px 6px;
-      border-radius: 4px;
-      background: var(--vscode-badge-background);
-      color: var(--vscode-badge-foreground);
-    }
-    
-    .no-issues {
-      text-align: center;
-      padding: 40px;
-      color: var(--text-secondary);
-    }
-    
-    .color-excellent { color: #22c55e; }
-    .color-good { color: #84cc16; }
-    .color-fair { color: #eab308; }
-    .color-poor { color: #f97316; }
-    .color-critical { color: #ef4444; }
-  </style>
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'none';
+             style-src ${webview.cspSource} 'unsafe-inline';
+             script-src 'nonce-${nonce}';
+             img-src ${webview.cspSource} data:;">
+  <title>OrgPulse — Salesforce Architecture Health</title>
+  <link rel="stylesheet" href="${cssUri}">
 </head>
 <body>
-  <div id="app">
-    <div class="header">
-      <h1>🏥 Salesforce Org Health</h1>
-      <div class="header-actions">
-        <button onclick="exportReport('html')" class="secondary">📄 Export HTML</button>
-        <button onclick="exportReport('json')" class="secondary">📋 Export JSON</button>
-        <button onclick="runAnalysis()">🔍 Run Analysis</button>
-      </div>
+  <div id="app"></div>
+  <div class="drill-down-overlay" id="drill-overlay"></div>
+  <aside class="drill-down-panel" id="drill-panel">
+    <div class="ddp-header">
+      <span class="ddp-title" id="ddp-title">Issue Detail</span>
+      <button class="btn btn-icon" data-action="close-drill" title="Close">&#x2715;</button>
     </div>
-    
-    <div id="content">
-      <div class="empty-state">
-        <h2>No Analysis Results</h2>
-        <p>Run an analysis to see your org's health score and issues.</p>
-        <button onclick="runAnalysis()">🔍 Run Analysis</button>
-      </div>
-    </div>
-  </div>
-  
-  <script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
-    
-    let currentResults = null;
-    let filters = { category: 'all', severity: 'all' };
-    
-    // Handle messages from extension
-    window.addEventListener('message', event => {
-      const message = event.data;
-      
-      switch (message.type) {
-        case 'analysisResults':
-          currentResults = message.data;
-          renderResults(message.data);
-          break;
-        case 'loading':
-          if (message.data) {
-            showLoading();
-          }
-          break;
-      }
-    });
-    
-    function showLoading() {
-      document.getElementById('content').innerHTML = \`
-        <div class="loading">
-          <div class="spinner"></div>
-          <p>Analyzing your Salesforce org...</p>
-        </div>
-      \`;
-    }
-    
-    function renderResults(results) {
-      const content = document.getElementById('content');
-      
-      if (!results || results.issues.length === 0) {
-        content.innerHTML = \`
-          <div class="scores-section">
-            \${renderScores(results.scores)}
-          </div>
-          <div class="no-issues">
-            <h2>🎉 Great job!</h2>
-            <p>No issues found in your org.</p>
-          </div>
-        \`;
-        return;
-      }
-      
-      content.innerHTML = \`
-        <div class="scores-section">
-          <h2>Health Scores</h2>
-          \${renderScores(results.scores)}
-        </div>
-        
-        <div class="summary-section">
-          <h2>Summary</h2>
-          \${renderSummary(results.summary)}
-        </div>
-        
-        <div class="issues-section">
-          <h2>Issues (\${results.issues.length})</h2>
-          \${renderFilters()}
-          <div id="issues-list" class="issues-list">
-            \${renderIssues(results.issues)}
-          </div>
-        </div>
-      \`;
-    }
-    
-    function renderScores(scores) {
-      return \`
-        <div class="scores-grid">
-          <div class="score-card overall">
-            <div class="score-value \${getScoreColorClass(scores.overall)}">\${scores.overall}</div>
-            <div class="score-label">Overall Score</div>
-            <div class="score-grade">\${getGrade(scores.overall)}</div>
-          </div>
-          <div class="score-card">
-            <div class="score-value \${getScoreColorClass(scores.codeQuality)}">\${scores.codeQuality}</div>
-            <div class="score-label">Code Quality</div>
-          </div>
-          <div class="score-card">
-            <div class="score-value \${getScoreColorClass(scores.automationDesign)}">\${scores.automationDesign}</div>
-            <div class="score-label">Automation Design</div>
-          </div>
-          <div class="score-card">
-            <div class="score-value \${getScoreColorClass(scores.dataModel)}">\${scores.dataModel}</div>
-            <div class="score-label">Data Model</div>
-          </div>
-          <div class="score-card">
-            <div class="score-value \${getScoreColorClass(scores.performance)}">\${scores.performance}</div>
-            <div class="score-label">Performance</div>
-          </div>
-        </div>
-      \`;
-    }
-    
-    function renderSummary(summary) {
-      return \`
-        <div class="summary-grid">
-          <div class="summary-card">
-            <span class="summary-icon">❌</span>
-            <div class="summary-content">
-              <div class="summary-value">\${summary.errorCount}</div>
-              <div class="summary-label">Errors</div>
-            </div>
-          </div>
-          <div class="summary-card">
-            <span class="summary-icon">⚠️</span>
-            <div class="summary-content">
-              <div class="summary-value">\${summary.warningCount}</div>
-              <div class="summary-label">Warnings</div>
-            </div>
-          </div>
-          <div class="summary-card">
-            <span class="summary-icon">ℹ️</span>
-            <div class="summary-content">
-              <div class="summary-value">\${summary.infoCount}</div>
-              <div class="summary-label">Info</div>
-            </div>
-          </div>
-        </div>
-      \`;
-    }
-    
-    function renderFilters() {
-      return \`
-        <div class="issues-filters">
-          <select id="category-filter" onchange="applyFilters()">
-            <option value="all">All Categories</option>
-            <option value="code-quality">Code Quality</option>
-            <option value="automation-design">Automation Design</option>
-            <option value="data-model">Data Model</option>
-            <option value="performance">Performance</option>
-          </select>
-          <select id="severity-filter" onchange="applyFilters()">
-            <option value="all">All Severities</option>
-            <option value="error">Errors</option>
-            <option value="warning">Warnings</option>
-            <option value="info">Info</option>
-          </select>
-        </div>
-      \`;
-    }
-    
-    function renderIssues(issues) {
-      if (issues.length === 0) {
-        return '<div class="no-issues">No issues match the current filters.</div>';
-      }
-      
-      return issues.map(issue => \`
-        <div class="issue-item \${issue.severity}" onclick="openFile('\${escapeHtml(issue.file || '')}', \${issue.line || 0})">
-          <div class="issue-header">
-            <span class="issue-severity \${issue.severity}">\${issue.severity}</span>
-            <span class="category-badge">\${formatCategory(issue.category)}</span>
-          </div>
-          <div class="issue-message">\${escapeHtml(issue.message)}</div>
-          \${issue.file ? \`<div class="issue-location">📁 \${formatPath(issue.file)}\${issue.line ? ':' + issue.line : ''}</div>\` : ''}
-          \${issue.description ? \`<div class="issue-description">\${escapeHtml(issue.description)}</div>\` : ''}
-          \${issue.suggestion ? \`<div class="issue-suggestion">💡 \${escapeHtml(issue.suggestion)}</div>\` : ''}
-        </div>
-      \`).join('');
-    }
-    
-    function applyFilters() {
-      const categoryFilter = document.getElementById('category-filter').value;
-      const severityFilter = document.getElementById('severity-filter').value;
-      
-      filters = { category: categoryFilter, severity: severityFilter };
-      
-      if (currentResults) {
-        let filtered = currentResults.issues;
-        
-        if (categoryFilter !== 'all') {
-          filtered = filtered.filter(i => i.category === categoryFilter);
-        }
-        
-        if (severityFilter !== 'all') {
-          filtered = filtered.filter(i => i.severity === severityFilter);
-        }
-        
-        document.getElementById('issues-list').innerHTML = renderIssues(filtered);
-      }
-    }
-    
-    function getScoreColorClass(score) {
-      if (score >= 90) return 'color-excellent';
-      if (score >= 80) return 'color-good';
-      if (score >= 70) return 'color-fair';
-      if (score >= 60) return 'color-poor';
-      return 'color-critical';
-    }
-    
-    function getGrade(score) {
-      if (score >= 90) return 'A - Excellent';
-      if (score >= 80) return 'B - Good';
-      if (score >= 70) return 'C - Fair';
-      if (score >= 60) return 'D - Needs Improvement';
-      return 'F - Critical';
-    }
-    
-    function formatCategory(category) {
-      const names = {
-        'code-quality': 'Code Quality',
-        'automation-design': 'Automation',
-        'data-model': 'Data Model',
-        'performance': 'Performance'
-      };
-      return names[category] || category;
-    }
-    
-    function formatPath(path) {
-      const parts = path.split('/');
-      return parts.slice(-2).join('/');
-    }
-    
-    function escapeHtml(text) {
-      if (!text) return '';
-      const div = document.createElement('div');
-      div.textContent = text;
-      return div.innerHTML;
-    }
-    
-    function runAnalysis() {
-      showLoading();
-      vscode.postMessage({ command: 'runAnalysis' });
-    }
-    
-    function openFile(file, line) {
-      if (file) {
-        vscode.postMessage({ command: 'openFile', data: { file, line } });
-      }
-    }
-    
-    function exportReport(format) {
-      vscode.postMessage({ command: 'exportReport', data: { format } });
-    }
-  </script>
+    <div class="ddp-body" id="ddp-body"></div>
+    <div class="ddp-footer" id="ddp-footer"></div>
+  </aside>
+  <script nonce="${nonce}">window.ORGPULSE_ICON_URI = "${iconUri}";</script>
+  <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
 </html>`;
   }
 
-  /**
-   * Generate a nonce for CSP
-   */
+  // ── Private: nonce ─────────────────────────────────────────────────────────
+
   private getNonce(): string {
-    let text = '';
-    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let nonce   = '';
     for (let i = 0; i < 32; i++) {
-      text += possible.charAt(Math.floor(Math.random() * possible.length));
+      nonce += chars.charAt(Math.floor(Math.random() * chars.length));
     }
-    return text;
+    return nonce;
   }
 
-  /**
-   * Dispose the panel
-   */
+  // ── Dispose ────────────────────────────────────────────────────────────────
+
   public dispose(): void {
     HealthDashboardPanel.currentPanel = undefined;
-
     this.panel.dispose();
-
     while (this.disposables.length) {
-      const disposable = this.disposables.pop();
-      if (disposable) {
-        disposable.dispose();
-      }
+      this.disposables.pop()?.dispose();
     }
   }
 }
 
-/**
- * Get or create the dashboard panel
- */
+// ============================================================================
+// Singleton helper
+// ============================================================================
+
 export function getDashboardPanel(extensionUri: vscode.Uri): HealthDashboardPanel {
   return HealthDashboardPanel.createOrShow(extensionUri);
 }

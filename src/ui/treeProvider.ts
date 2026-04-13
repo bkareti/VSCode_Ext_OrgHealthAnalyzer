@@ -164,12 +164,10 @@ export class HealthResultsProvider implements vscode.TreeDataProvider<HealthResu
     items.push(scoreItem);
 
     // Group by category
-    const categories: IssueCategory[] = [
-      'code-quality',
-      'automation-design',
-      'data-model',
-      'performance',
-    ];
+    // Dynamically derive categories from actual issues
+    const categories = Array.from(
+      new Set(this.result.issues.map(i => i.category))
+    ) as IssueCategory[];
 
     for (const category of categories) {
       const categoryIssues = this.result.issues.filter(i => i.category === category);
@@ -219,8 +217,21 @@ export class HealthResultsProvider implements vscode.TreeDataProvider<HealthResu
       'automation-design': 'Automation Design',
       'data-model': 'Data Model',
       'performance': 'Performance',
+      'security': 'Security',
+      'testing': 'Testing',
+      'integration': 'Integration',
+      'lwc-quality': 'LWC Quality',
+      'governor-limits': 'Governor Limits',
+      'technical-debt': 'Technical Debt',
+      'dependencies': 'Dependencies',
+      'user-governance': 'User Governance',
+      'profile-security': 'Profile Security',
+      'stale-metadata': 'Stale Metadata',
+      'org-inventory': 'Org Inventory',
+      'aura-quality': 'Aura Quality',
+      'cta-review': 'CTA Review',
     };
-    return names[category];
+    return names[category] ?? category;
   }
 
   /**
@@ -232,8 +243,21 @@ export class HealthResultsProvider implements vscode.TreeDataProvider<HealthResu
       'automation-design': 'git-merge',
       'data-model': 'database',
       'performance': 'dashboard',
+      'security': 'shield',
+      'testing': 'beaker',
+      'integration': 'plug',
+      'lwc-quality': 'symbol-class',
+      'governor-limits': 'warning',
+      'technical-debt': 'credit-card',
+      'dependencies': 'references',
+      'user-governance': 'organization',
+      'profile-security': 'lock',
+      'stale-metadata': 'trash',
+      'org-inventory': 'package',
+      'aura-quality': 'symbol-namespace',
+      'cta-review': 'robot',
     };
-    return new vscode.ThemeIcon(icons[category]);
+    return new vscode.ThemeIcon(icons[category] ?? 'circle-outline');
   }
 }
 
