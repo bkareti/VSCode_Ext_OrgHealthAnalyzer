@@ -304,71 +304,75 @@ export class SalesforceService {
     // 2) FlowDefinition (Tooling) — deprecated but works on older orgs
     // In both cases, resolve trigger object via FlowVersion if needed.
 
-    // ── Attempt 1: Modern Flow Tooling object ──────────────────────────────
+    // ── Attempt 1: Modern Flow Tooling object ─────────────────────────────
+    // NOTE: IsTemplate / TriggerType fields may not exist in older API versions.
+    // Try progressively simpler queries: 1a → 1b → 1c before falling back.
+    type FlowRow = { Id: string; DeveloperName: string; Description?: string; ProcessType?: string; TriggerType?: string };
+    let flows: FlowRow[] | null = null;
+
     try {
-      const flows = await this.toolingQuery<{
-        Id: string;
-        DeveloperName: string;
-        Description?: string;
-        ProcessType?: string;
-        TriggerType?: string;
-      }>(
+      flows = await this.toolingQuery<FlowRow>(
         `SELECT Id, DeveloperName, Description, ProcessType, TriggerType
          FROM Flow
-         WHERE Status = 'Active' AND IsTemplate = false`
+         WHERE Status = 'Active'`
       );
-
-      logInfo(`Fetched ${flows.length} active flows via Flow (Tooling API)`);
-
-      // Resolve trigger object names from FlowVersion
-      if (flows.length > 0) {
+      logInfo(`Fetched ${flows.length} active flows via Flow (Tooling API) [1a]`);
+    } catch {
+      try {
+        flows = await this.toolingQuery<FlowRow>(
+          `SELECT Id, DeveloperName, Description, ProcessType
+           FROM Flow
+           WHERE Status = 'Active'`
+        );
+        logInfo(`Fetched ${flows.length} active flows via Flow (Tooling API) [1b]`);
+      } catch {
         try {
-          // Flow Ids ARE FlowVersion Ids for active versions — query FlowVersion directly
-          const flowIdChunks = this.chunkArray(flows.map(f => `'${f.Id}'`), 200);
-          const versionMap = new Map<string, string>();
-          for (const chunk of flowIdChunks) {
-            const versions = await this.toolingQuery<{
-              FlowDefinitionViewId?: string;
-              Definition?: { DeveloperName?: string };
-              TriggerObjectOrEventReference?: string;
-              Id: string;
-            }>(
-              `SELECT Id, TriggerObjectOrEventReference
-               FROM FlowVersion
-               WHERE Id IN (${chunk.join(',')}) LIMIT ${TOOLING_QUERY_LIMIT}`
-            );
-            for (const v of versions) {
-              if (v.TriggerObjectOrEventReference) {
-                versionMap.set(v.Id, v.TriggerObjectOrEventReference);
-              }
-            }
-          }
-
-          return flows.map(f => ({
-            Id: f.Id,
-            DeveloperName: f.DeveloperName,
-            ActiveVersionId: f.Id,
-            Description: f.Description,
-            ProcessType: f.ProcessType,
-            TriggerType: f.TriggerType,
-            ObjectApiName: versionMap.get(f.Id) || undefined,
-          }));
-        } catch (versionErr) {
-          logWarning(`Could not resolve FlowVersion objects: ${getErrorMessage(versionErr)}`);
-          // Return flows without object names
-          return flows.map(f => ({
-            Id: f.Id,
-            DeveloperName: f.DeveloperName,
-            ActiveVersionId: f.Id,
-            Description: f.Description,
-            ProcessType: f.ProcessType,
-            TriggerType: f.TriggerType,
-          }));
+          flows = await this.toolingQuery<FlowRow>(
+            `SELECT Id, DeveloperName FROM Flow WHERE Status = 'Active'`
+          );
+          logInfo(`Fetched ${flows.length} active flows via Flow (Tooling API) [1c]`);
+        } catch (err1c) {
+          logWarning(`Flow (Tooling) query failed, trying FlowDefinition fallback: ${getErrorMessage(err1c)}`);
         }
       }
-      return [];
-    } catch (primaryErr) {
-      logWarning(`Flow (Tooling) query failed, trying FlowDefinition fallback: ${getErrorMessage(primaryErr)}`);
+    }
+
+    if (flows !== null) {
+      if (flows.length === 0) { return []; }
+      try {
+        const flowIdChunks = this.chunkArray(flows.map(f => `'${f.Id}'`), 200);
+        const versionMap = new Map<string, string>();
+        for (const chunk of flowIdChunks) {
+          const versions = await this.toolingQuery<{ Id: string; TriggerObjectOrEventReference?: string }>(
+            `SELECT Id, TriggerObjectOrEventReference
+             FROM FlowVersion
+             WHERE Id IN (${chunk.join(',')}) LIMIT ${TOOLING_QUERY_LIMIT}`
+          );
+          for (const v of versions) {
+            if (v.TriggerObjectOrEventReference) {
+              versionMap.set(v.Id, v.TriggerObjectOrEventReference);
+            }
+          }
+        }
+        return flows.map(f => ({
+          Id: f.Id,
+          DeveloperName: f.DeveloperName,
+          ActiveVersionId: f.Id,
+          Description: f.Description,
+          ProcessType: f.ProcessType,
+          TriggerType: f.TriggerType,
+          ObjectApiName: versionMap.get(f.Id) || undefined,
+        }));
+      } catch {
+        return flows.map(f => ({
+          Id: f.Id,
+          DeveloperName: f.DeveloperName,
+          ActiveVersionId: f.Id,
+          Description: f.Description,
+          ProcessType: f.ProcessType,
+          TriggerType: f.TriggerType,
+        }));
+      }
     }
 
     // ── Attempt 2: Legacy FlowDefinition (deprecated but wider compat) ────
@@ -469,9 +473,16 @@ export class SalesforceService {
              FROM CustomField LIMIT ${TOOLING_QUERY_LIMIT}`
           );
           return all.filter(f => !f.NamespacePrefix);
-        } catch (err3) {
-          logWarning(`Could not fetch custom fields: ${getErrorMessage(err3)}`);
-          return [];
+        } catch {
+          // Fallback 3: absolute minimum — just enough to count fields
+          try {
+            return await this.toolingQuery<CustomField>(
+              `SELECT Id, DeveloperName, TableEnumOrId FROM CustomField LIMIT ${TOOLING_QUERY_LIMIT}`
+            );
+          } catch (err4) {
+            logWarning(`Could not fetch custom fields: ${getErrorMessage(err4)}`);
+            return [];
+          }
         }
       }
     }
@@ -581,16 +592,30 @@ export class SalesforceService {
       // NOTE: EntityDefinitionId on child objects is a 15-char prefix of DurableId.
       // DurableId format is "<KeyPrefix><EntityId>" — we match by checking both
       // the full DurableId and its 15-char prefix against the map keys.
+      // Helper: look up a map by full DurableId OR 15-char prefix OR KeyPrefix-prefix
+      const mapGet = (map: Map<string, number>, durableId: string): number => {
+        if (map.has(durableId)) { return map.get(durableId)!; }
+        const id15 = durableId.slice(0, 15);
+        if (map.has(id15)) { return map.get(id15)!; }
+        // Some orgs store EntityDefinitionId as the 18-char ID padded differently
+        // Try iterating keys that start with the same prefix (first 3 chars = KeyPrefix)
+        const prefix3 = durableId.slice(0, 3);
+        for (const [k, v] of map) {
+          if (k.startsWith(prefix3) && (k === durableId || k.slice(0, 15) === id15)) { return v; }
+        }
+        return 0;
+      };
+
       return filteredEntities.map(e => {
         // Aggregate rows use EntityDefinitionId which matches DurableId exactly in Tooling API
         const id = e.DurableId;
-        const cf = cfMap.get(id) ?? 0;
-        const tf = tfMap.get(id) ?? 0;
+        const cf = mapGet(cfMap, id);
+        const tf = mapGet(tfMap, id);
         const std = Math.max(0, tf - cf);
-        const vr = vrMap.get(id) ?? 0;
-        const trig = trigMap.get(id) ?? 0;
-        const lu = lookMap.get(id) ?? 0;
-        const md = mdMap.get(id) ?? 0;
+        const vr = mapGet(vrMap, id);
+        const trig = mapGet(trigMap, id);
+        const lu = mapGet(lookMap, id);
+        const md = mapGet(mdMap, id);
         return {
           objectName: e.QualifiedApiName,
           objectLabel: e.Label,
@@ -634,18 +659,29 @@ export class SalesforceService {
    */
   async getFieldDefinitions(): Promise<FieldDefinitionInfo[]> {
     try {
+      // Attempt 1: filter by IsCustomizable (avoids NamespacePrefix which fails on many orgs)
       return await this.toolingQuery<FieldDefinitionInfo>(
         `SELECT QualifiedApiName, EntityDefinition.QualifiedApiName, DataType,
                 RelationshipName, IsIndexed
          FROM FieldDefinition
          WHERE EntityDefinition.IsCustomizable = true
-           AND EntityDefinition.NamespacePrefix = null
            AND DataType IN ('Lookup', 'MasterDetail')
          LIMIT ${TOOLING_QUERY_LIMIT}`
       );
-    } catch (err) {
-      logWarning(`Could not fetch FieldDefinitions: ${getErrorMessage(err)}`);
-      return [];
+    } catch {
+      try {
+        // Attempt 2: minimal query without any relationship filter
+        return await this.toolingQuery<FieldDefinitionInfo>(
+          `SELECT QualifiedApiName, EntityDefinition.QualifiedApiName, DataType,
+                  RelationshipName, IsIndexed
+           FROM FieldDefinition
+           WHERE DataType IN ('Lookup', 'MasterDetail')
+           LIMIT ${TOOLING_QUERY_LIMIT}`
+        );
+      } catch (err) {
+        logWarning(`Could not fetch FieldDefinitions: ${getErrorMessage(err)}`);
+        return [];
+      }
     }
   }
 
@@ -975,9 +1011,20 @@ export class SalesforceService {
            WHERE LastModifiedDate < ${cutoff}T00:00:00Z LIMIT 500`
         );
         return rows.map(r => ({ ...r, DeveloperName: r.Name }));
-      } catch (err2) {
-        logWarning(`Could not fetch stale dashboards: ${getErrorMessage(err2)}`);
-        return [];
+      } catch {
+        // Fallback 3: no WHERE clause — fetch all dashboards, filter in JS
+        try {
+          const rows = await this.query<{ Id: string; Name: string; LastModifiedDate: string; CreatedDate: string }>(
+            `SELECT Id, Name, LastModifiedDate, CreatedDate FROM Dashboard LIMIT 500`
+          );
+          const cutoffIso = `${cutoff}T00:00:00Z`;
+          return rows
+            .filter(r => r.LastModifiedDate < cutoffIso)
+            .map(r => ({ ...r, DeveloperName: r.Name }));
+        } catch (err3) {
+          logWarning(`Could not fetch stale dashboards: ${getErrorMessage(err3)}`);
+          return [];
+        }
       }
     }
   }
@@ -1097,7 +1144,8 @@ export class SalesforceService {
         usedLicenses: r.UsedLicenses ?? 0,
       }));
     } catch (err) {
-      logWarning(`Could not fetch feature licenses: ${getErrorMessage(err)}`);
+      // FeatureLicense is not available on all org editions (Developer, Scratch) — suppress to debug
+      logDebug(`Could not fetch feature licenses (not available on this org edition): ${getErrorMessage(err)}`);
       return [];
     }
   }

@@ -4,6 +4,55 @@ All notable changes to **OrgPulse — Salesforce Architecture Health & Insights*
 
 ---
 
+## [1.9.5] — 2026-04-19 🖨️ Full CTA PDF Export & Data Model Fixes
+
+### Bug Fixes
+
+- **CTA Review — Export PDF now exports all 14 sections** — Previously only 3 sections appeared. The exporter now captures the fully-rendered tab DOM (Verdict, Executive Summary, Architecture Maturity, Business Impact, Org Profile, Health Score Breakdown, Critical Issues, Risk Analysis, Benchmarks, Domain Findings, AI Insights, SWOT, Recommendations, Cost of Inaction, Final Recommendation), strips interactive controls, resolves VS Code CSS variables for browser rendering, and opens in the default browser for Print → Save as PDF.
+- **Export PDF delivery fixed** — Replaced blocked `URL.createObjectURL` + `window.open()` with `vscode.postMessage` → Save Dialog → `vscode.workspace.fs.writeFile` → `vscode.env.openExternal`.
+- **Data Model tab — standard field counts now populate** — Fixed `getObjectDataModelCounts()` with a `mapGet()` helper using 15-character DurableId prefix fallback.
+- **Data Model tab — column sorting fixed** — All data tables now support ascending/descending sort on any column header.
+- **Data Model CSV export fixed** — Routes via `vscode.postMessage` instead of blocked `URL.createObjectURL`.
+- **SOQL query fixes** — Flow: 3-tier fallback, removed `IsTemplate = false`; CustomField: 4-tier fallback; Dashboard: 3-tier fallback; removed invalid `EntityDefinition.NamespacePrefix=null`.
+- **FeatureLicense** — Demoted noisy `logWarning` to `logDebug`.
+
+---
+
+## [1.9.4] — 2026-04-13 📊 Data Model Health Tab
+
+### New Features
+
+- Data Model Health tab with field limit percentage bars per object
+- Custom and standard field count breakdown table with CSV export
+- Objects approaching the 800-field governor limit highlighted as Critical / At-Risk / Caution
+- Pagination and column sorting for all large data tables
+
+---
+
+## [1.9.3] — 2026-04-11 🏛️ CTA Architecture Review — Full 14-Section Report
+
+### New Features
+
+- **Full 14-section CTA Architecture Review** — Architecture Maturity gauge (levels 1–5), Business Impact scorecard, Org Profile, Health Score Breakdown bars, Critical Issues table, Risk Heatmap, Benchmark Comparison, Domain Findings grid, AI Insights, Architecture Observations (SWOT), Recommendations (quick wins + strategic), Cost of Inaction, and Final CTA Recommendation
+- Verdict banner updated with maturity badge and Regenerate button
+- Stale-review banner for legacy reviews missing `architectureMaturity`
+
+---
+
+## [1.9.2] — 2026-04-10 🔍 Scale Center, LWC, Governance & Inventory
+
+### New Features
+
+- Scale Center / EventLogFile performance analytics (Enterprise Edition+)
+- LWC component quality analysis from workspace files
+- User Governance analysis (dormant users, super-admins, role hierarchy depth)
+- Profile & Permission Set dangerous permissions audit
+- Stale Metadata detection (reports/dashboards idle 180+ days)
+- Org Inventory (installed packages, Visualforce pages, custom labels)
+- Technical Debt Backlog CSV export
+
+---
+
 ## [1.9.1] — 2026-04-09 🔐 Enterprise Security Modes & Zero-PII Architecture
 
 ### New Features

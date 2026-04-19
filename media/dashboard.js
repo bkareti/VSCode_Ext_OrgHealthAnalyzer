@@ -21,7 +21,7 @@
   // Per-panel sort/page state: panelId → { sortCol, sortDir, page, pageSize }
   const issueTableState = {};
   const ISSUE_PAGE_SIZE = 10;
-  // Per-data-table page state: tableId → { page }
+  // Per-data-table page+sort state: tableId → { page, sortCol, sortDir }
   const dataTablePageState = {};
   const DATA_TABLE_PAGE_SIZE = 10;
 
@@ -175,6 +175,19 @@
         issueTableState[panel].page = parseInt(el.dataset.pg, 10);
         refreshIssueTable(panel);
       }
+    } else if (a === "dt-sort") {
+      const tid = el.dataset.table;
+      const col = parseInt(el.dataset.col, 10);
+      if (!dataTablePageState[tid]) dataTablePageState[tid] = { page: 0 };
+      const st = dataTablePageState[tid];
+      if (st.sortCol === col) {
+        st.sortDir = st.sortDir === "asc" ? "desc" : "asc";
+      } else {
+        st.sortCol = col;
+        st.sortDir = "asc";
+      }
+      st.page = 0;
+      refreshDataTable(tid);
     } else if (a === "dt-page-prev") {
       const tid = el.dataset.table;
       if (dataTablePageState[tid] && dataTablePageState[tid].page > 0) {
@@ -283,37 +296,90 @@
    * @param {string} tableId   Unique id for this table.
    * @param {string[]} headers Column headers.
    * @param {string[][]} rows  Array of row arrays (pre-escaped HTML strings).
-   * @param {object} [opts]    { pageSize, emptyMsg }
+   * @param {object} [opts]    { pageSize, emptyMsg, sortable }
    * @returns {string} HTML
    */
+
+  /**
+   * Renders a collapsible info banner for a tab.
+   * @param {string} id      Unique id suffix for the toggle.
+   * @param {string[]} items Bullet point strings (6-7 recommended).
+   * @returns {string} HTML
+   */
+  function renderTabInfo(id, items) {
+    const listHtml = items
+      .map((s) => `<li style="margin-bottom:4px">${s}</li>`)
+      .join("");
+    return `
+      <details id="tab-info-${id}" style="margin-bottom:20px;background:var(--vscode-textBlockQuote-background,rgba(128,128,128,0.1));border-left:3px solid var(--vscode-focusBorder,#007acc);border-radius:4px;padding:10px 14px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--sf-text-muted);list-style:none;display:flex;align-items:center;gap:6px">
+          <span>ℹ️</span><span>About this tab — how data is fetched &amp; filtered</span>
+          <span style="margin-left:auto;opacity:.5;font-size:11px">click to expand</span>
+        </summary>
+        <ul style="margin:10px 0 2px 0;padding-left:18px;font-size:12px;color:var(--sf-text-muted);line-height:1.7">
+          ${listHtml}
+        </ul>
+      </details>`;
+  }
+
   function renderPaginatedDataTable(tableId, headers, rows, opts) {
     opts = opts || {};
     const PAGE = opts.pageSize || DATA_TABLE_PAGE_SIZE;
     const emptyMsg = opts.emptyMsg || "No data available";
+    const sortable = opts.sortable !== false; // sortable by default
 
     if (!dataTablePageState[tableId]) dataTablePageState[tableId] = { page: 0 };
     const st = dataTablePageState[tableId];
-    const totalPages = Math.max(1, Math.ceil(rows.length / PAGE));
+
+    // Sort rows if sort state is set
+    let sortedRows = rows;
+    if (sortable && st.sortCol != null) {
+      const col = st.sortCol;
+      const dir = st.sortDir === "desc" ? -1 : 1;
+      sortedRows = rows.slice().sort((a, b) => {
+        // Strip HTML tags for comparison
+        const strip = (s) =>
+          String(s || "")
+            .replace(/<[^>]*>/g, "")
+            .trim();
+        const av = strip(a[col]);
+        const bv = strip(b[col]);
+        // Numeric comparison if both look like numbers
+        const an = parseFloat(av),
+          bn = parseFloat(bv);
+        if (!isNaN(an) && !isNaN(bn)) return (an - bn) * dir;
+        return av.localeCompare(bv) * dir;
+      });
+    }
+
+    const totalPages = Math.max(1, Math.ceil(sortedRows.length / PAGE));
     if (st.page >= totalPages) st.page = totalPages - 1;
 
     const start = st.page * PAGE;
-    const pageRows = rows.slice(start, start + PAGE);
+    const pageRows = sortedRows.slice(start, start + PAGE);
 
-    const headHtml = `<tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr>`;
+    const headHtml = `<tr>${headers
+      .map((h, i) => {
+        if (!sortable) return `<th>${h}</th>`;
+        const isSorted = st.sortCol === i;
+        const arrow = isSorted ? (st.sortDir === "asc" ? " ▲" : " ▼") : " ⇅";
+        return `<th data-action="dt-sort" data-table="${tableId}" data-col="${i}" style="cursor:pointer;user-select:none" title="Click to sort">${h}<span style="opacity:${isSorted ? 1 : 0.3};font-size:10px">${arrow}</span></th>`;
+      })
+      .join("")}</tr>`;
     const bodyHtml = pageRows.length
       ? pageRows
           .map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`)
           .join("")
       : `<tr><td colspan="${headers.length}" style="text-align:center;padding:20px;color:var(--sf-text-muted)">${emptyMsg}</td></tr>`;
 
-    const showingFrom = rows.length ? start + 1 : 0;
-    const showingTo = Math.min(start + PAGE, rows.length);
+    const showingFrom = sortedRows.length ? start + 1 : 0;
+    const showingTo = Math.min(start + PAGE, sortedRows.length);
 
     const pagHtml =
       totalPages > 1
         ? `
       <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid var(--vscode-widget-border);font-size:12px">
-        <span style="opacity:.6">${showingFrom}–${showingTo} of ${rows.length}</span>
+        <span style="opacity:.6">${showingFrom}–${showingTo} of ${sortedRows.length}</span>
         <span style="flex:1"></span>
         <button class="btn btn-ghost" style="padding:3px 10px;font-size:11px" data-action="dt-page-prev" data-table="${tableId}" ${st.page === 0 ? 'disabled style="opacity:.4;padding:3px 10px;font-size:11px"' : ""}>‹ Prev</button>
         ${Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
@@ -330,7 +396,7 @@
       </div>`
         : "";
 
-    // Store config for refresh
+    // Store config for refresh (raw unsorted rows for re-sort on click)
     dataTableRegistry[tableId] = { headers, rows, opts };
 
     return `<div class="data-table-wrap" id="dt-wrap-${tableId}">
@@ -2413,6 +2479,16 @@
     const debt = results.debtSummary;
     const s = results.scores || {};
 
+    const tabInfo = renderTabInfo("codequality", [
+      "<strong>Data source</strong>: All active Apex Classes and Apex Triggers via Tooling API (<code>ApexClass WHERE Status='Active' AND NamespacePrefix=null</code>). Managed-package classes are excluded.",
+      "<strong>Anti-pattern detection</strong> scans Apex class bodies for: missing <code>with sharing</code> / <code>without sharing</code>, SOQL/DML inside loops, bare try-catch blocks, hardcoded IDs, and God Classes (classes >500 lines).",
+      "<strong>Test coverage</strong> is read from <code>ApexCodeCoverageAggregate</code>. Classes below 75% are flagged as warnings; below 0% test presence is an error.",
+      "<strong>Technical Debt score</strong> is calculated by weighting issue counts by severity (error=10, warning=3, info=1) against total lines of Apex code analysed.",
+      "<strong>Issues are categorised</strong> as: <em>code-quality</em> (structural problems in Apex) and <em>technical-debt</em> (maintainability concerns like missing descriptions, complex nesting).",
+      "<strong>Apex Trigger rules</strong> enforce one-trigger-per-object, no DML/SOQL in trigger bodies, and no logic directly in the trigger (prefer handler classes).",
+      "<strong>Scoring</strong>: Code Quality score starts at 100 and deducts points for each issue weighted by severity and the proportion of your codebase affected.",
+    ]);
+
     const errors = allIssues.filter((i) => i.severity === "error");
     const warnings = allIssues.filter((i) => i.severity === "warning");
     const infos = allIssues.filter((i) => i.severity === "info");
@@ -2458,6 +2534,7 @@
       .slice(0, 10);
 
     return `
+      ${tabInfo}
       <!-- CTA-Style Summary -->
       <div class="mb-24">
         <div class="section-title">💻 Code Quality Summary</div>
@@ -2575,6 +2652,16 @@
       (i) => i.category === "automation-design",
     );
 
+    const tabInfo = renderTabInfo("automation", [
+      "<strong>Data source</strong>: Active Apex Triggers (Tooling API <code>ApexTrigger</code>), Active Flows (<code>Flow</code> object, falls back to <code>FlowDefinition</code>), and Validation Rules (<code>ValidationRule</code>) — all limited to non-managed-package records.",
+      "<strong>Flows</strong> include all <em>ProcessType</em> variants: Screen Flows, Record-Triggered Flows, Scheduled Flows, Platform Event Flows, and Auto-Launched Flows. Trigger object is resolved via <code>FlowVersion.TriggerObjectOrEventReference</code>.",
+      "<strong>Object Heatmap</strong> shows how many automation issues each object has, colour-coded: green=1, amber=2-3, orange=4-5, red >5.",
+      "<strong>Automation Inventory</strong> groups all automations by object, counting triggers, flows, and validation rules per object. Objects with multiple triggers per object are flagged as <em>Critical</em>.",
+      "<strong>Complexity scoring</strong>: objects with more than 8 combined automations (triggers + flows + validation rules) are considered over-automated and flagged for review.",
+      "<strong>Inactive flows</strong> are excluded — only <em>Status = Active</em> flows are shown. Deactivated flows should be cleaned up via Salesforce Setup → Flows.",
+      "<strong>Standard objects</strong> (Account, Contact, etc.) appear only if they have at least one trigger, flow, or validation rule attached.",
+    ]);
+
     // Build heatmap data from issues
     const objectMap = {};
     for (const iss of autoIssues) {
@@ -2600,6 +2687,7 @@
     );
 
     return `
+      ${tabInfo}
       <div class="mb-24">
         <div class="section-title">⚡ Automation Complexity Heatmap</div>
         <div class="heatmap-wrap">
@@ -2665,6 +2753,16 @@
     const stats = results.dataModelStats || [];
     const autoSum = results.automationSummary || {};
     const autoMap = autoSum.objectMap || {};
+
+    const tabInfo = renderTabInfo("datamodel", [
+      "<strong>Objects fetched via</strong> <code>EntityDefinition</code> (Tooling API) — all <em>IsCustomizable=true</em> objects including standard and custom.",
+      "<strong>Standard objects</strong> (e.g. Account, Contact) are shown only when they have custom fields, flows, triggers, or validation rules. All <code>__c</code> custom objects are always included.",
+      "<strong>Field counts</strong>: Std Fields = total fields − custom fields (via parallel <code>FieldDefinition COUNT GROUP BY</code> queries). Custom Fields uses <code>CustomField WHERE NamespacePrefix = null</code> to exclude managed-package fields.",
+      "<strong>Unused fields</strong> are estimated by counting custom fields on an object that have no matching reference (<code>Object.Field__c</code>) in the local workspace source code. This is a code-reference heuristic — it does not scan page layouts, reports, or formula fields.",
+      "<strong>Triggers, Flows, Validation Rules</strong> are aggregate counts from <code>ApexTrigger</code>, <code>Flow</code>, and <code>ValidationRule</code> Tooling API objects grouped by <code>EntityDefinitionId</code>.",
+      "<strong>Field Limit %</strong> = Custom Fields ÷ 800 × 100. Objects above 25% are flagged in the Governor Limit Risk table above the main matrix.",
+      "<strong>Managed-package objects</strong> are filtered out in JavaScript: custom objects with a namespace prefix pattern (<code>ns__Name__c</code>) are excluded from the results.",
+    ]);
 
     // ── Summary KPIs ──────────────────────────────────────────────────────
     const totalStdFields = stats.reduce(
@@ -2927,7 +3025,10 @@
       </div>`;
   }
 
-  /** Export the Object Health Matrix table data as CSV */
+  /** Export the Object Health Matrix table data as CSV.
+   * URL.createObjectURL is blocked in VS Code webviews — we send the CSV
+   * content to the extension host which writes it via the VS Code file API.
+   */
   function exportDataModelCsv() {
     if (!results) return;
     const stats = results.dataModelStats || [];
@@ -2973,15 +3074,11 @@
         `"${r.obj}","${r.objLabel}",${r.stdFields},${r.custFields},${r.unusedFields},${r.triggers},${r.flows},${r.validations},${r.fieldLimitPct}`,
     );
     const csv = [csvHeaders, ...csvRows].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "data-model-health.csv";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    // Send to extension host — VS Code webviews block URL.createObjectURL
+    vscode.postMessage({
+      command: "exportDataModelCsv",
+      data: { csv, fileName: "data-model-health.csv" },
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2998,6 +3095,16 @@
     const simData = (results && results.limitsSimulatorData) || [];
     const entryPoints = (results && results.entryPoints) || [];
     const recordCounts = (results && results.objectRecordCounts) || {};
+
+    const tabInfo = renderTabInfo("performance", [
+      "<strong>Data source</strong>: Apex class bodies are scanned locally for patterns like SOQL in loops, DML in loops, missing LIMIT clauses, and non-selective queries.",
+      "<strong>SOQL in Loops</strong>: Detected when a SOQL statement (<code>[SELECT ...]</code>) appears inside a <code>for</code>, <code>while</code>, or <code>do-while</code> block. Each loop iteration consumes one of your 100 SOQL query governor limit slots.",
+      "<strong>Non-selective Queries</strong>: SOQL queries without a WHERE clause on an indexed field or with a leading wildcard (<code>LIKE '%term'</code>) are flagged. These cause full table scans on large data volumes (LDV).",
+      "<strong>Governor Limits Simulator</strong>: Uses static analysis of SOQL/DML call counts per Apex entry point and projects usage at configurable record volumes (200, 1k, 5k, 50k).",
+      "<strong>Record counts</strong> are fetched via <code>COUNT()</code> SOQL on key objects to provide LDV context for each object in the simulator.",
+      "<strong>Query Plan</strong>: The EXPLAIN query plan feature calls the Tooling API <code>QueryPlan</code> resource to reveal cardinality and index usage for specific SOQL queries.",
+      "<strong>Scoring</strong>: Performance score deducts points for SOQL-in-loop (−10 each), DML-in-loop (−8 each), non-selective queries (−5 each), and queries without LIMIT (−3 each).",
+    ]);
 
     // Initialize simulator data
     SIM_DATA = simData;
@@ -3101,6 +3208,7 @@
       .sort((a, b) => b[1] - a[1]);
 
     return `
+      ${tabInfo}
       <!-- Performance Summary -->
       ${
         summaryItems.length
@@ -3367,6 +3475,16 @@
     const profSum = results.profileSummary;
     const s = results.scores || {};
 
+    const tabInfo = renderTabInfo("security", [
+      "<strong>Data source</strong>: Active User records (<code>User WHERE IsActive=true</code>), Profiles with user counts, and PermissionSet assignments — via standard SOQL (not Tooling API). Security mode must be <em>Standard</em> or <em>Advanced</em> to fetch profile/permission data.",
+      "<strong>Dormant Users</strong>: Users whose <code>LastLoginDate</code> is more than 90 days ago (or null). These are active licensed seats consuming cost with no recent activity.",
+      "<strong>Dangerous Permissions</strong>: Profiles/PermSets granting <em>ModifyAllData</em>, <em>ViewAllData</em>, <em>ManageUsers</em>, or <em>AuthorApex</em> are flagged — these bypass record-level sharing entirely.",
+      "<strong>Profile vs. Permission Set</strong>: The analyser checks how many users are on each profile and flags profiles with zero users (cleanup candidates) or profiles with excessive admin permissions.",
+      "<strong>Safe Mode</strong>: In Safe Mode, user and profile data is not fetched. Switch to Standard mode to enable Security analysis. Data is processed in-memory and never stored outside the VS Code session.",
+      "<strong>Guest User risks</strong>: If Guest User profiles exist with broad object/field access, they are flagged as critical — Guest Users bypass standard sharing rules.",
+      "<strong>Scoring</strong>: Security score deducts points for ModifyAllData grants (−15), dormant-user ratio (up to −20), missing MFA indicators (−10), and broad profile permissions.",
+    ]);
+
     const dormantPct =
       userSum && userSum.totalActiveUsers
         ? Math.round((userSum.dormantUsers / userSum.totalActiveUsers) * 100)
@@ -3401,9 +3519,10 @@
     ];
 
     return `
+      ${tabInfo}
       <!-- Summary KPIs -->
       <div class="mb-24">
-        <div class="section-title">🛡️ Security & Access Overview</div>
+        <div class="section-title">🛡️ Security &amp; Access Overview</div>
         <div class="lwc-summary-cards">
           <div class="lwc-summary-card">
             <div class="lwc-summary-num">${s.security || 0}</div>
@@ -5905,7 +6024,7 @@ ${nextStepsPage}
       );
       return;
     }
-    const ctaReview = results.ctaReview;
+
     const org =
       results.summary && results.summary.orgAlias
         ? results.summary.orgAlias
@@ -5922,83 +6041,46 @@ ${nextStepsPage}
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
 
-    const cvc =
-      ctaReview.verdict === "Go"
-        ? "#16a34a"
-        : ctaReview.verdict === "No-Go"
-          ? "#dc2626"
-          : "#d97706";
-    const cvLabel =
-      ctaReview.verdict === "Go"
-        ? "Recommended to Proceed"
-        : ctaReview.verdict === "No-Go"
-          ? "Not Recommended"
-          : "Conditional Approval";
+    // ── Capture the fully-rendered CTA tab DOM ─────────────────────────────
+    const panelEl = document.getElementById("panel-cta");
+    if (!panelEl) {
+      alert(
+        "CTA Review panel not found. Please switch to the CTA Review tab first.",
+      );
+      return;
+    }
+    const clone = panelEl.cloneNode(true);
 
-    const wmHtml = iconDataUri
-      ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:0;opacity:.04"><img src="${iconDataUri}" style="width:260px;height:260px;object-fit:contain" alt="" /></div>`
+    // Strip interactive controls (buttons, selects, inputs)
+    clone
+      .querySelectorAll("button, select, input, textarea")
+      .forEach((el) => el.remove());
+
+    // Resolve VS Code CSS variable references to their fallback values so
+    // the standalone HTML renders correctly in a browser.
+    clone.querySelectorAll("[style]").forEach((el) => {
+      el.style.cssText = el.style.cssText
+        .replace(/var\(--vscode-editor-background[^)]*\)/g, "#ffffff")
+        .replace(/var\(--vscode-widget-border[^)]*\)/g, "#e5e7eb")
+        .replace(/var\(--vscode-input-background[^)]*\)/g, "#f9fafb")
+        .replace(/var\(--vscode-input-foreground[^)]*\)/g, "#1a1a2e")
+        .replace(/var\(--vscode-input-border[^)]*\)/g, "#d1d5db")
+        .replace(/var\(--vscode-badge-background[^)]*\)/g, "rgba(0,0,0,.08)")
+        .replace(/var\(--vscode-badge-foreground[^)]*\)/g, "inherit")
+        .replace(/var\(--vscode-[^,)]+,\s*([^)]+)\)/g, "$1")
+        .replace(/var\(--sf-[^,)]+,\s*([^)]+)\)/g, "$1")
+        .replace(/var\(--score-excellent[^)]*\)/g, "#22c55e")
+        .replace(/var\(--score-good[^)]*\)/g, "#84cc16")
+        .replace(/var\(--score-fair[^)]*\)/g, "#f59e0b")
+        .replace(/var\(--score-poor[^)]*\)/g, "#f97316")
+        .replace(/var\(--score-critical[^)]*\)/g, "#ef4444");
+    });
+
+    const bodyContent = clone.innerHTML;
+
+    const headerLogoHtml = iconDataUri
+      ? `<img src="${iconDataUri}" style="width:18px;height:18px;object-fit:contain;border-radius:3px;vertical-align:middle;margin-right:5px;opacity:.7" alt="" />`
       : "";
-    const headerHtml = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding-bottom:8px;border-bottom:1px solid #e5e7eb;font-size:10px;color:#9ca3af;position:relative;z-index:1">${iconDataUri ? `<span><img src="${iconDataUri}" style="width:18px;height:18px;object-fit:contain;border-radius:3px;vertical-align:middle;margin-right:4px;opacity:.7" alt="" />OrgPulse · CTA Architecture Review</span>` : "<span>OrgPulse · CTA Architecture Review</span>"}<span>${esc(org)} · ${now}</span></div>`;
-
-    // ── Data Model Risk table for CTA PDF ──────────────────────────────────
-    const dmStats = (results.dataModelStats || [])
-      .filter(
-        (o) =>
-          (o.fieldLimitPct || 0) > 0 ||
-          (o.customFields || o.totalFields || 0) > 0,
-      )
-      .sort((a, b) => (b.fieldLimitPct || 0) - (a.fieldLimitPct || 0))
-      .slice(0, 5);
-
-    const dmRowsHtml = dmStats.length
-      ? dmStats
-          .map((o) => {
-            const pct = o.fieldLimitPct || 0;
-            const custF =
-              o.customFields != null ? o.customFields : o.totalFields || 0;
-            const stdF = o.standardFields != null ? o.standardFields : "—";
-            const totalF = o.totalFields || "—";
-            const badge =
-              pct >= 75
-                ? `<span style="background:#fee2e2;color:#b91c1c;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700">🔴 Critical</span>`
-                : pct >= 50
-                  ? `<span style="background:#ffedd5;color:#c2410c;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700">🟠 At Risk</span>`
-                  : pct >= 25
-                    ? `<span style="background:#fefce8;color:#a16207;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700">🟡 Caution</span>`
-                    : `<span style="background:#f0fdf4;color:#166534;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700">✅ OK</span>`;
-            return `<tr>
-            <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6">
-              <div style="font-weight:600;font-size:12px">${esc(o.objectLabel || o.objectName)}</div>
-              ${o.objectLabel && o.objectLabel !== o.objectName ? `<div style="font-size:10px;color:#9ca3af">${esc(o.objectName)}</div>` : ""}
-            </td>
-            <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-size:12px">${stdF}</td>
-            <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-size:12px;font-weight:600">${custF}</td>
-            <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-size:12px">${totalF}</td>
-            <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-size:12px;color:${pct >= 50 ? "#b91c1c" : pct >= 25 ? "#a16207" : "#166534"};font-weight:700">${pct}%</td>
-            <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;text-align:center">${badge}</td>
-          </tr>`;
-          })
-          .join("")
-      : `<tr><td colspan="6" style="padding:12px;text-align:center;color:#9ca3af;font-size:12px">No data model data — run a full org scan to populate.</td></tr>`;
-
-    const dmSectionHtml = `
-<div style="margin-top:20px;position:relative;z-index:1">
-  <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;margin-bottom:8px">🗄️ Data Model Risk — Objects Approaching Field Limit</div>
-  <table style="width:100%;border-collapse:collapse;font-family:inherit;font-size:12px">
-    <thead>
-      <tr style="background:#f9fafb">
-        <th style="padding:6px 10px;text-align:left;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;border-bottom:2px solid #e5e7eb">Object</th>
-        <th style="padding:6px 10px;text-align:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;border-bottom:2px solid #e5e7eb">Std Fields</th>
-        <th style="padding:6px 10px;text-align:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;border-bottom:2px solid #e5e7eb">Custom Fields</th>
-        <th style="padding:6px 10px;text-align:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;border-bottom:2px solid #e5e7eb">Total</th>
-        <th style="padding:6px 10px;text-align:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;border-bottom:2px solid #e5e7eb">Limit %</th>
-        <th style="padding:6px 10px;text-align:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;border-bottom:2px solid #e5e7eb">Status</th>
-      </tr>
-    </thead>
-    <tbody>${dmRowsHtml}</tbody>
-  </table>
-  <div style="font-size:10px;color:#9ca3af;margin-top:6px">Custom field governor limit: 800 fields per SObject. Objects >50% are deployment risks when adding new fields.</div>
-</div>`;
 
     const ctaHtml = `<!DOCTYPE html>
 <html lang="en">
@@ -6006,44 +6088,113 @@ ${nextStepsPage}
 <meta charset="utf-8">
 <title>OrgPulse CTA Review — ${esc(org)} — ${now}</title>
 <style>
-  @page { size: A4; margin: 20mm 18mm; }
+  @page { size: A4; margin: 15mm 14mm; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif; color: #1a1a2e; background: #fff; font-size: 13px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .page { padding: 28px 32px; page-break-after: always; display: flex; flex-direction: column; position: relative; overflow: hidden; }
-  @media print { .page { padding: 0; page-break-after: always; } body { font-size: 11px; } }
-  code { background: #f3f4f6; border-radius: 3px; padding: 1px 4px; font-family: 'SF Mono', Consolas, monospace; font-size: 0.9em; }
+  body {
+    font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif;
+    color: #1a1a2e;
+    background: #fff;
+    font-size: 12px;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* ── Print header bar ── */
+  .pdf-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 0 10px;
+    border-bottom: 1.5px solid #e5e7eb;
+    margin-bottom: 18px;
+    font-size: 10px;
+    color: #9ca3af;
+  }
+
+  /* ── CTA layout classes ── */
+  .section-card {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 18px 20px;
+  }
+  .cta-section-header { display:flex;align-items:center;gap:10px;margin-bottom:14px; }
+  .cta-section-icon { width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0; }
+  .cta-section-title { font-size:13px;font-weight:700; }
+  .cta-section-badge { font-size:10px;font-weight:700;opacity:.45;background:rgba(0,0,0,.08);padding:2px 7px;border-radius:10px; }
+
+  /* ── Maturity gauge ── */
+  .cta-maturity-gauge { display:flex;align-items:center;gap:0;margin-top:4px; }
+  .cta-maturity-step { flex:1;text-align:center;padding:7px 4px;border-radius:6px;border:1.5px solid #d1d5db; }
+  .cta-maturity-step.past { opacity:.7; }
+  .cta-maturity-step.active { transform:translateY(-2px);box-shadow:0 4px 10px rgba(0,0,0,.12); }
+  .cta-maturity-num { font-size:14px;font-weight:800;line-height:1; }
+  .cta-maturity-lbl { font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-top:3px;opacity:.8; }
+  .cta-maturity-connector { width:6px;height:1.5px;background:#d1d5db;flex-shrink:0; }
+  .cta-maturity-badge { font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;background:rgba(0,0,0,.08); }
+  .cta-maturity-badge.level-1{background:rgba(239,68,68,.15);color:#ef4444;}
+  .cta-maturity-badge.level-2{background:rgba(249,115,22,.15);color:#f97316;}
+  .cta-maturity-badge.level-3{background:rgba(245,158,11,.15);color:#f59e0b;}
+  .cta-maturity-badge.level-4{background:rgba(34,197,94,.15);color:#22c55e;}
+  .cta-maturity-badge.level-5{background:rgba(1,118,211,.15);color:#0176d3;}
+
+  /* ── Impact / Profile cards ── */
+  .cta-impact-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:10px;margin-top:4px; }
+  .cta-impact-card { padding:11px 13px;background:#fff;border:1px solid #e5e7eb;border-top-width:3px;border-radius:8px; }
+  .cta-impact-label { font-size:10px;font-weight:700;opacity:.65;margin-bottom:5px; }
+  .cta-impact-text { font-size:11px;line-height:1.5;opacity:.9; }
+  .cta-profile-item { padding:9px 13px;background:#fff;border:1px solid #e5e7eb;border-radius:8px; }
+  .cta-profile-label { font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.5;margin-bottom:4px; }
+  .cta-profile-value { font-size:12px;font-weight:600; }
+
+  /* ── Health score bars ── */
+  .cta-score-list { display:flex;flex-direction:column;gap:9px;margin-top:4px; }
+  .cta-score-row { display:grid;grid-template-columns:130px 1fr 44px 18px 1fr;align-items:center;gap:10px; }
+  .cta-score-label { font-size:11px;font-weight:600; }
+  .cta-score-bar-wrap { height:7px;background:#e5e7eb;border-radius:4px;overflow:hidden; }
+  .cta-score-bar { height:7px;border-radius:4px; }
+  .cta-score-num { font-size:11px;font-weight:700;text-align:right; }
+  .cta-score-trend { font-size:13px;font-weight:700;text-align:center; }
+  .cta-score-finding { font-size:10px;opacity:.65;line-height:1.4; }
+
+  /* ── Heatmap ── */
+  .cta-heatmap-grid { display:flex;flex-direction:column;gap:5px; }
+  .cta-heatmap-cell { padding:5px 10px;border-radius:6px;border:1px solid;display:flex;align-items:center;justify-content:space-between; }
+  .cta-heatmap-domain { font-size:11px;font-weight:600; }
+  .cta-heatmap-vals { font-size:10px;font-weight:700; }
+
+  /* ── Cost of Inaction ── */
+  .cta-inaction-card { background:#fff;border:1.5px solid rgba(239,68,68,.3);border-radius:12px;padding:20px; }
+  .cta-inaction-card .cta-section-title { color:#ef4444; }
+
+  /* ── Print page breaks ── */
+  @media print {
+    body { font-size: 11px; }
+    .section-card { break-inside: avoid; page-break-inside: avoid; }
+  }
 </style>
 </head>
 <body>
-<div class="page" style="position:relative">
-${wmHtml}
-${headerHtml}
-<div style="font-size:22px;font-weight:800;color:#1a1a2e;margin-bottom:4px;position:relative;z-index:1">🧠 CTA Architecture Review</div>
-<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:20px;padding-bottom:14px;border-bottom:2px solid #e5e7eb;position:relative;z-index:1">AI-Generated Executive Architecture Assessment</div>
-<div style="display:flex;align-items:center;gap:16px;padding:16px 20px;border-radius:10px;background:${ctaReview.verdict === "Go" ? "rgba(22,163,74,.06)" : ctaReview.verdict === "No-Go" ? "rgba(220,38,38,.06)" : "rgba(217,119,6,.06)"};border:2px solid ${cvc};margin-bottom:18px;position:relative;z-index:1">
-  <div style="font-size:48px;line-height:1">${ctaReview.verdict === "Go" ? "✅" : ctaReview.verdict === "No-Go" ? "🚫" : "⚠️"}</div>
-  <div>
-    <div style="font-size:17px;font-weight:800;color:${cvc}">${esc(ctaReview.verdict)} — ${cvLabel}</div>
-    <div style="font-size:10px;color:#6b7280;margin-top:3px">✨ ${esc(ctaReview.modelUsed || "AI")} · ${ctaReview.generatedAt ? new Date(ctaReview.generatedAt).toLocaleString() : "Generated"}</div>
-  </div>
+<div class="pdf-header">
+  <span>${headerLogoHtml}OrgPulse · CTA Architecture Review</span>
+  <span>${esc(org)} &nbsp;·&nbsp; ${now}</span>
 </div>
-${ctaReview.executiveSummary ? `<div style="margin-bottom:14px;position:relative;z-index:1"><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;margin-bottom:6px">Executive Summary</div><p style="font-size:12px;color:#1f2937;line-height:1.7;margin:0">${esc(ctaReview.executiveSummary)}</p></div>` : ""}
-${dmSectionHtml}
+<div style="padding:0 2px">
+${bodyContent}
 </div>
 <script>window.onload = function() { window.print(); };<\/script>
 </body>
 </html>`;
 
-    const blob = new Blob([ctaHtml], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    const win = window.open(url, "_blank");
-    if (!win) {
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `OrgPulse_CTA_Review_${org.replace(/[^a-zA-Z0-9]/g, "_")}_${new Date().toISOString().slice(0, 10)}.html`;
-      a.click();
-    }
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    const safeOrg = org.replace(/[^a-zA-Z0-9]/g, "_");
+    const dateStr = new Date().toISOString().slice(0, 10);
+    vscode.postMessage({
+      command: "exportCtaHtml",
+      data: {
+        html: ctaHtml,
+        fileName: `OrgPulse_CTA_Review_${safeOrg}_${dateStr}.html`,
+      },
+    });
   }
 
   // Expose to global so extension can call back with AI summary

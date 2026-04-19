@@ -599,7 +599,9 @@ export type DashboardMessageType =
   | 'runCtaReview'
   | 'setSecurityMode'
   | 'cancelAnalysis'
-  | 'refresh';
+  | 'refresh'
+  | 'exportDataModelCsv'
+  | 'exportCtaHtml';
 
 export interface DashboardMessage {
   command: DashboardMessageType;
