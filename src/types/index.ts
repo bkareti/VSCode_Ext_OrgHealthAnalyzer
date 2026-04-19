@@ -600,7 +600,8 @@ export type DashboardMessageType =
   | 'setSecurityMode'
   | 'cancelAnalysis'
   | 'refresh'
-  | 'exportDataModelCsv';
+  | 'exportDataModelCsv'
+  | 'exportCtaHtml';
 
 export interface DashboardMessage {
   command: DashboardMessageType;

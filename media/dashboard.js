@@ -6024,7 +6024,7 @@ ${nextStepsPage}
       );
       return;
     }
-    const ctaReview = results.ctaReview;
+
     const org =
       results.summary && results.summary.orgAlias
         ? results.summary.orgAlias
@@ -6041,83 +6041,46 @@ ${nextStepsPage}
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
 
-    const cvc =
-      ctaReview.verdict === "Go"
-        ? "#16a34a"
-        : ctaReview.verdict === "No-Go"
-          ? "#dc2626"
-          : "#d97706";
-    const cvLabel =
-      ctaReview.verdict === "Go"
-        ? "Recommended to Proceed"
-        : ctaReview.verdict === "No-Go"
-          ? "Not Recommended"
-          : "Conditional Approval";
+    // ── Capture the fully-rendered CTA tab DOM ─────────────────────────────
+    const panelEl = document.getElementById("panel-cta");
+    if (!panelEl) {
+      alert(
+        "CTA Review panel not found. Please switch to the CTA Review tab first.",
+      );
+      return;
+    }
+    const clone = panelEl.cloneNode(true);
 
-    const wmHtml = iconDataUri
-      ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:0;opacity:.04"><img src="${iconDataUri}" style="width:260px;height:260px;object-fit:contain" alt="" /></div>`
+    // Strip interactive controls (buttons, selects, inputs)
+    clone
+      .querySelectorAll("button, select, input, textarea")
+      .forEach((el) => el.remove());
+
+    // Resolve VS Code CSS variable references to their fallback values so
+    // the standalone HTML renders correctly in a browser.
+    clone.querySelectorAll("[style]").forEach((el) => {
+      el.style.cssText = el.style.cssText
+        .replace(/var\(--vscode-editor-background[^)]*\)/g, "#ffffff")
+        .replace(/var\(--vscode-widget-border[^)]*\)/g, "#e5e7eb")
+        .replace(/var\(--vscode-input-background[^)]*\)/g, "#f9fafb")
+        .replace(/var\(--vscode-input-foreground[^)]*\)/g, "#1a1a2e")
+        .replace(/var\(--vscode-input-border[^)]*\)/g, "#d1d5db")
+        .replace(/var\(--vscode-badge-background[^)]*\)/g, "rgba(0,0,0,.08)")
+        .replace(/var\(--vscode-badge-foreground[^)]*\)/g, "inherit")
+        .replace(/var\(--vscode-[^,)]+,\s*([^)]+)\)/g, "$1")
+        .replace(/var\(--sf-[^,)]+,\s*([^)]+)\)/g, "$1")
+        .replace(/var\(--score-excellent[^)]*\)/g, "#22c55e")
+        .replace(/var\(--score-good[^)]*\)/g, "#84cc16")
+        .replace(/var\(--score-fair[^)]*\)/g, "#f59e0b")
+        .replace(/var\(--score-poor[^)]*\)/g, "#f97316")
+        .replace(/var\(--score-critical[^)]*\)/g, "#ef4444");
+    });
+
+    const bodyContent = clone.innerHTML;
+
+    const headerLogoHtml = iconDataUri
+      ? `<img src="${iconDataUri}" style="width:18px;height:18px;object-fit:contain;border-radius:3px;vertical-align:middle;margin-right:5px;opacity:.7" alt="" />`
       : "";
-    const headerHtml = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding-bottom:8px;border-bottom:1px solid #e5e7eb;font-size:10px;color:#9ca3af;position:relative;z-index:1">${iconDataUri ? `<span><img src="${iconDataUri}" style="width:18px;height:18px;object-fit:contain;border-radius:3px;vertical-align:middle;margin-right:4px;opacity:.7" alt="" />OrgPulse · CTA Architecture Review</span>` : "<span>OrgPulse · CTA Architecture Review</span>"}<span>${esc(org)} · ${now}</span></div>`;
-
-    // ── Data Model Risk table for CTA PDF ──────────────────────────────────
-    const dmStats = (results.dataModelStats || [])
-      .filter(
-        (o) =>
-          (o.fieldLimitPct || 0) > 0 ||
-          (o.customFields || o.totalFields || 0) > 0,
-      )
-      .sort((a, b) => (b.fieldLimitPct || 0) - (a.fieldLimitPct || 0))
-      .slice(0, 5);
-
-    const dmRowsHtml = dmStats.length
-      ? dmStats
-          .map((o) => {
-            const pct = o.fieldLimitPct || 0;
-            const custF =
-              o.customFields != null ? o.customFields : o.totalFields || 0;
-            const stdF = o.standardFields != null ? o.standardFields : "—";
-            const totalF = o.totalFields || "—";
-            const badge =
-              pct >= 75
-                ? `<span style="background:#fee2e2;color:#b91c1c;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700">🔴 Critical</span>`
-                : pct >= 50
-                  ? `<span style="background:#ffedd5;color:#c2410c;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700">🟠 At Risk</span>`
-                  : pct >= 25
-                    ? `<span style="background:#fefce8;color:#a16207;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700">🟡 Caution</span>`
-                    : `<span style="background:#f0fdf4;color:#166534;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700">✅ OK</span>`;
-            return `<tr>
-            <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6">
-              <div style="font-weight:600;font-size:12px">${esc(o.objectLabel || o.objectName)}</div>
-              ${o.objectLabel && o.objectLabel !== o.objectName ? `<div style="font-size:10px;color:#9ca3af">${esc(o.objectName)}</div>` : ""}
-            </td>
-            <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-size:12px">${stdF}</td>
-            <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-size:12px;font-weight:600">${custF}</td>
-            <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-size:12px">${totalF}</td>
-            <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-size:12px;color:${pct >= 50 ? "#b91c1c" : pct >= 25 ? "#a16207" : "#166534"};font-weight:700">${pct}%</td>
-            <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;text-align:center">${badge}</td>
-          </tr>`;
-          })
-          .join("")
-      : `<tr><td colspan="6" style="padding:12px;text-align:center;color:#9ca3af;font-size:12px">No data model data — run a full org scan to populate.</td></tr>`;
-
-    const dmSectionHtml = `
-<div style="margin-top:20px;position:relative;z-index:1">
-  <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;margin-bottom:8px">🗄️ Data Model Risk — Objects Approaching Field Limit</div>
-  <table style="width:100%;border-collapse:collapse;font-family:inherit;font-size:12px">
-    <thead>
-      <tr style="background:#f9fafb">
-        <th style="padding:6px 10px;text-align:left;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;border-bottom:2px solid #e5e7eb">Object</th>
-        <th style="padding:6px 10px;text-align:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;border-bottom:2px solid #e5e7eb">Std Fields</th>
-        <th style="padding:6px 10px;text-align:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;border-bottom:2px solid #e5e7eb">Custom Fields</th>
-        <th style="padding:6px 10px;text-align:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;border-bottom:2px solid #e5e7eb">Total</th>
-        <th style="padding:6px 10px;text-align:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;border-bottom:2px solid #e5e7eb">Limit %</th>
-        <th style="padding:6px 10px;text-align:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;border-bottom:2px solid #e5e7eb">Status</th>
-      </tr>
-    </thead>
-    <tbody>${dmRowsHtml}</tbody>
-  </table>
-  <div style="font-size:10px;color:#9ca3af;margin-top:6px">Custom field governor limit: 800 fields per SObject. Objects >50% are deployment risks when adding new fields.</div>
-</div>`;
 
     const ctaHtml = `<!DOCTYPE html>
 <html lang="en">
@@ -6125,44 +6088,113 @@ ${nextStepsPage}
 <meta charset="utf-8">
 <title>OrgPulse CTA Review — ${esc(org)} — ${now}</title>
 <style>
-  @page { size: A4; margin: 20mm 18mm; }
+  @page { size: A4; margin: 15mm 14mm; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif; color: #1a1a2e; background: #fff; font-size: 13px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .page { padding: 28px 32px; page-break-after: always; display: flex; flex-direction: column; position: relative; overflow: hidden; }
-  @media print { .page { padding: 0; page-break-after: always; } body { font-size: 11px; } }
-  code { background: #f3f4f6; border-radius: 3px; padding: 1px 4px; font-family: 'SF Mono', Consolas, monospace; font-size: 0.9em; }
+  body {
+    font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif;
+    color: #1a1a2e;
+    background: #fff;
+    font-size: 12px;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* ── Print header bar ── */
+  .pdf-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 0 10px;
+    border-bottom: 1.5px solid #e5e7eb;
+    margin-bottom: 18px;
+    font-size: 10px;
+    color: #9ca3af;
+  }
+
+  /* ── CTA layout classes ── */
+  .section-card {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 18px 20px;
+  }
+  .cta-section-header { display:flex;align-items:center;gap:10px;margin-bottom:14px; }
+  .cta-section-icon { width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0; }
+  .cta-section-title { font-size:13px;font-weight:700; }
+  .cta-section-badge { font-size:10px;font-weight:700;opacity:.45;background:rgba(0,0,0,.08);padding:2px 7px;border-radius:10px; }
+
+  /* ── Maturity gauge ── */
+  .cta-maturity-gauge { display:flex;align-items:center;gap:0;margin-top:4px; }
+  .cta-maturity-step { flex:1;text-align:center;padding:7px 4px;border-radius:6px;border:1.5px solid #d1d5db; }
+  .cta-maturity-step.past { opacity:.7; }
+  .cta-maturity-step.active { transform:translateY(-2px);box-shadow:0 4px 10px rgba(0,0,0,.12); }
+  .cta-maturity-num { font-size:14px;font-weight:800;line-height:1; }
+  .cta-maturity-lbl { font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-top:3px;opacity:.8; }
+  .cta-maturity-connector { width:6px;height:1.5px;background:#d1d5db;flex-shrink:0; }
+  .cta-maturity-badge { font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;background:rgba(0,0,0,.08); }
+  .cta-maturity-badge.level-1{background:rgba(239,68,68,.15);color:#ef4444;}
+  .cta-maturity-badge.level-2{background:rgba(249,115,22,.15);color:#f97316;}
+  .cta-maturity-badge.level-3{background:rgba(245,158,11,.15);color:#f59e0b;}
+  .cta-maturity-badge.level-4{background:rgba(34,197,94,.15);color:#22c55e;}
+  .cta-maturity-badge.level-5{background:rgba(1,118,211,.15);color:#0176d3;}
+
+  /* ── Impact / Profile cards ── */
+  .cta-impact-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:10px;margin-top:4px; }
+  .cta-impact-card { padding:11px 13px;background:#fff;border:1px solid #e5e7eb;border-top-width:3px;border-radius:8px; }
+  .cta-impact-label { font-size:10px;font-weight:700;opacity:.65;margin-bottom:5px; }
+  .cta-impact-text { font-size:11px;line-height:1.5;opacity:.9; }
+  .cta-profile-item { padding:9px 13px;background:#fff;border:1px solid #e5e7eb;border-radius:8px; }
+  .cta-profile-label { font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.5;margin-bottom:4px; }
+  .cta-profile-value { font-size:12px;font-weight:600; }
+
+  /* ── Health score bars ── */
+  .cta-score-list { display:flex;flex-direction:column;gap:9px;margin-top:4px; }
+  .cta-score-row { display:grid;grid-template-columns:130px 1fr 44px 18px 1fr;align-items:center;gap:10px; }
+  .cta-score-label { font-size:11px;font-weight:600; }
+  .cta-score-bar-wrap { height:7px;background:#e5e7eb;border-radius:4px;overflow:hidden; }
+  .cta-score-bar { height:7px;border-radius:4px; }
+  .cta-score-num { font-size:11px;font-weight:700;text-align:right; }
+  .cta-score-trend { font-size:13px;font-weight:700;text-align:center; }
+  .cta-score-finding { font-size:10px;opacity:.65;line-height:1.4; }
+
+  /* ── Heatmap ── */
+  .cta-heatmap-grid { display:flex;flex-direction:column;gap:5px; }
+  .cta-heatmap-cell { padding:5px 10px;border-radius:6px;border:1px solid;display:flex;align-items:center;justify-content:space-between; }
+  .cta-heatmap-domain { font-size:11px;font-weight:600; }
+  .cta-heatmap-vals { font-size:10px;font-weight:700; }
+
+  /* ── Cost of Inaction ── */
+  .cta-inaction-card { background:#fff;border:1.5px solid rgba(239,68,68,.3);border-radius:12px;padding:20px; }
+  .cta-inaction-card .cta-section-title { color:#ef4444; }
+
+  /* ── Print page breaks ── */
+  @media print {
+    body { font-size: 11px; }
+    .section-card { break-inside: avoid; page-break-inside: avoid; }
+  }
 </style>
 </head>
 <body>
-<div class="page" style="position:relative">
-${wmHtml}
-${headerHtml}
-<div style="font-size:22px;font-weight:800;color:#1a1a2e;margin-bottom:4px;position:relative;z-index:1">🧠 CTA Architecture Review</div>
-<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:20px;padding-bottom:14px;border-bottom:2px solid #e5e7eb;position:relative;z-index:1">AI-Generated Executive Architecture Assessment</div>
-<div style="display:flex;align-items:center;gap:16px;padding:16px 20px;border-radius:10px;background:${ctaReview.verdict === "Go" ? "rgba(22,163,74,.06)" : ctaReview.verdict === "No-Go" ? "rgba(220,38,38,.06)" : "rgba(217,119,6,.06)"};border:2px solid ${cvc};margin-bottom:18px;position:relative;z-index:1">
-  <div style="font-size:48px;line-height:1">${ctaReview.verdict === "Go" ? "✅" : ctaReview.verdict === "No-Go" ? "🚫" : "⚠️"}</div>
-  <div>
-    <div style="font-size:17px;font-weight:800;color:${cvc}">${esc(ctaReview.verdict)} — ${cvLabel}</div>
-    <div style="font-size:10px;color:#6b7280;margin-top:3px">✨ ${esc(ctaReview.modelUsed || "AI")} · ${ctaReview.generatedAt ? new Date(ctaReview.generatedAt).toLocaleString() : "Generated"}</div>
-  </div>
+<div class="pdf-header">
+  <span>${headerLogoHtml}OrgPulse · CTA Architecture Review</span>
+  <span>${esc(org)} &nbsp;·&nbsp; ${now}</span>
 </div>
-${ctaReview.executiveSummary ? `<div style="margin-bottom:14px;position:relative;z-index:1"><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;margin-bottom:6px">Executive Summary</div><p style="font-size:12px;color:#1f2937;line-height:1.7;margin:0">${esc(ctaReview.executiveSummary)}</p></div>` : ""}
-${dmSectionHtml}
+<div style="padding:0 2px">
+${bodyContent}
 </div>
 <script>window.onload = function() { window.print(); };<\/script>
 </body>
 </html>`;
 
-    const blob = new Blob([ctaHtml], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    const win = window.open(url, "_blank");
-    if (!win) {
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `OrgPulse_CTA_Review_${org.replace(/[^a-zA-Z0-9]/g, "_")}_${new Date().toISOString().slice(0, 10)}.html`;
-      a.click();
-    }
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    const safeOrg = org.replace(/[^a-zA-Z0-9]/g, "_");
+    const dateStr = new Date().toISOString().slice(0, 10);
+    vscode.postMessage({
+      command: "exportCtaHtml",
+      data: {
+        html: ctaHtml,
+        fileName: `OrgPulse_CTA_Review_${safeOrg}_${dateStr}.html`,
+      },
+    });
   }
 
   // Expose to global so extension can call back with AI summary

@@ -10,8 +10,11 @@ src/**
 .yarnrc
 esbuild.js
 vsc-extension-quickstart.md
+cta-prompt.md
+media/iconOld.png
 **/tsconfig.json
 **/eslint.config.mjs
 **/*.map
 **/*.ts
 **/.vscode-test.*
+orgpulse-*.vsix
