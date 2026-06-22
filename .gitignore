@@ -6,3 +6,4 @@ node_modules
 .sfdx/
 .orgpulse/
 .DS_Store
+.docbuild-venv/

@@ -2,9 +2,14 @@
  * AI Service — Phase 5 (v1.4.0)
  *
  * Provides AI-powered issue explanations and CTA-tier architectural synthesis via:
- *   1. Anthropic Claude (claude-sonnet-4-6 / claude-opus-4-6) via vscode.lm
+ *   1. Anthropic Claude (claude-opus-4-8 / claude-opus-4-7 / claude-sonnet-4-6) via vscode.lm
  *   2. GitHub Copilot (gpt-4o) via vscode.lm — fallback
  *   3. Any available vscode.lm model — final fallback
+ *
+ * Model matching is by vendor + family *prefix* (e.g. any "claude-opus-4-*"),
+ * picking the newest available — exact-string matching would silently fall
+ * through to "any model" whenever the LM provider exposes a different family
+ * string than the one hardcoded here.
  *
  * Design principles:
  *   - User consent is requested ONCE and remembered in globalState
@@ -18,12 +23,27 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Issue, AnalysisResult, CTAReview, CtaDomainFinding } from '../types';
 import { logInfo, logError, logWarning } from '../utils/logger';
+import { getErrorMessage } from '../utils/errors';
+import { getSalesforceService } from './salesforceService';
 
 // ============================================================================
 // Types
 // ============================================================================
 
-export type AIProviderName = 'claude' | 'copilot' | 'none';
+export type AIProviderName = 'claude' | 'copilot' | 'custom' | 'none';
+
+/** Which transport a model is reached through. */
+export type AiBackend = 'vscode-lm' | 'custom';
+
+/** A selectable model surfaced to the dashboard model picker. */
+export interface ModelOption {
+  /** Selector id: 'auto', '<vendor>/<family>' (vscode-lm), or 'custom:<model>'. */
+  id: string;
+  label: string;
+  backend: AiBackend;
+  vendor?: string;
+  family?: string;
+}
 
 export interface AIExplanation {
   summary: string;       // 1–2 sentence plain-English summary
@@ -59,56 +79,201 @@ interface SelectedModel {
   provider: AIProviderName;
 }
 
+/** Ordered family *prefixes* to prefer for a given vendor (newest first). */
+interface ModelCandidate { vendor: string; familyPrefixes: string[]; provider: AIProviderName }
+
+/**
+ * Resolve the first available model whose family starts with one of the given
+ * prefixes. Queries by vendor only (not exact family) so we match whatever
+ * concrete family string the LM provider exposes (e.g. "claude-opus-4.8",
+ * "claude-3.7-sonnet"), and pick the most-preferred available one.
+ */
+async function resolveCandidate(candidate: ModelCandidate): Promise<vscode.LanguageModelChat | undefined> {
+  let models: readonly vscode.LanguageModelChat[] = [];
+  try {
+    models = await vscode.lm.selectChatModels({ vendor: candidate.vendor });
+  } catch {
+    return undefined;
+  }
+  if (!models || models.length === 0) { return undefined; }
+
+  for (const prefix of candidate.familyPrefixes) {
+    const match = models.find(m => (m.family || '').toLowerCase().startsWith(prefix.toLowerCase()));
+    if (match) { return match; }
+  }
+  // Vendor present but no family matched a preferred prefix — use its first model.
+  return models[0];
+}
+
 async function selectBestModel(overridePreference?: string): Promise<SelectedModel> {
   if (!vscode.lm) {
     throw new Error('VS Code Language Model API not available');
   }
 
-  // Read user preference from settings (can be overridden by caller)
+  // Read user preference from settings (can be overridden by caller).
+  // Precedence: explicit arg → ai.preferredModel → legacy ai.ctaModel → 'auto'.
   const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
-  const preference = overridePreference ?? cfg.get<string>('ctaModel', 'auto');
+  const preference = overridePreference
+    ?? cfg.get<string>('preferredModel')
+    ?? cfg.get<string>('ctaModel', 'auto')
+    ?? 'auto';
 
-  type ModelCandidate = { vendor: string; family: string; provider: AIProviderName };
+  // Exact model selector "vendor/family" coming from the dynamic picker.
+  if (preference && preference.includes('/') && !preference.startsWith('custom:')) {
+    const slash = preference.indexOf('/');
+    const vendor = preference.slice(0, slash);
+    const family = preference.slice(slash + 1);
+    try {
+      const exact = await vscode.lm.selectChatModels({ vendor, family });
+      if (exact && exact.length > 0) {
+        logInfo(`AI: selected model ${exact[0].name} (exact ${preference})`);
+        return { model: exact[0], provider: vendor === 'anthropic' ? 'claude' : 'copilot' };
+      }
+    } catch {
+      // exact selector unavailable — fall through to heuristic
+    }
+  }
+
+  const claudeOpus: ModelCandidate = { vendor: 'anthropic', familyPrefixes: ['claude-opus-4-8', 'claude-opus-4', 'claude-opus', 'claude'], provider: 'claude' };
+  const claudeSonnet: ModelCandidate = { vendor: 'anthropic', familyPrefixes: ['claude-sonnet-4-6', 'claude-sonnet', 'claude'], provider: 'claude' };
+  const copilotGpt: ModelCandidate = { vendor: 'copilot', familyPrefixes: ['gpt-4o', 'gpt-4', 'gpt'], provider: 'copilot' };
 
   let candidates: ModelCandidate[];
   switch (preference) {
     case 'claude-sonnet':
-      candidates = [{ vendor: 'anthropic', family: 'claude-sonnet-4-6', provider: 'claude' }];
+      candidates = [claudeSonnet, claudeOpus, copilotGpt];
       break;
     case 'claude-opus':
-      candidates = [{ vendor: 'anthropic', family: 'claude-opus-4-6', provider: 'claude' }];
+      candidates = [claudeOpus, claudeSonnet, copilotGpt];
       break;
     case 'gpt-4o':
-      candidates = [{ vendor: 'copilot', family: 'gpt-4o', provider: 'copilot' }];
+      candidates = [copilotGpt, claudeOpus, claudeSonnet];
       break;
-    default: // 'auto' — try best available
-      candidates = [
-        { vendor: 'anthropic', family: 'claude-sonnet-4-6', provider: 'claude' },
-        { vendor: 'anthropic', family: 'claude-opus-4-6', provider: 'claude' },
-        { vendor: 'copilot', family: 'gpt-4o', provider: 'copilot' },
-      ];
+    default: // 'auto' — best Claude first, then Copilot
+      candidates = [claudeOpus, claudeSonnet, copilotGpt];
   }
 
   for (const candidate of candidates) {
-    try {
-      const models = await vscode.lm.selectChatModels({ vendor: candidate.vendor, family: candidate.family });
-      if (models && models.length > 0) {
-        logInfo(`AI: selected model ${models[0].name} (${candidate.vendor}/${candidate.family})`);
-        return { model: models[0], provider: candidate.provider };
-      }
-    } catch {
-      // model not available — continue
+    const model = await resolveCandidate(candidate);
+    if (model) {
+      logInfo(`AI: selected model ${model.name} (vendor=${model.vendor}, family=${model.family})`);
+      return { model, provider: candidate.provider };
     }
   }
 
-  // Final fallback: any model
+  // Final fallback: any model from any vendor
   const anyModels = await vscode.lm.selectChatModels();
   if (anyModels && anyModels.length > 0) {
-    logInfo(`AI: fallback to any model — ${anyModels[0].name}`);
-    return { model: anyModels[0], provider: 'copilot' };
+    const m = anyModels[0];
+    logWarning(`AI: no preferred model found — falling back to ${m.name} (vendor=${m.vendor}, family=${m.family})`);
+    return { model: m, provider: m.vendor === 'anthropic' ? 'claude' : 'copilot' };
   }
 
-  throw new Error('No AI language model available. Install GitHub Copilot Chat or an Anthropic extension.');
+  throw new Error('No AI language model available. Install GitHub Copilot Chat, an Anthropic extension, or configure a local endpoint (Settings → sfHealthAnalyzer.ai.custom).');
+}
+
+// ============================================================================
+// Backend selection + dynamic model discovery
+// ============================================================================
+
+interface CustomConfig { baseUrl: string; model: string; apiKey: string; }
+
+/** Read the custom / local OpenAI-compatible backend configuration. */
+function getCustomConfig(): CustomConfig {
+  const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
+  return {
+    baseUrl: (cfg.get<string>('custom.baseUrl', 'http://localhost:11434/v1') || '').trim().replace(/\/+$/, ''),
+    model: (cfg.get<string>('custom.model', '') || '').trim(),
+    apiKey: (cfg.get<string>('custom.apiKey', '') || '').trim(),
+  };
+}
+
+function isCustomConfigured(): boolean {
+  const c = getCustomConfig();
+  return !!c.baseUrl && !!c.model;
+}
+
+/** Is the configured custom endpoint local (data never leaves the machine)? */
+function isLocalEndpoint(baseUrl: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:|\/|$)/i.test(baseUrl);
+}
+
+/**
+ * Map a selector to its backend + concrete custom model.
+ * Precedence: explicit 'custom:' selector → ai.provider='custom' switch →
+ * persisted preferred/legacy selector → default vscode-lm.
+ */
+function resolveBackend(selectorId?: string): { backend: AiBackend; customModel?: string } {
+  const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
+  let sel = (selectorId || '').trim();
+  if (!sel) {
+    sel = (cfg.get<string>('preferredModel') || cfg.get<string>('ctaModel', 'auto') || 'auto').trim();
+  }
+  if (sel.startsWith('custom:')) {
+    return { backend: 'custom', customModel: sel.slice('custom:'.length) || getCustomConfig().model };
+  }
+  const provider = cfg.get<string>('provider', 'auto');
+  if (provider === 'custom' && isCustomConfigured()) {
+    return { backend: 'custom', customModel: getCustomConfig().model };
+  }
+  return { backend: 'vscode-lm' };
+}
+
+/**
+ * Enumerate every model the user can actually use right now:
+ *   - all VS Code Language Model API models (any provider — Copilot's Claude/GPT/
+ *     Gemini/o-series, Codex, or any third-party provider extension)
+ *   - the configured local/custom endpoint's models (Ollama / OpenAI-compatible)
+ */
+async function listModelOptions(): Promise<ModelOption[]> {
+  const options: ModelOption[] = [{ id: 'auto', label: 'Auto (best available)', backend: 'vscode-lm' }];
+
+  // VS Code LM providers — dynamic, not restricted to Copilot.
+  try {
+    if (vscode.lm) {
+      const models = await vscode.lm.selectChatModels();
+      const seen = new Set<string>();
+      for (const m of models) {
+        const id = `${m.vendor}/${m.family}`;
+        if (seen.has(id)) { continue; }
+        seen.add(id);
+        options.push({ id, label: `${m.name} (${m.vendor})`, backend: 'vscode-lm', vendor: m.vendor, family: m.family });
+      }
+    }
+  } catch (e) {
+    logWarning(`AI: could not enumerate VS Code LM models: ${getErrorMessage(e)}`);
+  }
+
+  // Local / custom OpenAI-compatible endpoint.
+  const custom = getCustomConfig();
+  if (custom.baseUrl) {
+    const local = isLocalEndpoint(custom.baseUrl);
+    const tag = local ? 'Local' : 'Custom';
+    const discovered = await listCustomModels(custom);
+    if (discovered.length > 0) {
+      for (const model of discovered) {
+        options.push({ id: `custom:${model}`, label: `${tag}: ${model}`, backend: 'custom' });
+      }
+    } else if (custom.model) {
+      options.push({ id: `custom:${custom.model}`, label: `${tag}: ${custom.model}`, backend: 'custom' });
+    }
+  }
+
+  return options;
+}
+
+/** Try GET {baseUrl}/models (OpenAI-compatible) to list installed models. */
+async function listCustomModels(custom: CustomConfig): Promise<string[]> {
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (custom.apiKey) { headers['Authorization'] = `Bearer ${custom.apiKey}`; }
+    const resp = await fetch(`${custom.baseUrl}/models`, { headers });
+    if (!resp.ok) { return []; }
+    const json = await resp.json() as { data?: Array<{ id?: string }> };
+    return (json.data ?? []).map(d => d.id).filter((x): x is string => !!x);
+  } catch {
+    return [];
+  }
 }
 
 // ============================================================================
@@ -170,7 +335,11 @@ function buildCtaPrompt(result: AnalysisResult): string {
     .slice(0, 5)
     .map(q => `[${q.sforcePerformanceLevel}${q.isFullTableScan ? ' FULL_SCAN' : ''}] ${q.soql.slice(0, 100)}`)
     .join('\n');
-  const totalCustomFields = dataModelStats.reduce((sum, s) => sum + (s.customFields ?? s.totalFields ?? 0), 0);
+  // Use only genuine custom fields (not total fields fallback) for accuracy
+  const totalCustomFields = dataModelStats.reduce((sum, s) => sum + (s.customFields ?? 0), 0);
+  // Live active user count from userSummary (exact from org — do NOT guess this)
+  const activeUserCount = result.userSummary?.totalActiveUsers ?? result.metadata?.analyzedUsers ?? 0;
+  const customObjectCount = dataModelStats.filter(s => s.objectName.endsWith('__c')).length;
 
   // ── DATA MODEL HIGHLIGHTS (req 6: send only highlight info) ─────────────
   // Merge dataModelStats + automationSummary.objectMap for object highlights
@@ -248,15 +417,29 @@ function buildCtaPrompt(result: AnalysisResult): string {
     .map(i => `- ${i.ruleId}: ${i.file}`)
     .join('\n') || 'None detected';
 
-  const snapshot = `Health Scores: codeQuality=${scores.codeQuality ?? 'N/A'}, automationDesign=${scores.automationDesign ?? 'N/A'}, dataModel=${scores.dataModel ?? 'N/A'}, overall=${scores.overall ?? 'N/A'}
+  const snapshot = `=== LIVE ORG HEALTH SCORES (use these EXACT values in healthScoreBreakdown) ===
+Code Quality:      ${scores.codeQuality ?? 'N/A'}/100
+Automation Design: ${scores.automationDesign ?? 'N/A'}/100
+Data Model:        ${scores.dataModel ?? 'N/A'}/100
+Security:          ${scores.security ?? 'N/A'}/100
+Test Coverage:     ${scores.testing ?? 'N/A'}/100
+Performance:       ${scores.performance ?? 'N/A'}/100
+Integration:       ${scores.integration ?? 'N/A'}/100
+Overall Score:     ${scores.overall ?? 'N/A'}/100
 
-Org Inventory:
-- Apex Classes: ${orgInv.apexClassCount ?? 0}, Apex Triggers: ${orgInv.apexTriggerCount ?? 0}
-- Flows: ${orgInv.flowCount ?? 0}
-- Profiles: ${orgInv.profileCount ?? 0}, Permission Sets: ${orgInv.permissionSetCount ?? 0}
-- Custom Objects: ${orgInv.customObjectCount ?? 0} (total custom fields: ${totalCustomFields})
-- Validation Rules: ${orgInv.validationRuleCount ?? 0}
-- Record Types: ${orgInv.recordTypeCount ?? 0}, Page Layouts: ${orgInv.pageLayoutCount ?? 0}, Lightning Pages: ${orgInv.flexiPageCount ?? 0}
+=== LIVE ORG INVENTORY (these are exact values from the org — do NOT change them) ===
+Active Users: ${activeUserCount} (EXACT — use this number verbatim in orgProfile.userScale)
+Apex Classes: ${orgInv.apexClassCount ?? result.metadata?.analyzedClasses ?? 0}
+Apex Triggers: ${orgInv.apexTriggerCount ?? result.metadata?.analyzedTriggers ?? 0}
+Flows: ${orgInv.flowCount ?? autoSummary.totalFlows ?? 0}
+Profiles: ${orgInv.profileCount ?? 0}
+Permission Sets: ${orgInv.permissionSetCount ?? 0}
+Custom Objects: ${customObjectCount} (exact count from org)
+Total Custom Fields: ${totalCustomFields} (exact count from org)
+Validation Rules: ${orgInv.validationRuleCount ?? autoSummary.totalValidationRules ?? 0}
+Record Types: ${orgInv.recordTypeCount ?? 0}
+Page Layouts: ${orgInv.pageLayoutCount ?? 0}
+Lightning Pages (FlexiPages): ${orgInv.flexiPageCount ?? 0}
 
 Automation Summary:
 - Total Flows: ${autoSummary.totalFlows ?? 0}
@@ -325,64 +508,91 @@ CTA-Review Issues: ${(result.issues ?? []).filter(i => i.category === 'cta-revie
 
   // Default built-in prompt (mirrors cta-prompt.md — keep in sync)
   return `You are a Salesforce Certified Technical Architect (CTA) and enterprise transformation advisor.
-Produce a premium 12-section executive architecture report. Be CONCISE — 1-2 sentences per string field. No filler.
+Produce a premium executive architecture report. Be CONCISE — 1-2 sentences per string field. No filler.
 
 ARCHITECTURE MATURITY LEVELS: 1=Ad Hoc, 2=Repeatable, 3=Defined, 4=Managed, 5=Optimised.
 BENCHMARK REFERENCE: Code coverage avg 78%/top 92%; Triggers-per-object avg 1.2/top 1.0; Flow:Apex ratio avg 2.5:1/top 4:1; Custom fields/object avg 38/top <25; Profile count avg 22/top <12.
 
+CRITICAL DATA RULES — MUST FOLLOW:
+1. orgProfile.userScale MUST be the exact number from "Active Users" in the snapshot (e.g. "42 users"). Do NOT guess or approximate.
+2. healthScoreBreakdown MUST use the EXACT numeric scores from "LIVE ORG HEALTH SCORES" in the snapshot. Do NOT invent or smooth scores.
+3. businessImpactSummary.revenueRisk MUST describe revenue impact from: system downtime (LDV/lock risk), data integrity failures (missing validation, schema issues), integration failures (callout-in-trigger, idempotency gaps), and security exposure — NOT just test coverage. Test coverage is a code quality metric, not a revenue risk on its own.
+4. Custom Objects and Total Custom Fields must reflect the EXACT counts from the snapshot.
+5. ALL domain findings must be grounded in specific evidence from the snapshot (class names, object names, issue counts).
+
 Return ONLY valid JSON (no markdown fences) with ALL 15 keys:
 {
   "verdict": "Go"|"Conditional Go"|"No-Go",
-  "executiveSummary": "<3-4 sentences for C-suite. Lead with most critical finding.>",
-  "architectureMaturity": { "level": <1-5>, "label": "<Ad Hoc|Repeatable|Defined|Managed|Optimised>", "summary": "<1-2 sentences with 2 evidence points.>" },
-  "businessImpactSummary": { "revenueRisk": "<1 sentence>", "operationalRisk": "<1 sentence>", "complianceRisk": "<1 sentence>", "overallSeverity": "Low"|"Medium"|"High"|"Critical" },
-  "orgProfile": { "complexity": "Simple"|"Moderate"|"Complex"|"Enterprise", "userScale": "<e.g. 500-1000 users>", "integrationFootprint": "<brief>", "customizationLevel": "<brief>" },
+  "executiveSummary": "<3-4 sentences for C-suite. Lead with most critical finding. Reference specific class/object names.>",
+  "architectureMaturity": { "level": <1-5>, "label": "<Ad Hoc|Repeatable|Defined|Managed|Optimised>", "summary": "<1-2 sentences with 2 specific evidence points from the snapshot.>" },
+  "businessImpactSummary": {
+    "revenueRisk": "<1 sentence: describe risk of revenue loss from system failures, data loss, integration outages, or downtime — cite specific evidence>",
+    "operationalRisk": "<1 sentence: describe operational disruption risk — automation failures, governor limits, LDV locks, etc.>",
+    "complianceRisk": "<1 sentence: describe data exposure, sharing model gaps, without-sharing Apex, or audit trail risks>",
+    "overallSeverity": "Low"|"Medium"|"High"|"Critical"
+  },
+  "orgProfile": {
+    "complexity": "Simple"|"Moderate"|"Complex"|"Enterprise",
+    "userScale": "<exact number from snapshot> users",
+    "integrationFootprint": "<brief description based on Named Credentials, @RestResource count, callout patterns>",
+    "customizationLevel": "<brief: reference custom objects count and custom fields count from snapshot>"
+  },
   "healthScoreBreakdown": [
-    { "area": "Code Quality", "score": <exact score from snapshot>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence>" },
-    { "area": "Automation Design", "score": <exact score>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence>" },
-    { "area": "Data Model", "score": <exact score>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence>" },
-    { "area": "Security", "score": <derive from Security domain finding>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence>" }
+    { "area": "Code Quality",      "score": <EXACT value from snapshot>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence with specific evidence>" },
+    { "area": "Automation Design", "score": <EXACT value from snapshot>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence with specific evidence>" },
+    { "area": "Data Model",        "score": <EXACT value from snapshot>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence with specific evidence>" },
+    { "area": "Security",          "score": <EXACT value from snapshot>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence with specific evidence>" },
+    { "area": "Test Coverage",     "score": <EXACT value from snapshot>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence with specific evidence>" },
+    { "area": "Performance",       "score": <EXACT value from snapshot>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence with specific evidence>" }
   ],
   "topCriticalIssues": [
-    { "rank": 1, "title": "<title>", "severity": "Critical"|"High", "domain": "<domain>", "impact": "<1 sentence>", "remediation": "<1 sentence>", "effortEstimate": "<e.g. 1-2 days>" }
-    ...up to 10 items
+    { "rank": 1, "title": "<specific title naming the class/object>", "severity": "Critical"|"High", "domain": "<domain>", "impact": "<1 sentence>", "remediation": "<1 sentence>", "effortEstimate": "<e.g. 1-2 days>" }
+    ... up to 10 items ranked by business impact
   ],
   "riskAnalysis": {
-    "probabilityOfIncident": "<1 sentence with % estimate and timeframe>",
+    "probabilityOfIncident": "<1 sentence with % estimate and timeframe based on evidence>",
     "timeToRisk": "<e.g. 3-6 months>",
     "riskHeatmap": [
       { "domain": "System Architecture", "likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" },
-      { "domain": "Security", "likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" },
-      { "domain": "Data Architecture", "likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" },
-      { "domain": "Integration", "likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" },
-      { "domain": "Solution Architecture", "likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" }
+      { "domain": "Security",            "likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" },
+      { "domain": "Data Architecture",   "likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" },
+      { "domain": "Integration",         "likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" },
+      { "domain": "Solution Architecture","likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" }
     ]
   },
   "benchmarkComparison": [
-    { "metric": "<metric>", "orgValue": "<value>", "industryAvg": "<avg>", "topQuartile": "<top>", "status": "Below"|"At"|"Above" }
-    ...3-5 items
+    { "metric": "<metric>", "orgValue": "<exact value from snapshot>", "industryAvg": "<avg>", "topQuartile": "<top>", "status": "Below"|"At"|"Above" }
+    ... 5 items using real org values
   ],
   "domainFindings": [
-    { "domain": "System Architecture", "status": "Pass"|"Warning"|"Fail", "analysis": "<2 sentences>", "risks": ["<specific>"], "recommendations": ["<concrete>"] },
-    { "domain": "Security", ... },
-    { "domain": "Data Architecture", ... },
-    { "domain": "Integration", ... },
-    { "domain": "Solution Architecture", ... }
+    { "domain": "System Architecture", "status": "Pass"|"Warning"|"Fail", "analysis": "<2 sentences with specific class/object names>", "risks": ["<specific risk>"], "recommendations": ["<concrete action>"] },
+    { "domain": "Security",            "status": "Pass"|"Warning"|"Fail", "analysis": "<2 sentences>", "risks": ["<specific>"], "recommendations": ["<concrete>"] },
+    { "domain": "Data Architecture",   "status": "Pass"|"Warning"|"Fail", "analysis": "<2 sentences>", "risks": ["<specific>"], "recommendations": ["<concrete>"] },
+    { "domain": "Integration",         "status": "Pass"|"Warning"|"Fail", "analysis": "<2 sentences>", "risks": ["<specific>"], "recommendations": ["<concrete>"] },
+    { "domain": "Solution Architecture","status": "Pass"|"Warning"|"Fail", "analysis": "<2 sentences>", "risks": ["<specific>"], "recommendations": ["<concrete>"] }
   ],
-  "aiInsights": { "hiddenRisks": ["<max 3>"], "predictions": ["<max 3>"], "unusualPatterns": ["<max 3>"] },
+  "aiInsights": { "hiddenRisks": ["<max 3 non-obvious risks>"], "predictions": ["<max 3 data-driven predictions>"], "unusualPatterns": ["<max 3 unusual patterns>"] },
   "architectureObservations": [
-    { "observation": "<1 sentence>", "classification": "Strength"|"Weakness"|"Opportunity"|"Threat" }
-    ...4-8 items covering all 4 classifications
+    { "observation": "<1 sentence citing specific evidence>", "classification": "Strength"|"Weakness"|"Opportunity"|"Threat" }
+    ... 4-8 items covering all 4 classifications
   ],
   "recommendations": {
-    "quickWins": [ { "action": "<action>", "effort": "Low"|"Medium"|"High", "impact": "<impact>" } ...3-5 items ],
-    "strategic": [ { "action": "<action>", "timeline": "<e.g. Q3 2026>", "effort": "Low"|"Medium"|"High", "impact": "<impact>" } ...3-5 items ]
+    "quickWins": [ { "action": "<specific action>", "effort": "Low"|"Medium"|"High", "impact": "<specific impact>" } ... 3-5 items ],
+    "strategic": [ { "action": "<specific action>", "timeline": "<e.g. Q3 2026>", "effort": "Low"|"Medium"|"High", "impact": "<specific impact>" } ... 3-5 items ]
   },
-  "costOfInaction": { "financialImpact": "<1 sentence>", "technicalDebtGrowth": "<1 sentence>", "risks": ["<max 3>"] },
-  "finalRecommendation": { "summary": "<2-3 sentences>", "nextSteps": ["<max 5 immediate actions>"], "proposedTimeline": "<90-day plan>" }
+  "costOfInaction": { "financialImpact": "<1 sentence with estimated cost/risk>", "technicalDebtGrowth": "<1 sentence>", "risks": ["<max 3 specific risks>"] },
+  "finalRecommendation": { "summary": "<2-3 sentences>", "nextSteps": ["<max 5 immediate, actionable steps>"], "proposedTimeline": "<90-day plan with milestones>" }
 }
 
-RULES: Exactly 5 domainFindings. healthScoreBreakdown scores must match snapshot values. LDV >500k → Data Architecture Warning/Fail. Multi-trigger objects → name them in System Architecture. @RestResource without sharing → flag in Security. Be specific — name classes/objects.
+VALIDATION RULES:
+- Exactly 5 domainFindings (one per domain above).
+- healthScoreBreakdown MUST have exactly 6 rows matching the 6 scores in the snapshot.
+- All scores in healthScoreBreakdown must equal the snapshot values exactly.
+- LDV objects >500k → Data Architecture status = Warning or Fail.
+- Multi-trigger objects → name them explicitly in System Architecture analysis.
+- @RestResource with "without sharing" → flag in Security as Critical.
+- orgProfile.userScale must be the exact active user count (e.g. "42 users").
+- benchmarkComparison orgValue fields must use exact snapshot values.
 
 === ORG HEALTH SNAPSHOT ===
 ${snapshot}
@@ -394,6 +604,12 @@ ${snapshot}
 // ============================================================================
 
 async function callModel(prompt: string, modelPreference?: string): Promise<{ text: string; provider: AIProviderName }> {
+  const { backend, customModel } = resolveBackend(modelPreference);
+  if (backend === 'custom') {
+    const text = await callCustomChat(prompt, customModel);
+    return { text, provider: 'custom' };
+  }
+
   const { model, provider } = await selectBestModel(modelPreference);
 
   const messages = [vscode.LanguageModelChatMessage.User(prompt)];
@@ -408,6 +624,218 @@ async function callModel(prompt: string, modelPreference?: string): Promise<{ te
   }
 
   return { text: raw, provider };
+}
+
+// ============================================================================
+// Custom / local backend — OpenAI-compatible HTTP (Ollama, LM Studio, vLLM,
+// OpenAI, Codex, Azure). Uses the extension host's global fetch.
+// ============================================================================
+
+interface OAToolCall { id: string; type?: string; function: { name: string; arguments: string }; }
+interface OAMessage { role: string; content: string | null; tool_calls?: OAToolCall[]; tool_call_id?: string; name?: string; }
+
+function customHeaders(custom: CustomConfig): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (custom.apiKey) { headers['Authorization'] = `Bearer ${custom.apiKey}`; }
+  return headers;
+}
+
+/** Single-shot completion against the custom endpoint (no tools). */
+async function callCustomChat(prompt: string, model?: string): Promise<string> {
+  const custom = getCustomConfig();
+  const useModel = model || custom.model;
+  if (!custom.baseUrl || !useModel) {
+    throw new Error('Local/custom AI endpoint not configured (Settings → sfHealthAnalyzer.ai.custom.baseUrl and .model).');
+  }
+  const resp = await fetch(`${custom.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: customHeaders(custom),
+    body: JSON.stringify({ model: useModel, messages: [{ role: 'user', content: prompt }], stream: false }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`Local/custom endpoint error ${resp.status}: ${body.slice(0, 200)}`);
+  }
+  const json = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+  return json.choices?.[0]?.message?.content ?? '';
+}
+
+/**
+ * Tool-augmented chat loop against the custom endpoint (OpenAI tools schema).
+ * Falls back to a no-tools answer if the endpoint/model rejects `tools`.
+ */
+async function runCustomToolLoop(initial: OAMessage[], model?: string): Promise<string> {
+  const custom = getCustomConfig();
+  const useModel = model || custom.model;
+  if (!custom.baseUrl || !useModel) {
+    throw new Error('Local/custom AI endpoint not configured (Settings → sfHealthAnalyzer.ai.custom.baseUrl and .model).');
+  }
+  const headers = customHeaders(custom);
+  const tools = ARCHITECT_TOOLS.map(t => ({
+    type: 'function',
+    function: { name: t.name, description: t.description, parameters: t.inputSchema },
+  }));
+
+  const messages: OAMessage[] = [...initial];
+  let allowTools = true;
+  let answer = '';
+
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const body: Record<string, unknown> = { model: useModel, messages, stream: false };
+    if (allowTools) { body.tools = tools; body.tool_choice = 'auto'; }
+
+    const resp = await fetch(`${custom.baseUrl}/chat/completions`, {
+      method: 'POST', headers, body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '');
+      if (allowTools) {
+        logWarning(`Local/custom endpoint rejected tool calling (${resp.status}) — retrying without tools`);
+        allowTools = false;
+        continue;
+      }
+      throw new Error(`Local/custom endpoint error ${resp.status}: ${txt.slice(0, 200)}`);
+    }
+
+    const json = await resp.json() as { choices?: Array<{ message?: OAMessage }> };
+    const msg = json.choices?.[0]?.message;
+    if (!msg) { return answer.trim(); }
+    answer = msg.content || answer;
+
+    const calls = msg.tool_calls ?? [];
+    if (!allowTools || calls.length === 0) {
+      return (msg.content || '').trim();
+    }
+
+    // Record the assistant turn (with its tool calls), then each tool result.
+    messages.push({ role: 'assistant', content: msg.content ?? '', tool_calls: calls });
+    for (const call of calls) {
+      let args: Record<string, unknown> = {};
+      try { args = call.function?.arguments ? JSON.parse(call.function.arguments) : {}; } catch { args = {}; }
+      const out = await runArchitectTool(call.function?.name ?? '', args);
+      messages.push({ role: 'tool', tool_call_id: call.id, name: call.function?.name, content: out });
+    }
+  }
+
+  return answer.trim() || 'I reached the maximum number of data-gathering steps before completing an answer. Try a more specific question.';
+}
+
+// ============================================================================
+// "Ask the Architect" — tool-augmented Q&A over the live org
+// ============================================================================
+//
+// Gives the language model read-only access to the connected org by wrapping
+// existing SalesforceService methods as tools (the same tool-augmented-LLM
+// pattern MCP standardises, implemented in-process with no extra dependencies).
+
+const MAX_TOOL_ROUNDS = 5;
+const TOOL_RESULT_MAX_CHARS = 6000;
+
+const ARCHITECT_TOOLS: vscode.LanguageModelChatTool[] = [
+  {
+    name: 'run_soql',
+    description: 'Run a READ-ONLY SELECT SOQL query against the connected Salesforce org (Data API). Use for record counts and business data, e.g. "SELECT COUNT(Id) FROM Account".',
+    inputSchema: { type: 'object', properties: { soql: { type: 'string', description: 'A SELECT-only SOQL query.' } }, required: ['soql'] },
+  },
+  {
+    name: 'run_tooling_soql',
+    description: 'Run a READ-ONLY SELECT SOQL query against the Tooling API. Use for metadata objects such as ApexClass, ApexTrigger, Flow, EntityDefinition, FieldDefinition, ValidationRule, PermissionSet.',
+    inputSchema: { type: 'object', properties: { soql: { type: 'string', description: 'A SELECT-only Tooling API SOQL query.' } }, required: ['soql'] },
+  },
+  {
+    name: 'explain_query',
+    description: 'Return the query plan / selectivity (EXPLAIN) for a SOQL query, including whether it triggers a full table scan. Use to assess query performance.',
+    inputSchema: { type: 'object', properties: { soql: { type: 'string', description: 'The SOQL query to explain.' } }, required: ['soql'] },
+  },
+  {
+    name: 'get_org_limits',
+    description: 'Get current governor-limit utilisation (daily API requests, data/file storage, async/bulk jobs, etc.) as used vs max.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_license_summary',
+    description: 'Get user-license utilisation (used vs total per license type).',
+    inputSchema: { type: 'object', properties: {} },
+  },
+];
+
+/** Guard: only allow read-only SELECT queries through the SOQL tools. */
+function isReadOnlySoql(soql: string): boolean {
+  const trimmed = soql.trim().toLowerCase();
+  if (!trimmed.startsWith('select')) { return false; }
+  if (trimmed.includes(';')) { return false; }
+  return !/\b(insert|update|delete|upsert|merge|undelete)\b/.test(trimmed);
+}
+
+function truncateJson(value: unknown): string {
+  let text: string;
+  try { text = JSON.stringify(value); } catch { text = String(value); }
+  if (text.length > TOOL_RESULT_MAX_CHARS) {
+    return text.slice(0, TOOL_RESULT_MAX_CHARS) + ' …(truncated)';
+  }
+  return text;
+}
+
+/** Execute one architect tool call against the live org (read-only). */
+async function runArchitectTool(name: string, input: Record<string, unknown>): Promise<string> {
+  const sf = getSalesforceService();
+  try {
+    switch (name) {
+      case 'run_soql': {
+        const soql = String(input?.soql ?? '');
+        if (!isReadOnlySoql(soql)) { return 'Rejected: only read-only SELECT queries are permitted.'; }
+        return truncateJson(await sf.query(soql));
+      }
+      case 'run_tooling_soql': {
+        const soql = String(input?.soql ?? '');
+        if (!isReadOnlySoql(soql)) { return 'Rejected: only read-only SELECT queries are permitted.'; }
+        return truncateJson(await sf.toolingQuery(soql));
+      }
+      case 'explain_query': {
+        const soql = String(input?.soql ?? '');
+        if (!isReadOnlySoql(soql)) { return 'Rejected: only read-only SELECT queries are permitted.'; }
+        return truncateJson(await sf.explainQuery(soql));
+      }
+      case 'get_org_limits':
+        return truncateJson(await sf.getOrgLimits());
+      case 'get_license_summary':
+        return truncateJson(await sf.getUserLicenseSummary());
+      default:
+        return `Unknown tool: ${name}`;
+    }
+  } catch (e) {
+    return `Tool error: ${getErrorMessage(e)}`;
+  }
+}
+
+/** Build a grounding system prompt from the latest analysis (if available). */
+function buildArchitectSystemPrompt(result?: AnalysisResult | null): string {
+  const lines: string[] = [
+    'You are a Salesforce Certified Technical Architect (CTA) embedded in the OrgPulse VS Code extension.',
+    'Answer the user\'s question about THIS connected Salesforce org. Be concise, concrete, and architecture-focused.',
+    'You have read-only tools to query the org live (run_soql, run_tooling_soql, explain_query, get_org_limits, get_license_summary). Use them when the answer depends on current org data you do not already have; otherwise answer directly. Never claim to modify the org — the tools are read-only.',
+    'When you cite numbers, prefer values returned by a tool or the snapshot below over guesses.',
+  ];
+  if (result) {
+    const s = result.scores ?? {} as AnalysisResult['scores'];
+    const m = result.metadata ?? {};
+    const topIssues = (result.issues ?? [])
+      .filter(i => i.severity === 'error')
+      .slice(0, 10)
+      .map(i => `- [${i.category}] ${i.ruleId}: ${i.message.slice(0, 120)}`)
+      .join('\n');
+    lines.push(
+      '',
+      '=== LATEST ORGPULSE ANALYSIS SNAPSHOT ===',
+      `Org: ${m.orgUsername ?? m.orgAlias ?? 'connected org'} (edition: ${m.orgEdition ?? 'unknown'})`,
+      `Overall health: ${s.overall ?? 'N/A'}/100 — Code ${s.codeQuality ?? 'N/A'}, Automation ${s.automationDesign ?? 'N/A'}, Data ${s.dataModel ?? 'N/A'}, Security ${s.security ?? 'N/A'}, Testing ${s.testing ?? 'N/A'}, Performance ${s.performance ?? 'N/A'}.`,
+      `Totals: ${result.summary?.totalIssues ?? 0} issues (${result.summary?.errorCount ?? 0} critical), ${m.analyzedClasses ?? 0} classes, ${m.analyzedTriggers ?? 0} triggers, ${m.analyzedUsers ?? 0} active users.`,
+      topIssues ? `Top critical findings:\n${topIssues}` : 'No critical findings recorded.',
+    );
+  } else {
+    lines.push('', 'No prior analysis is loaded — run an Org Health Analysis first, or use the tools to gather data live.');
+  }
+  return lines.join('\n');
 }
 
 // ============================================================================
@@ -426,14 +854,35 @@ export class AIService {
   }
 
   // ---------------------------------------------------------------------------
+  // Model discovery
+  // ---------------------------------------------------------------------------
+
+  /** All models the user can currently use (VS Code LM providers + local/custom). */
+  public async listModels(): Promise<ModelOption[]> {
+    return listModelOptions();
+  }
+
+  // ---------------------------------------------------------------------------
   // Consent helpers
   // ---------------------------------------------------------------------------
+
+  /** Describe where data will be sent, for the consent prompt. */
+  private aiDestination(): string {
+    const { backend } = resolveBackend();
+    if (backend === 'custom') {
+      const c = getCustomConfig();
+      return isLocalEndpoint(c.baseUrl)
+        ? `your local AI endpoint (${c.baseUrl}) — data stays on your machine`
+        : `your configured AI endpoint (${c.baseUrl}) — note this is an external service`;
+    }
+    return 'an AI model via VS Code\'s Language Model API (stays within VS Code)';
+  }
 
   private async ensureConsent(): Promise<boolean> {
     if (this.consentGranted) { return true; }
 
     const choice = await vscode.window.showInformationMessage(
-      'Salesforce Health Analyzer wants to send the selected issue details to your AI model (running locally in VS Code via vscode.lm). No data leaves your machine via this extension.',
+      `Salesforce Health Analyzer wants to send the selected issue details to ${this.aiDestination()}. Proceed?`,
       { modal: true },
       'Allow',
       'Deny'
@@ -451,7 +900,7 @@ export class AIService {
     if (this.ctaConsentGranted) { return true; }
 
     const choice = await vscode.window.showInformationMessage(
-      'CTA Architecture Review will send your org health snapshot (scores, issue summaries, inventory counts, licence data) to an AI model via VS Code\'s language model API. The data stays within VS Code. Proceed?',
+      `CTA Architecture Review / Ask the Architect will send your org health snapshot (scores, issue summaries, inventory counts, licence data) and live read-only query results to ${this.aiDestination()}. Proceed?`,
       { modal: true },
       'Allow',
       'Deny'
@@ -637,6 +1086,98 @@ export class AIService {
       logError('CTA review generation failed', err as Error);
       const msg = err instanceof Error ? err.message : String(err);
       vscode.window.showWarningMessage(`CTA Architecture Review failed: ${msg}`);
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Ask the Architect — tool-augmented Q&A over the live org
+  // ---------------------------------------------------------------------------
+
+  public async askArchitect(question: string, result?: AnalysisResult | null, modelSelector?: string): Promise<string | null> {
+    const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
+    if (!cfg.get<boolean>('enabled', true)) {
+      vscode.window.showInformationMessage(
+        'AI features are disabled. Enable them in Settings → sfHealthAnalyzer.ai.enabled.'
+      );
+      return null;
+    }
+    if (!question || !question.trim()) { return null; }
+
+    // Reuses the CTA consent gate — this can send org data to the model and query live.
+    const consented = await this.ensureCtaConsent();
+    if (!consented) { return null; }
+
+    const { backend, customModel } = resolveBackend(modelSelector);
+
+    // ── Local / custom backend (OpenAI-compatible tool calling) ──────────────
+    if (backend === 'custom') {
+      try {
+        const answer = await runCustomToolLoop(
+          [
+            { role: 'system', content: buildArchitectSystemPrompt(result) },
+            { role: 'user', content: question.trim() },
+          ],
+          customModel,
+        );
+        logInfo('Ask the Architect answered (backend: custom)');
+        return answer.trim();
+      } catch (err) {
+        logError('Ask the Architect (custom backend) failed', err as Error);
+        const msg = err instanceof Error ? err.message : String(err);
+        vscode.window.showWarningMessage(`Ask the Architect failed: ${msg}`);
+        return null;
+      }
+    }
+
+    // ── VS Code Language Model backend ───────────────────────────────────────
+    try {
+      const { model, provider } = await selectBestModel(modelSelector);
+      const messages: vscode.LanguageModelChatMessage[] = [
+        vscode.LanguageModelChatMessage.User(buildArchitectSystemPrompt(result)),
+        vscode.LanguageModelChatMessage.User(question.trim()),
+      ];
+
+      let answer = '';
+      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        const response = await model.sendRequest(
+          messages,
+          { tools: ARCHITECT_TOOLS, justification: 'OrgPulse — answering an architecture question using read-only org queries.' }
+        );
+
+        const assistantParts: Array<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart> = [];
+        const toolCalls: vscode.LanguageModelToolCallPart[] = [];
+        answer = '';
+        for await (const part of response.stream) {
+          if (part instanceof vscode.LanguageModelTextPart) {
+            answer += part.value;
+            assistantParts.push(part);
+          } else if (part instanceof vscode.LanguageModelToolCallPart) {
+            toolCalls.push(part);
+            assistantParts.push(part);
+          }
+        }
+
+        if (toolCalls.length === 0) {
+          logInfo(`Ask the Architect answered (model: ${provider}, rounds: ${round})`);
+          return answer.trim();
+        }
+
+        // Feed the assistant's tool calls + their results back for the next round.
+        messages.push(vscode.LanguageModelChatMessage.Assistant(assistantParts));
+        const resultParts: vscode.LanguageModelToolResultPart[] = [];
+        for (const call of toolCalls) {
+          const out = await runArchitectTool(call.name, call.input as Record<string, unknown>);
+          resultParts.push(new vscode.LanguageModelToolResultPart(call.callId, [new vscode.LanguageModelTextPart(out)]));
+        }
+        messages.push(vscode.LanguageModelChatMessage.User(resultParts));
+      }
+
+      return answer.trim() || 'I reached the maximum number of data-gathering steps before completing an answer. Try a more specific question.';
+    } catch (err) {
+      logError('Ask the Architect failed', err as Error);
+      const msg = err instanceof Error ? err.message : String(err);
+      vscode.window.showWarningMessage(`Ask the Architect failed: ${msg}`);
       return null;
     }
   }

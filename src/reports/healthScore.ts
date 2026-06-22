@@ -249,7 +249,7 @@ export class HealthScoreCalculator {
         workspacePath: metadata.workspacePath,
         orgId: metadata.orgId,
         orgAlias: metadata.orgAlias,
-        apiVersion: metadata.apiVersion || '60.0',
+        apiVersion: metadata.apiVersion || '63.0',
         analyzedFiles: metadata.analyzedFiles || 0,
         analyzedObjects: metadata.analyzedObjects || 0,
       },

@@ -17,4 +17,8 @@ media/iconOld.png
 **/*.map
 **/*.ts
 **/.vscode-test.*
-orgpulse-*.vsix
+CLAUDE.md
+**/*.vsix
+**/*.docx
+scripts/**
+.docbuild-venv/**

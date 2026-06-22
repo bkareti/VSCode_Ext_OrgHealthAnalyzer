@@ -32,6 +32,7 @@ import {
   AppSummaryItem,
   TrustIncident,
   QueryExplainResult,
+  OrgLimitInfo,
 } from '../types';
 import {
   SalesforceAuthError,
@@ -46,6 +47,13 @@ const execFileAsync = promisify(execFile);
 const API_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*$/;
 const TOOLING_QUERY_LIMIT = 2000;
 
+/**
+ * Fallback Salesforce API version used only until the org's real version is
+ * resolved at connect time. Keep this current with recent Salesforce releases;
+ * the live org version always takes precedence (see SalesforceService.apiVersion).
+ */
+const DEFAULT_API_VERSION = '63.0';
+
 async function runSfJson(args: string[]): Promise<unknown> {
   const { stdout } = await execFileAsync('sf', args, { maxBuffer: 50 * 1024 * 1024 });
   return JSON.parse(stdout);
@@ -55,6 +63,13 @@ function isValidApiName(value: string): boolean {
   return API_NAME_REGEX.test(value);
 }
 
+/** Normalise an API version string (e.g. "62", "62.0") to the "62.0" form. */
+function normalizeApiVersion(raw: string | undefined | null): string {
+  const value = (raw ?? '').trim();
+  if (!value) { return DEFAULT_API_VERSION; }
+  return /^\d+$/.test(value) ? `${value}.0` : value;
+}
+
 /**
  * Salesforce Service class for interacting with Salesforce orgs
  */
@@ -62,6 +77,19 @@ export class SalesforceService {
   private orgInfo: OrgInfo | null = null;
   private accessToken: string | null = null;
   private instanceUrl: string | null = null;
+  /** Resolved from the connected org at connect() time; falls back to DEFAULT_API_VERSION. */
+  private apiVersion: string = DEFAULT_API_VERSION;
+
+  /** The Salesforce API version resolved from the connected org (e.g. "62.0"). */
+  getApiVersion(): string {
+    return this.apiVersion;
+  }
+
+  /** Build a versioned REST resource path, e.g. restPath('limits') → /services/data/v62.0/limits */
+  restPath(resource: string): string {
+    const clean = resource.replace(/^\/+/, '');
+    return `/services/data/v${this.apiVersion}/${clean}`;
+  }
 
   /**
    * Initialize connection to the default Salesforce org
@@ -112,14 +140,18 @@ export class SalesforceService {
     if (result.status !== 0) {
       throw new SalesforceAuthError(result.message || 'Failed to get org info');
     }
-    
+
+    // Capture the org's real API version as the single source of truth for all
+    // versioned REST calls (replaces previously hardcoded version strings).
+    this.apiVersion = normalizeApiVersion(result.result.apiVersion);
+
     return {
       id: result.result.id,
       accessToken: result.result.accessToken,
       instanceUrl: result.result.instanceUrl,
       username: result.result.username,
       alias: result.result.alias,
-      apiVersion: result.result.apiVersion || '62.0',
+      apiVersion: this.apiVersion,
     };
   }
 
@@ -144,7 +176,7 @@ export class SalesforceService {
           instanceUrl: org.instanceUrl,
           username: org.username,
           alias: org.alias,
-          apiVersion: '62.0',
+          apiVersion: DEFAULT_API_VERSION,
         })));
       }
       
@@ -155,7 +187,7 @@ export class SalesforceService {
           instanceUrl: org.instanceUrl,
           username: org.username,
           alias: org.alias,
-          apiVersion: '62.0',
+          apiVersion: DEFAULT_API_VERSION,
         })));
       }
       
@@ -539,23 +571,58 @@ export class SalesforceService {
        AND KeyPrefix != null
        LIMIT 2000`;
 
-    // 2-6. Aggregate counts — all run in parallel
-    // NOTE: Avoid EntityDefinition.NamespacePrefix relationship filter — it fails
-    // on many orgs. Use direct NamespacePrefix = null where supported, or no filter.
-    const customFieldQuery = `SELECT EntityDefinitionId, COUNT(Id) NbCustomFields FROM CustomField WHERE NamespacePrefix = null GROUP BY EntityDefinitionId`;
-    const totalFieldQuery = `SELECT EntityDefinitionId, COUNT(Id) NbTotalFields FROM FieldDefinition GROUP BY EntityDefinitionId`;
-    const validationQuery = `SELECT EntityDefinitionId, COUNT(Id) NbValidations FROM ValidationRule WHERE NamespacePrefix = null GROUP BY EntityDefinitionId`;
-    const triggerQuery = `SELECT EntityDefinitionId, COUNT(Id) NbTriggers FROM ApexTrigger WHERE NamespacePrefix = null GROUP BY EntityDefinitionId`;
-    const lookupQuery = `SELECT EntityDefinitionId, COUNT(Id) NbLookups FROM FieldDefinition WHERE DataType = 'Lookup' GROUP BY EntityDefinitionId`;
-    const mdQuery = `SELECT EntityDefinitionId, COUNT(Id) NbMD FROM FieldDefinition WHERE DataType = 'MasterDetail' GROUP BY EntityDefinitionId`;
+    // 2-6. Aggregate counts — all run in parallel.
+    // IMPORTANT: LIMIT 2000 is added explicitly to prevent toolingQuery from
+    // appending "LIMIT x OFFSET y" for pagination — OFFSET is unsupported on
+    // aggregate queries in many org editions and would silently return [] via .catch.
+    // 2000 grouped rows is sufficient for any real org (one row per EntityDefinitionId).
+    // NamespacePrefix = null excludes managed-package metadata for cleaner counts.
+    const customFieldQuery = `SELECT EntityDefinitionId, COUNT(Id) NbCustomFields FROM CustomField WHERE NamespacePrefix = null GROUP BY EntityDefinitionId LIMIT 2000`;
+    // FieldDefinition aggregates REQUIRE a filter — an unfiltered GROUP BY is rejected
+    // by the Tooling API (returns 0 rows), which previously zeroed out every Standard
+    // Fields count. EntityDefinition.IsCustomizable = true is the proven-working filter
+    // (see getFieldDefinitions). Fallback keeps the unfiltered form for odd editions.
+    const totalFieldQuery         = `SELECT EntityDefinitionId, COUNT(Id) NbTotalFields FROM FieldDefinition WHERE EntityDefinition.IsCustomizable = true GROUP BY EntityDefinitionId LIMIT 2000`;
+    const totalFieldFallbackQuery = `SELECT EntityDefinitionId, COUNT(Id) NbTotalFields FROM FieldDefinition GROUP BY EntityDefinitionId LIMIT 2000`;
+    const validationQuery  = `SELECT EntityDefinitionId, COUNT(Id) NbValidations FROM ValidationRule WHERE NamespacePrefix = null GROUP BY EntityDefinitionId LIMIT 2000`;
+    const triggerQuery     = `SELECT EntityDefinitionId, COUNT(Id) NbTriggers FROM ApexTrigger WHERE NamespacePrefix = null GROUP BY EntityDefinitionId LIMIT 2000`;
+    const lookupQuery      = `SELECT EntityDefinitionId, COUNT(Id) NbLookups FROM FieldDefinition WHERE DataType = 'Lookup' GROUP BY EntityDefinitionId LIMIT 2000`;
+    const mdQuery          = `SELECT EntityDefinitionId, COUNT(Id) NbMD FROM FieldDefinition WHERE DataType = 'MasterDetail' GROUP BY EntityDefinitionId LIMIT 2000`;
+
+    // Helper: run a query with NamespacePrefix=null filter; if the filtered query
+    // returns 0 rows (some org editions reject the filter), retry without it.
+    const queryWithNsFallback = async <T extends { EntityDefinitionId: string }>(
+      filteredQ: string, fallbackQ: string
+    ): Promise<T[]> => {
+      try {
+        const rows = await this.toolingQuery<T>(filteredQ);
+        if (rows.length > 0) { return rows; }
+        logWarning(`Aggregate query returned 0 rows with NamespacePrefix filter — retrying without it`);
+        return await this.toolingQuery<T>(fallbackQ);
+      } catch {
+        try { return await this.toolingQuery<T>(fallbackQ); } catch { return []; }
+      }
+    };
 
     try {
       const [entities, cfRows, tfRows, vrRows, trigRows, lookupRows, mdRows] = await Promise.all([
         this.toolingQuery<{ DurableId: string; QualifiedApiName: string; Label: string; KeyPrefix: string }>(entityQuery),
-        this.toolingQuery<{ EntityDefinitionId: string; NbCustomFields: number }>(customFieldQuery).catch(() => [] as Array<{ EntityDefinitionId: string; NbCustomFields: number }>),
-        this.toolingQuery<{ EntityDefinitionId: string; NbTotalFields: number }>(totalFieldQuery).catch(() => [] as Array<{ EntityDefinitionId: string; NbTotalFields: number }>),
-        this.toolingQuery<{ EntityDefinitionId: string; NbValidations: number }>(validationQuery).catch(() => [] as Array<{ EntityDefinitionId: string; NbValidations: number }>),
-        this.toolingQuery<{ EntityDefinitionId: string; NbTriggers: number }>(triggerQuery).catch(() => [] as Array<{ EntityDefinitionId: string; NbTriggers: number }>),
+        queryWithNsFallback<{ EntityDefinitionId: string; NbCustomFields: number }>(
+          customFieldQuery,
+          `SELECT EntityDefinitionId, COUNT(Id) NbCustomFields FROM CustomField GROUP BY EntityDefinitionId LIMIT 2000`
+        ),
+        queryWithNsFallback<{ EntityDefinitionId: string; NbTotalFields: number }>(
+          totalFieldQuery,
+          totalFieldFallbackQuery
+        ),
+        queryWithNsFallback<{ EntityDefinitionId: string; NbValidations: number }>(
+          validationQuery,
+          `SELECT EntityDefinitionId, COUNT(Id) NbValidations FROM ValidationRule GROUP BY EntityDefinitionId LIMIT 2000`
+        ),
+        queryWithNsFallback<{ EntityDefinitionId: string; NbTriggers: number }>(
+          triggerQuery,
+          `SELECT EntityDefinitionId, COUNT(Id) NbTriggers FROM ApexTrigger GROUP BY EntityDefinitionId LIMIT 2000`
+        ),
         this.toolingQuery<{ EntityDefinitionId: string; NbLookups: number }>(lookupQuery).catch(() => [] as Array<{ EntityDefinitionId: string; NbLookups: number }>),
         this.toolingQuery<{ EntityDefinitionId: string; NbMD: number }>(mdQuery).catch(() => [] as Array<{ EntityDefinitionId: string; NbMD: number }>),
       ]);
@@ -726,7 +793,7 @@ export class SalesforceService {
       const encoded = encodeURIComponent(soql);
       const raw = await runSfJson([
         'api', 'request', 'rest',
-        `/services/data/v63.0/query/?explain=${encoded}`,
+        `${this.restPath('query')}/?explain=${encoded}`,
         '--json',
       ]) as { status: number; result: { sforcePerformanceLevel?: string; notes?: Array<{ description: string; fields: string[]; tableEnumOrId: string }> } };
       const r = raw.result ?? {};
@@ -740,6 +807,42 @@ export class SalesforceService {
     } catch (err) {
       logWarning(`Could not explain query: ${getErrorMessage(err)}`);
       return { soql, sforcePerformanceLevel: 'Unknown', notes: [], isFullTableScan: false };
+    }
+  }
+
+  /**
+   * Fetch live governor-limit utilisation from the REST /limits endpoint.
+   * Returns daily API requests, data/file storage, async/bulk limits, etc.,
+   * each as used/max with a consumed percentage. Best-effort: returns [] on error.
+   */
+  async getOrgLimits(): Promise<OrgLimitInfo[]> {
+    try {
+      const raw = await runSfJson([
+        'api', 'request', 'rest', this.restPath('limits'), '--json',
+      ]) as { status?: number; result?: Record<string, { Max?: number; Remaining?: number }> };
+
+      const result = raw.result ?? {};
+      const limits: OrgLimitInfo[] = [];
+      for (const [name, value] of Object.entries(result)) {
+        const max = Number(value?.Max ?? 0);
+        const remaining = Number(value?.Remaining ?? 0);
+        if (!Number.isFinite(max) || max <= 0) { continue; }
+        const used = Math.max(0, max - remaining);
+        limits.push({
+          name,
+          label: name.replace(/([a-z])([A-Z])/g, '$1 $2'),
+          max,
+          remaining,
+          used,
+          usedPct: Math.round((used / max) * 100),
+        });
+      }
+      // Surface the most-consumed limits first.
+      limits.sort((a, b) => b.usedPct - a.usedPct);
+      return limits;
+    } catch (err) {
+      logWarning(`Could not fetch org limits: ${getErrorMessage(err)}`);
+      return [];
     }
   }
 
@@ -783,6 +886,22 @@ export class SalesforceService {
        FROM PermissionSet
        WHERE IsCustom = true AND NamespacePrefix = null`
     );
+  }
+
+  /**
+   * Get Permission Set Groups from the org (modern permission model).
+   * Status of 'Outdated' means the group's aggregate permissions need
+   * recalculation — a real governance signal. Best-effort: returns [] on error.
+   */
+  async getPermissionSetGroups(): Promise<Array<{ Id: string; DeveloperName: string; MasterLabel: string; Status: string }>> {
+    try {
+      return await this.query<{ Id: string; DeveloperName: string; MasterLabel: string; Status: string }>(
+        `SELECT Id, DeveloperName, MasterLabel, Status FROM PermissionSetGroup WHERE NamespacePrefix = null`
+      );
+    } catch (err) {
+      logWarning(`Could not fetch Permission Set Groups: ${getErrorMessage(err)}`);
+      return [];
+    }
   }
 
   /**
