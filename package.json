@@ -2,7 +2,7 @@
   "name": "sf-health-analyzer",
   "displayName": "OrgPulse",
   "description": "Salesforce Architecture Health & Insights — Built with security-first AI. No sensitive data ever leaves your org. Enterprise-grade analysis of Apex quality, automation complexity, data model health, test coverage, security, and performance.",
-  "version": "1.9.5",
+  "version": "1.11.0",
   "publisher": "babukareti",
   "license": "MIT",
   "homepage": "https://github.com/bkareti/VSCode_Ext_OrgHealthAnalyzer#readme",
@@ -99,6 +99,11 @@
       {
         "command": "sfHealthAnalyzer.runCtaReview",
         "title": "Run CTA Architecture Review",
+        "category": "OrgPulse"
+      },
+      {
+        "command": "sfHealthAnalyzer.askArchitect",
+        "title": "Ask the Architect (AI)",
         "category": "OrgPulse"
       },
       {
@@ -275,23 +280,34 @@
         },
         "sfHealthAnalyzer.ai.provider": {
           "type": "string",
-          "enum": [
-            "copilot"
-          ],
-          "default": "copilot",
-          "description": "AI provider for issue explanations"
-        },
-        "sfHealthAnalyzer.ai.ctaModel": {
-          "type": "string",
-          "enum": ["auto", "claude-sonnet", "claude-opus", "gpt-4o"],
+          "enum": ["auto", "vscode-lm", "custom"],
           "enumDescriptions": [
-            "Auto: try Claude Sonnet, Claude Opus, then GPT-4o",
-            "Anthropic Claude Sonnet 4.6 (claude-sonnet-4-6)",
-            "Anthropic Claude Opus 4.6 (claude-opus-4-6)",
-            "GitHub Copilot GPT-4o"
+            "Auto: use a VS Code Language Model provider if available, otherwise the configured local/custom endpoint",
+            "VS Code Language Model API only (any installed provider — Copilot's Claude/GPT/Gemini, Codex, third-party)",
+            "Local / custom OpenAI-compatible endpoint only (Ollama, LM Studio, vLLM, OpenAI, Codex, Azure)"
           ],
           "default": "auto",
-          "description": "AI model to use for CTA Architecture Review synthesis. 'auto' tries Claude first, then Copilot."
+          "description": "Which AI backend to use. Models are discovered dynamically — not restricted to GitHub Copilot."
+        },
+        "sfHealthAnalyzer.ai.preferredModel": {
+          "type": "string",
+          "default": "auto",
+          "description": "Preferred AI model selector. 'auto' picks the best available model; otherwise a discovered model id ('<vendor>/<family>' for a VS Code LM model, or 'custom:<model>' for a local/custom endpoint). Normally set from the model picker in the dashboard rather than edited by hand."
+        },
+        "sfHealthAnalyzer.ai.custom.baseUrl": {
+          "type": "string",
+          "default": "http://localhost:11434/v1",
+          "description": "Base URL of an OpenAI-compatible chat-completions endpoint for the local/custom AI backend. Defaults to Ollama. Examples: Ollama 'http://localhost:11434/v1', LM Studio 'http://localhost:1234/v1', OpenAI 'https://api.openai.com/v1'."
+        },
+        "sfHealthAnalyzer.ai.custom.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model name for the local/custom AI backend (e.g. 'qwen2.5-coder', 'llama3.1', 'gpt-4o-mini'). Required to enable the local/custom backend. Tool-capable models also power Ask the Architect's live org queries."
+        },
+        "sfHealthAnalyzer.ai.custom.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Optional API key (sent as a Bearer token) for the local/custom AI endpoint. Leave empty for local servers like Ollama; set it for OpenAI / Azure / hosted endpoints."
         },
         "sfHealthAnalyzer.queryExplain.enabled": {
           "type": "boolean",

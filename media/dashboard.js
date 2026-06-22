@@ -24,6 +24,9 @@
   // Per-data-table page+sort state: tableId → { page, sortCol, sortDir }
   const dataTablePageState = {};
   const DATA_TABLE_PAGE_SIZE = 10;
+  // Dynamically-discovered AI models (VS Code LM providers + local/custom endpoint)
+  let availableModels = [{ id: "auto", label: "Auto (best available)", backend: "vscode-lm" }];
+  let selectedModelId = "auto";
 
   function registerIssue(iss) {
     issueRegistry.push(iss);
@@ -36,6 +39,31 @@
     activeTab = saved.activeTab || "overview";
     filters = saved.filters || filters;
     securityMode = saved.securityMode || null;
+    selectedModelId = saved.selectedModelId || "auto";
+  }
+
+  // ── AI model picker (dynamic, backend-agnostic) ───────────────────────────
+  function modelOptionsHtml(selectedId) {
+    return availableModels
+      .map(
+        (m) =>
+          `<option value="${escHtml(m.id)}"${m.id === selectedId ? " selected" : ""}>${escHtml(m.label)}</option>`,
+      )
+      .join("");
+  }
+
+  function renderModelSelect(id) {
+    return `<select id="${id}" data-model-select="1" style="padding:6px 12px;border-radius:6px;border:1px solid var(--vscode-input-border,#444);background:var(--vscode-input-background,#1e1e1e);color:var(--vscode-input-foreground,#ccc);font-size:13px;cursor:pointer">${modelOptionsHtml(selectedModelId)}</select>`;
+  }
+
+  function populateModelSelects() {
+    document.querySelectorAll("[data-model-select]").forEach((sel) => {
+      sel.innerHTML = modelOptionsHtml(selectedModelId);
+    });
+  }
+
+  function noModelsAvailable() {
+    return !availableModels.some((m) => m.id !== "auto");
   }
 
   // ── DOM refs ─────────────────────────────────────────────────────────────
@@ -103,6 +131,18 @@
       const modelSelect = document.getElementById("cta-model-select");
       const selectedModel = modelSelect ? modelSelect.value : "auto";
       vscode.postMessage({ command: "runCtaReview", model: selectedModel });
+    } else if (a === "ask-architect") {
+      if (securityMode === "safe") return;
+      const input = document.getElementById("ask-architect-input");
+      const q = input ? input.value.trim() : "";
+      if (!q) return;
+      const out = document.getElementById("ask-architect-answer");
+      if (out) {
+        out.innerHTML = `<div style="opacity:.6;font-size:13px">🤖 Thinking… querying the org…</div>`;
+      }
+      const askSel = document.getElementById("ask-model-select");
+      const askModel = askSel ? askSel.value : selectedModelId;
+      vscode.postMessage({ command: "askArchitect", data: { question: q, model: askModel } });
     } else if (a === "select-security-mode") {
       // Mode card clicked — select that mode
       const mode = el.dataset.mode;
@@ -228,6 +268,31 @@
       fetchIconDataUri(function (iconDataUri) {
         exportCtaPdf(iconDataUri);
       });
+    } else if (a === "cta-sub-tab") {
+      const tab = el.dataset.tab;
+      const ctaPanel = document.getElementById("panel-cta");
+      if (ctaPanel) {
+        ctaPanel
+          .querySelectorAll(".cta-dash-tab-btn")
+          .forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+        ctaPanel
+          .querySelectorAll(".cta-dash-panel")
+          .forEach((p) =>
+            p.classList.toggle("hidden", p.dataset.panel !== tab),
+          );
+      }
+    } else if (a === "cta-risk-filter") {
+      const sev = el.dataset.sev;
+      const ctaPanel = document.getElementById("panel-cta");
+      if (ctaPanel) {
+        ctaPanel
+          .querySelectorAll(".cta-risk-filter-btn")
+          .forEach((b) => b.classList.toggle("active", b.dataset.sev === sev));
+        ctaPanel.querySelectorAll(".cta-issue-card").forEach((c) => {
+          c.style.display =
+            sev === "all" || c.dataset.sev === sev ? "" : "none";
+        });
+      }
     }
   });
 
@@ -307,18 +372,14 @@
    * @returns {string} HTML
    */
   function renderTabInfo(id, items) {
-    const listHtml = items
-      .map((s) => `<li style="margin-bottom:4px">${s}</li>`)
-      .join("");
+    const listHtml = items.map((s) => `<li>${s}</li>`).join("");
     return `
-      <details id="tab-info-${id}" style="margin-bottom:20px;background:var(--vscode-textBlockQuote-background,rgba(128,128,128,0.1));border-left:3px solid var(--vscode-focusBorder,#007acc);border-radius:4px;padding:10px 14px">
-        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--sf-text-muted);list-style:none;display:flex;align-items:center;gap:6px">
+      <details id="tab-info-${id}" class="tab-info-panel">
+        <summary class="tab-info-summary">
           <span>ℹ️</span><span>About this tab — how data is fetched &amp; filtered</span>
           <span style="margin-left:auto;opacity:.5;font-size:11px">click to expand</span>
         </summary>
-        <ul style="margin:10px 0 2px 0;padding-left:18px;font-size:12px;color:var(--sf-text-muted);line-height:1.7">
-          ${listHtml}
-        </ul>
+        <ul class="tab-info-list">${listHtml}</ul>
       </details>`;
   }
 
@@ -378,10 +439,10 @@
     const pagHtml =
       totalPages > 1
         ? `
-      <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid var(--vscode-widget-border);font-size:12px">
+      <div class="pagination-bar">
         <span style="opacity:.6">${showingFrom}–${showingTo} of ${sortedRows.length}</span>
         <span style="flex:1"></span>
-        <button class="btn btn-ghost" style="padding:3px 10px;font-size:11px" data-action="dt-page-prev" data-table="${tableId}" ${st.page === 0 ? 'disabled style="opacity:.4;padding:3px 10px;font-size:11px"' : ""}>‹ Prev</button>
+        <button class="btn btn-ghost" data-action="dt-page-prev" data-table="${tableId}" ${st.page === 0 ? "disabled" : ""}>‹ Prev</button>
         ${Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
           const pg =
             totalPages <= 7
@@ -390,9 +451,9 @@
                 ? i
                 : Math.min(st.page - 3 + i, totalPages - 1);
           if (pg >= totalPages || pg < 0) return "";
-          return `<button class="btn ${pg === st.page ? "btn-primary" : "btn-ghost"}" style="padding:3px 8px;font-size:11px;min-width:28px" data-action="dt-page-go" data-table="${tableId}" data-pg="${pg}">${pg + 1}</button>`;
+          return `<button class="btn ${pg === st.page ? "btn-primary" : "btn-ghost"}" data-action="dt-page-go" data-table="${tableId}" data-pg="${pg}">${pg + 1}</button>`;
         }).join("")}
-        <button class="btn btn-ghost" style="padding:3px 10px;font-size:11px" data-action="dt-page-next" data-table="${tableId}" ${st.page >= totalPages - 1 ? 'disabled style="opacity:.4;padding:3px 10px;font-size:11px"' : ""}>Next ›</button>
+        <button class="btn btn-ghost" data-action="dt-page-next" data-table="${tableId}" ${st.page >= totalPages - 1 ? "disabled" : ""}>Next ›</button>
       </div>`
         : "";
 
@@ -400,7 +461,7 @@
     dataTableRegistry[tableId] = { headers, rows, opts };
 
     return `<div class="data-table-wrap" id="dt-wrap-${tableId}">
-      <table class="data-table" style="font-size:12px"><thead>${headHtml}</thead><tbody>${bodyHtml}</tbody></table>
+      <table class="sf-table sf-table--sortable"><thead>${headHtml}</thead><tbody>${bodyHtml}</tbody></table>
       ${pagHtml}
     </div>`;
   }
@@ -512,6 +573,14 @@
   }
 
   document.addEventListener("change", function (e) {
+    // AI model picker — keep all selects + persisted state in sync
+    const modelSel = e.target.closest("[data-model-select]");
+    if (modelSel) {
+      selectedModelId = modelSel.value || "auto";
+      vscode.setState({ ...vscode.getState(), selectedModelId });
+      populateModelSelects();
+      return;
+    }
     const el = e.target.closest("[data-filter-panel]");
     if (el) {
       filterPanel(
@@ -553,6 +622,17 @@
         results = msg.data;
         renderAll();
         break;
+      case "availableModels": {
+        if (Array.isArray(msg.data) && msg.data.length) {
+          availableModels = msg.data;
+          // If the previously-selected model is gone, fall back to auto
+          if (!availableModels.some((m) => m.id === selectedModelId)) {
+            selectedModelId = "auto";
+          }
+          populateModelSelects();
+        }
+        break;
+      }
       case "analysisProgress": {
         // Show the progress overlay in appEl directly (before results arrive)
         const stepIdx = typeof msg.step === "number" ? msg.step : -1;
@@ -656,9 +736,29 @@
         }
         const ctaPanel = document.getElementById("panel-cta");
         if (ctaPanel) {
-          ctaPanel.innerHTML = renderCtaReviewContent(msg.data);
+          ctaPanel.innerHTML = renderCtaReviewContent(msg.data) + renderAskArchitect();
         }
         activateTab("cta");
+        break;
+      }
+      case "architectAnswerLoading": {
+        const out = document.getElementById("ask-architect-answer");
+        if (out) {
+          out.innerHTML = `<div style="opacity:.6;font-size:13px">🤖 Thinking… querying the org…</div>`;
+        }
+        break;
+      }
+      case "architectAnswer": {
+        const out = document.getElementById("ask-architect-answer");
+        if (out) {
+          if (msg.error) {
+            out.innerHTML = `<div class="c-critical" style="font-size:13px">⚠️ ${escHtml(msg.error)}</div>`;
+          } else if (msg.data) {
+            out.innerHTML = `<div class="architect-answer" style="font-size:13px;line-height:1.6;white-space:pre-wrap;background:var(--vscode-editor-background);border-left:3px solid var(--sf-primary,#0176d3);padding:12px 14px;border-radius:6px">${escHtml(msg.data)}</div>`;
+          } else {
+            out.innerHTML = `<div style="opacity:.6;font-size:13px">No answer returned.</div>`;
+          }
+        }
         break;
       }
     }
@@ -1062,7 +1162,6 @@
     issueRegistry.length = 0; // reset index registry on each render
     buildShell();
     activateTab(activeTab, false);
-    updateTabBadges();
   }
 
   function showEmpty() {
@@ -1141,7 +1240,6 @@
             (t) => `
           <button class="tab-btn" id="tab-btn-${t.id}" data-action="activate-tab" data-tab="${t.id}">
             ${t.icon} ${t.label}
-            <span class="tab-badge" id="badge-${t.id}" style="display:none">0</span>
           </button>`,
           )
           .join("")}
@@ -1158,7 +1256,7 @@
         <div class="tab-panel" id="panel-dependencies">${renderDependencies()}</div>
         <div class="tab-panel" id="panel-stalemetadata">${renderStaleMetadata()}</div>
         <div class="tab-panel" id="panel-orginfo">${renderOrgInfo()}</div>
-        <div class="tab-panel" id="panel-cta">${renderCtaReview()}</div>
+        <div class="tab-panel" id="panel-cta">${renderCtaReview()}${renderAskArchitect()}</div>
       </div>`;
   }
 
@@ -1337,9 +1435,9 @@
         ${
           od.apps && od.apps.length
             ? `
-        <div style="background:var(--vscode-editor-background);border:1px solid var(--vscode-widget-border);border-radius:12px;padding:20px 24px;margin-bottom:24px">
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-            <div style="width:32px;height:32px;background:rgba(99,102,241,.15);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px">📱</div>
+        <div class="info-card">
+          <div class="section-header-row">
+            <div class="section-header-icon icon-purple">📱</div>
             <span style="font-size:15px;font-weight:700">Apps (${od.apps.length} total · ${od.consoleAppCount} Console · ${od.standardAppCount} Standard)</span>
           </div>
           <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">
@@ -1366,10 +1464,10 @@
         ${
           activeIncidents.length
             ? `
-        <div style="background:var(--vscode-editor-background);border:1px solid rgba(239,68,68,.3);border-radius:12px;padding:20px 24px;margin-bottom:24px">
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-            <div style="width:32px;height:32px;background:rgba(239,68,68,.15);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px">🚨</div>
-            <span style="font-size:15px;font-weight:700;color:#ef4444">Active Trust Incidents (${activeIncidents.length})</span>
+        <div class="info-card info-card--error mb-24">
+          <div class="section-header-row">
+            <div class="section-header-icon" style="background:rgba(239,68,68,.15)">🚨</div>
+            <span style="font-size:15px;font-weight:700;color:var(--score-critical)">Active Trust Incidents (${activeIncidents.length})</span>
           </div>
           ${incidentRows}
         </div>`
@@ -1385,9 +1483,9 @@
         ${
           userLicRows
             ? `
-        <div style="background:var(--vscode-editor-background);border:1px solid var(--vscode-widget-border);border-radius:12px;padding:20px 24px;margin-bottom:24px">
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-            <div style="width:32px;height:32px;background:rgba(1,118,211,.15);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px">🪪</div>
+        <div class="info-card">
+          <div class="section-header-row">
+            <div class="section-header-icon icon-blue">🪪</div>
             <span style="font-size:15px;font-weight:700">User Licenses</span>
           </div>
           <table style="width:100%;border-collapse:collapse">
@@ -1406,9 +1504,9 @@
         ${
           featLicRows
             ? `
-        <div style="background:var(--vscode-editor-background);border:1px solid var(--vscode-widget-border);border-radius:12px;padding:20px 24px;margin-bottom:24px">
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-            <div style="width:32px;height:32px;background:rgba(245,158,11,.15);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px">⭐</div>
+        <div class="info-card">
+          <div class="section-header-row">
+            <div class="section-header-icon icon-amber">⭐</div>
             <span style="font-size:15px;font-weight:700">Feature Licenses</span>
           </div>
           <table style="width:100%;border-collapse:collapse">
@@ -1428,9 +1526,9 @@
         ${
           od.nextReleaseName
             ? `
-        <div style="background:var(--vscode-editor-background);border:1px solid rgba(139,92,246,.3);border-radius:12px;padding:20px 24px">
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-            <div style="width:32px;height:32px;background:rgba(139,92,246,.15);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px">📅</div>
+        <div class="info-card info-card--purple">
+          <div class="section-header-row">
+            <div class="section-header-icon icon-purple">📅</div>
             <span style="font-size:15px;font-weight:700">Upcoming Maintenance / Release</span>
           </div>
           <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
@@ -1484,15 +1582,11 @@
           <p style="opacity:.7;margin:0 0 24px">Get a board-room-quality architectural review powered by Claude / Copilot AI.
           The AI analyses your org health snapshot (scores, issues, inventory, licence data) and produces
           a structured Salesforce CTA-grade verdict with domain findings, critical risks, and quick wins.</p>
-          <div style="margin-bottom:16px;display:flex;align-items:center;justify-content:center;gap:10px">
+          <div style="margin-bottom:16px;display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap">
             <label for="cta-model-select" style="font-size:13px;font-weight:600;opacity:.8">AI Model:</label>
-            <select id="cta-model-select" style="padding:6px 12px;border-radius:6px;border:1px solid var(--vscode-input-border,#444);background:var(--vscode-input-background,#1e1e1e);color:var(--vscode-input-foreground,#ccc);font-size:13px;cursor:pointer">
-              <option value="auto">Auto (Best Available)</option>
-              <option value="claude-sonnet">Claude Sonnet</option>
-              <option value="claude-opus">Claude Opus</option>
-              <option value="gpt-4o">GPT-4o</option>
-            </select>
+            ${renderModelSelect("cta-model-select")}
           </div>
+          ${noModelsAvailable() ? `<div style="font-size:12px;opacity:.65;margin-bottom:12px">No AI model detected — sign in to a VS Code language-model provider (e.g. GitHub Copilot) or configure a local endpoint in <strong>Settings → sfHealthAnalyzer.ai.custom</strong>.</div>` : ""}
           <button class="btn btn-primary" data-action="run-cta-review" style="font-size:15px;padding:10px 28px">
             ✨ Generate CTA Architecture Review
           </button>
@@ -1511,24 +1605,303 @@
       </div>`;
   }
 
+  // ── Ask the Architect — conversational, tool-augmented Q&A ────────────────
+  function renderAskArchitect() {
+    if (securityMode === "safe") return "";
+    return `
+      <div class="mb-24" id="ask-architect" style="max-width:900px;margin:24px auto 0;padding:0 16px">
+        <div class="section-card" style="background:var(--vscode-editor-background);border:1px solid var(--sf-border);border-radius:10px;padding:18px">
+          <div class="section-title">💬 Ask the Architect <span style="font-size:11px;color:var(--sf-text-muted);font-weight:400">— AI can query this org live (read-only)</span></div>
+          <div style="display:flex;gap:10px;margin-top:10px;align-items:center">
+            <span style="font-size:12px;opacity:.7">Model:</span>
+            ${renderModelSelect("ask-model-select")}
+          </div>
+          <div style="display:flex;gap:10px;margin-top:10px">
+            <input id="ask-architect-input" type="text" placeholder="e.g. Which objects are at LDV risk, and why?"
+              style="flex:1;padding:10px 12px;border-radius:8px;border:1px solid var(--vscode-input-border,#444);background:var(--vscode-input-background,#1e1e1e);color:var(--vscode-input-foreground,#ccc);font-size:13px"/>
+            <button class="btn btn-primary" data-action="ask-architect" style="font-size:13px;padding:8px 18px">Ask</button>
+          </div>
+          <div id="ask-architect-answer" style="margin-top:14px"></div>
+        </div>
+      </div>`;
+  }
+
+  // ── SVG gauge helper (runs in browser) — mockup-accurate ─────────────────
+  function buildGaugeSvg(score) {
+    const cx = 90, cy = 88, r = 68;
+    const circ = 2 * Math.PI * r;
+    const trackLen = circ * 0.75; // 270° arc
+    const gapLen = circ - trackLen; // 90° gap at bottom
+    const cs = Math.max(0, Math.min(100, score || 0));
+    const fillLen = trackLen * (cs / 100);
+    const gc =
+      cs >= 76 ? "#22c55e" : cs >= 61 ? "#84cc16" : cs >= 41 ? "#f59e0b" : cs >= 20 ? "#f97316" : "#ef4444";
+    const toRad = (d) => (d * Math.PI) / 180;
+    // tick marks at 0/25/50/75/100
+    let ticks = "";
+    [0, 25, 50, 75, 100].forEach((pct) => {
+      const deg = 225 - 270 * (pct / 100);
+      const ri = r - 6, ro = r + 3;
+      const x1 = (cx + ri * Math.cos(toRad(deg))).toFixed(2);
+      const y1 = (cy - ri * Math.sin(toRad(deg))).toFixed(2);
+      const x2 = (cx + ro * Math.cos(toRad(deg))).toFixed(2);
+      const y2 = (cy - ro * Math.sin(toRad(deg))).toFixed(2);
+      ticks += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#d1d5db" stroke-width="1.5"/>`;
+    });
+    // needle
+    const needleDeg = 225 - 270 * (cs / 100);
+    const needleLen = r - 18;
+    const nx = (cx + needleLen * Math.cos(toRad(needleDeg))).toFixed(2);
+    const ny = (cy - needleLen * Math.sin(toRad(needleDeg))).toFixed(2);
+    // rotate(135) moves stroke start from 3-o'clock CW 135° → lands at 7:30 (lower-left = 225° gauge start)
+    const rot = `rotate(135, ${cx}, ${cy})`;
+    return `<svg width="180" height="145" viewBox="0 0 180 145" style="overflow:visible">
+      <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#e5e7eb" stroke-width="12"
+        stroke-dasharray="${trackLen.toFixed(2)} ${gapLen.toFixed(2)}"
+        stroke-linecap="round" transform="${rot}"/>
+      ${cs > 0 ? `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${gc}" stroke-width="12"
+        stroke-dasharray="${fillLen.toFixed(2)} ${(circ - fillLen).toFixed(2)}"
+        stroke-linecap="round" transform="${rot}"/>` : ""}
+      ${ticks}
+      <line x1="${cx}" y1="${cy}" x2="${nx}" y2="${ny}" stroke="${gc}" stroke-width="2.5" stroke-linecap="round"/>
+      <circle cx="${cx}" cy="${cy}" r="8" fill="#fff" stroke="#e8eaed" stroke-width="1"/>
+      <circle cx="${cx}" cy="${cy}" r="4.5" fill="${gc}"/>
+      <text x="${cx}" y="${cy - 16}" text-anchor="middle" dominant-baseline="middle" font-size="42" font-weight="800" fill="${gc}" font-family="-apple-system,sans-serif">${cs}</text>
+    </svg>`;
+  }
+
   function renderCtaReviewContent(review) {
     if (!review) {
       return '<p style="padding:32px;opacity:.6">No CTA review data.</p>';
     }
 
-    // ── Stale review banner (pre-v1.9.2 reviews lack architectureMaturity) ──
+    // ── Shared / derived values ──────────────────────────────────────────────
     const isLegacyReview = !review.architectureMaturity;
-    const staleBanner = isLegacyReview
-      ? `
-      <div style="background:rgba(245,158,11,.12);border:1.5px solid rgba(245,158,11,.4);border-radius:10px;padding:14px 20px;margin-bottom:24px;display:flex;align-items:center;gap:12px">
-        <span style="font-size:20px">⚠️</span>
-        <div>
-          <span style="font-weight:700;font-size:13px">This review was generated with an older version of OrgPulse.</span>
-          <span style="font-size:12px;opacity:.8;margin-left:8px">Click <strong>Regenerate</strong> to get the full 12-section premium report.</span>
+    const overallScore = (() => {
+      if (typeof review.overallScore === "number") return review.overallScore;
+      if (typeof review.healthScore === "number") return review.healthScore;
+      const scores = review.healthScoreBreakdown || [];
+      if (!scores.length) return 0;
+      return Math.round(
+        scores.reduce((a, x) => a + (x.score || 0), 0) / scores.length,
+      );
+    })();
+    const matLevel = review.architectureMaturity
+      ? review.architectureMaturity.level
+      : 1;
+    const matLabel = review.architectureMaturity
+      ? review.architectureMaturity.label
+      : "Ad Hoc";
+    const scanDate = review.generatedAt
+      ? new Date(review.generatedAt).toLocaleString()
+      : "Just now";
+    const modelUsed = review.modelUsed || "AI";
+    const aiInsightCount =
+      ((review.aiInsights || {}).hiddenRisks || []).length +
+      ((review.aiInsights || {}).predictions || []).length;
+
+    // ── Gauge SVG ─────────────────────────────────────────────────────────────
+    const gaugeSvg = buildGaugeSvg(overallScore);
+
+    // ── Maturity level badge colours ──────────────────────────────────────────
+    const matColors = [
+      "",
+      "#ef4444",
+      "#f97316",
+      "#f59e0b",
+      "#22c55e",
+      "#0176d3",
+    ];
+    const matBgs = [
+      "",
+      "rgba(239,68,68,.12)",
+      "rgba(249,115,22,.12)",
+      "rgba(245,158,11,.12)",
+      "rgba(34,197,94,.12)",
+      "rgba(1,118,211,.12)",
+    ];
+    const matColor = matColors[matLevel] || "#f59e0b";
+    const matBg = matBgs[matLevel] || "rgba(245,158,11,.12)";
+
+    // ── Top 3 critical risks ──────────────────────────────────────────────────
+    const top3 = (review.topCriticalIssues || []).slice(0, 3);
+    const top3Html = top3.length
+      ? top3
+          .map((iss) => {
+            const sevC = iss.severity === "Critical" ? "#ef4444" : "#f59e0b";
+            const sevBg =
+              iss.severity === "Critical"
+                ? "rgba(239,68,68,.12)"
+                : "rgba(245,158,11,.12)";
+            const sevIcon = iss.severity === "Critical" ? "🐞" : "⚠️";
+            return `<div class="ctad-risk-card">
+            <div class="ctad-risk-icon">${sevIcon}</div>
+            <div class="ctad-risk-body">
+              <div class="ctad-risk-title">${escHtml(iss.title)}</div>
+              <div class="ctad-risk-impact">${escHtml(iss.impact || iss.domain || "")}</div>
+              <span class="ctad-risk-badge" style="color:${sevC};background:${sevBg}">${escHtml(iss.severity)}</span>
+              <span class="ctad-risk-badge ctad-risk-badge-impact">Probable Impact</span>
+            </div>
+          </div>`;
+          })
+          .join("")
+      : `<div class="ctad-empty-note">No critical issues identified.</div>`;
+
+    // ── What's working well ───────────────────────────────────────────────────
+    const strengths = (review.architectureObservations || [])
+      .filter((o) => o.classification === "Strength")
+      .slice(0, 4);
+    const passDomains = (review.domainFindings || [])
+      .filter((d) => d.status === "Pass")
+      .slice(0, 3);
+    const wellCards = strengths.length
+      ? strengths
+          .map(
+            (o) =>
+              `<div class="ctad-well-card"><div class="ctad-well-icon">✅</div><div>
+            <div class="ctad-well-title">${escHtml(o.observation.split(":")[0] || o.observation)}</div>
+            <div class="ctad-well-desc">${escHtml(o.observation)}</div>
+          </div></div>`,
+          )
+          .join("")
+      : passDomains
+          .map(
+            (d) =>
+              `<div class="ctad-well-card"><div class="ctad-well-icon">✅</div><div>
+            <div class="ctad-well-title">${escHtml(d.domain)}</div>
+            <div class="ctad-well-desc">${escHtml(d.analysis.slice(0, 90))}${d.analysis.length > 90 ? "…" : ""}</div>
+          </div></div>`,
+          )
+          .join("");
+
+    // ── Org Profile right-column (icon row style per mockup) ────────────────
+    const orgProf = review.orgProfile || {};
+    const cxColor =
+      {
+        Simple: "#22c55e",
+        Moderate: "#f59e0b",
+        Complex: "#f97316",
+        Enterprise: "#ef4444",
+      }[orgProf.complexity] || "#f59e0b";
+
+    // Derive exact counts from live results — never rely on AI-generated estimates
+    const apexCount =
+      results && results.metadata
+        ? (results.metadata.analyzedClasses || 0) +
+          (results.metadata.analyzedTriggers || 0)
+        : 0;
+    const customObjCount =
+      results && results.dataModelStats
+        ? results.dataModelStats.filter((o) =>
+            (o.objectName || "").endsWith("__c"),
+          ).length
+        : 0;
+    const stdObjCount =
+      results && results.dataModelStats
+        ? results.dataModelStats.filter(
+            (o) => !(o.objectName || "").endsWith("__c"),
+          ).length
+        : 0;
+    const totalCustomFields =
+      results && results.dataModelStats
+        ? results.dataModelStats.reduce((sum, o) => sum + (o.customFields || 0), 0)
+        : 0;
+    // Use live user count from userSummary; fall back to metadata, then AI text
+    const activeUserCount =
+      (results && results.userSummary && results.userSummary.totalActiveUsers > 0)
+        ? results.userSummary.totalActiveUsers
+        : (results && results.metadata && results.metadata.analyzedUsers > 0)
+          ? results.metadata.analyzedUsers
+          : null;
+    const userScaleDisplay = activeUserCount !== null
+      ? String(activeUserCount)
+      : escHtml(orgProf.userScale || "—");
+
+    const orgProfileHtml = `
+      <div class="ctad-card ctad-org-profile-card">
+        <div class="ctad-section-heading ctad-heading-tight">Org Profile</div>
+        <div class="ctad-profile-list">
+          <div class="ctad-profile-icon-row"><span class="ctad-profile-icon">📊</span><span class="ctad-profile-lbl2">${escHtml(orgProf.complexity || "Moderate")} Complexity</span></div>
+          <div class="ctad-profile-icon-row"><span class="ctad-profile-icon">👥</span><span class="ctad-profile-lbl2">${userScaleDisplay} Active Users</span></div>
+          <div class="ctad-profile-icon-row"><span class="ctad-profile-icon">🔌</span><span class="ctad-profile-lbl2">${escHtml(orgProf.integrationFootprint || "Minimal")} Integrations</span></div>
+          <div class="ctad-profile-icon-row"><span class="ctad-profile-icon">📁</span><span class="ctad-profile-lbl2">${apexCount} Apex Classes &amp; Triggers</span></div>
+          <div class="ctad-profile-icon-row"><span class="ctad-profile-icon">📦</span><span class="ctad-profile-lbl2">${customObjCount} Custom Objects · ${totalCustomFields} Custom Fields</span></div>
         </div>
-      </div>`
+      </div>`;
+
+    // ── Score breakdown bars — merge live scores with AI key findings ──────
+    // Live scores are the ground truth; AI breakdown provides key findings only.
+    const liveScores = results && results.scores ? results.scores : {};
+    const SCORE_MAP = [
+      { area: "Code Quality",      liveKey: "codeQuality" },
+      { area: "Automation Design", liveKey: "automationDesign" },
+      { area: "Data Model",        liveKey: "dataModel" },
+      { area: "Security",          liveKey: "security" },
+      { area: "Test Coverage",     liveKey: "testing" },
+      { area: "Performance",       liveKey: "performance" },
+    ];
+    // Build a merged row set: prefer live score, fall back to AI score
+    const aiBreakdownMap = {};
+    (review.healthScoreBreakdown || []).forEach((s) => {
+      aiBreakdownMap[s.area] = s;
+    });
+    const breakdownRows = SCORE_MAP
+      .map(({ area, liveKey }) => {
+        const live = liveScores[liveKey];
+        const aiRow = aiBreakdownMap[area] || Object.values(aiBreakdownMap).find(
+          (r) => r.area && r.area.toLowerCase().includes(liveKey.toLowerCase())
+        );
+        const score = (typeof live === "number" && live > 0) ? live : (aiRow ? aiRow.score : null);
+        if (score === null) { return null; }
+        const keyFinding = aiRow ? aiRow.keyFinding || "" : "";
+        const trend = aiRow ? aiRow.trend || "stable" : "stable";
+        const trendIcon = trend === "improving" ? "↑" : trend === "declining" ? "↓" : "→";
+        const pct = Math.min(100, Math.round(score));
+        const bc = pct >= 75 ? "#22c55e" : pct >= 50 ? "#f59e0b" : "#ef4444";
+        return { area, score, pct, bc, keyFinding, trendIcon };
+      })
+      .filter(Boolean);
+
+    const scoreBreakdownHtml = breakdownRows.length
+      ? `<div class="ctad-card ctad-score-breakdown-card">
+          <div class="ctad-section-heading ctad-heading-tight2">Health Score Breakdown</div>
+          <div class="ctad-score-rows">
+            ${breakdownRows.map((s) => `<div class="ctad-score-row">
+                  <span class="ctad-score-num-badge" style="background:${s.bc}">${s.score}</span>
+                  <span class="ctad-score-area">${escHtml(s.area)}</span>
+                  <div class="ctad-score-bar-track"><div class="ctad-score-bar-fill" style="--score-color:${s.bc};width:${s.pct}%"></div></div>
+                  <span style="font-size:10px;opacity:.55">${s.trendIcon}</span>
+                </div>`).join("")}
+          </div>
+        </div>`
       : "";
 
+    // ── Business impact cards ────────────────────────────────────────────────
+    const biz = review.businessImpactSummary || {};
+    const impactHtml =
+      biz.revenueRisk || biz.operationalRisk
+        ? `<div class="ctad-card ctad-impact-summary-card">
+          <div class="ctad-impact-grid">
+            <div class="ctad-impact-card ctad-impact-revenue">
+              <div class="ctad-impact-title">🐞 Revenue Risk</div>
+              <div class="ctad-impact-copy">${escHtml(biz.revenueRisk || "—")}</div>
+              ${biz.overallSeverity === "Critical" ? `<span class="ctad-sev-badge ctad-sev-critical ctad-sev-inline">Critical</span>` : ""}
+            </div>
+            <div class="ctad-impact-card ctad-impact-ops">
+              <div class="ctad-impact-title">⚙️ Operational Risk</div>
+              <div class="ctad-impact-copy">${escHtml(biz.operationalRisk || "—")}</div>
+              <span class="ctad-sev-badge ctad-sev-critical ctad-sev-inline">Critical</span>
+            </div>
+            <div class="ctad-impact-card ctad-impact-compliance">
+              <div class="ctad-impact-title">🛡️ Compliance Risk</div>
+              <div class="ctad-impact-copy">${escHtml(biz.complianceRisk || "—")}</div>
+              <span class="ctad-sev-badge ctad-sev-high ctad-sev-inline">High</span>
+            </div>
+          </div>
+        </div>`
+        : "";
+
+    // ── Verdict colour ────────────────────────────────────────────────────────
     const VERDICT_CFG = {
       Go: {
         color: "#22c55e",
@@ -1553,20 +1926,6 @@
       },
     };
     const vc = VERDICT_CFG[review.verdict] || VERDICT_CFG["Conditional Go"];
-
-    const DOMAIN_ICONS = {
-      "System Architecture": "🏗️",
-      Security: "🔐",
-      "Data Architecture": "🗄️",
-      Integration: "🔌",
-      "Solution Architecture": "🏇",
-    };
-    const STATUS_CFG = {
-      Pass: { color: "#22c55e", bg: "rgba(34,197,94,.12)", icon: "✅" },
-      Fail: { color: "#ef4444", bg: "rgba(239,68,68,.12)", icon: "❌" },
-      Warning: { color: "#f59e0b", bg: "rgba(245,158,11,.12)", icon: "⚠️" },
-    };
-    const sc = (s) => STATUS_CFG[s] || STATUS_CFG["Warning"];
     const ec = (e) =>
       ({ Low: "#22c55e", Medium: "#f59e0b", High: "#ef4444" })[e] || "#f59e0b";
     const ecBg = (e) =>
@@ -1575,305 +1934,234 @@
         Medium: "rgba(245,158,11,.12)",
         High: "rgba(239,68,68,.12)",
       })[e] || "rgba(245,158,11,.12)";
+    const STATUS_CFG = {
+      Pass: { color: "#22c55e", bg: "rgba(34,197,94,.12)", icon: "✅" },
+      Fail: { color: "#ef4444", bg: "rgba(239,68,68,.12)", icon: "❌" },
+      Warning: { color: "#f59e0b", bg: "rgba(245,158,11,.12)", icon: "⚠️" },
+    };
+    const sc = (s) => STATUS_CFG[s] || STATUS_CFG["Warning"];
+    const DOMAIN_ICONS = {
+      "System Architecture": "🏗️",
+      Security: "🔐",
+      "Data Architecture": "🗄️",
+      Integration: "🔌",
+      "Solution Architecture": "🏇",
+    };
 
-    // ── §1 Verdict Banner ──────────────────────────────────────────────────
-    const maturityBadge = review.architectureMaturity
-      ? `<div style="display:flex;align-items:center;gap:8px;margin-top:10px">
-          <span style="font-size:11px;opacity:.6;font-weight:600;text-transform:uppercase;letter-spacing:.06em">Architecture Maturity</span>
-          <span class="cta-maturity-badge level-${review.architectureMaturity.level}">Level ${review.architectureMaturity.level} — ${escHtml(review.architectureMaturity.label)}</span>
-        </div>`
+    // ─────────────────────────────────────────────────────────────────────────
+    // TAB 1: OVERVIEW
+    // ─────────────────────────────────────────────────────────────────────────
+    const overviewPanel = `
+      <div class="ctad-overview-grid-3">
+        <!-- LEFT RAIL -->
+        <div class="ctad-overview-rail">
+          <div class="ctad-section-heading">Architecture Health Score</div>
+          <div class="ctad-card ctad-gauge-card ctad-mb-12">
+            <div class="ctad-gauge-row">
+              <div class="ctad-gauge-wrap">
+                ${gaugeSvg}
+                <div class="ctad-center ctad-mt-2">
+                  <span class="ctad-maturity-pill" style="color:${matColor};background:${matBg}">Level ${matLevel} - ${escHtml(matLabel)}</span>
+                </div>
+                <div class="ctad-scan-time">${scanDate}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="ctad-section-heading ctad-mt-0">Top 3 Critical Risks</div>
+          <div class="ctad-card ctad-risk-list-card">${top3Html}</div>
+        </div>
+
+        <!-- CENTER -->
+        <div class="ctad-overview-main">
+          <div class="ctad-verdict-banner ctad-mb-12" style="border-color:${vc.border};background:${vc.bg}">
+            <div class="ctad-verdict-icon">${vc.icon}</div>
+            <div class="ctad-verdict-copy-wrap">
+              <div class="ctad-verdict-copy">
+                Final Verdict: <span style="color:${vc.color}">${escHtml(review.verdict)}</span> <span class="ctad-verdict-sub">— ${vc.label}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="ctad-section-heading">Business Impact Summary</div>
+          ${impactHtml}
+
+          ${
+            wellCards
+              ? `<div class="ctad-section-heading">What's Working Well</div>
+          <div class="ctad-card ctad-mb-0">
+            <div class="ctad-well-grid">${wellCards}</div>
+          </div>`
+              : ""
+          }
+        </div>
+
+        <!-- RIGHT -->
+        <div class="ctad-overview-right">
+          ${orgProfileHtml}
+          ${scoreBreakdownHtml}
+        </div>
+      </div>`;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TAB 2: RISKS & ISSUES
+    // ─────────────────────────────────────────────────────────────────────────
+    const allIssues = review.topCriticalIssues || [];
+    const issueCards = allIssues
+      .map((iss) => {
+        const sevC =
+          iss.severity === "Critical"
+            ? "#ef4444"
+            : iss.severity === "High"
+              ? "#f97316"
+              : "#f59e0b";
+        const sevBg =
+          iss.severity === "Critical"
+            ? "rgba(239,68,68,.08)"
+            : iss.severity === "High"
+              ? "rgba(249,115,22,.08)"
+              : "rgba(245,158,11,.08)";
+        return `<div class="ctad-issue-card" data-sev="${escHtml(iss.severity)}" style="border-left-color:${sevC}">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px">
+          <div style="font-size:14px;font-weight:700;flex:1">${escHtml(iss.title)}</div>
+          <span class="ctad-sev-badge ctad-sev-${(iss.severity || "high").toLowerCase()}">${escHtml(iss.severity)}</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px">
+          <div>
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.55;margin-bottom:4px">Business Impact</div>
+            <div style="font-size:12px;line-height:1.5;opacity:.9">${escHtml(iss.impact || "—")}</div>
+          </div>
+          <div>
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.55;margin-bottom:4px">Recommended Fix</div>
+            <div style="font-size:12px;line-height:1.5;opacity:.9">${escHtml(iss.remediation || "—")}</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          ${iss.domain ? `<span style="font-size:11px;opacity:.6">🏷 ${escHtml(iss.domain)}</span>` : ""}
+          ${iss.effortEstimate ? `<span style="font-size:11px;font-weight:700;padding:1px 8px;border-radius:10px;background:rgba(107,114,128,.1);color:#6b7280">${escHtml(iss.effortEstimate)} effort</span>` : ""}
+        </div>
+      </div>`;
+      })
+      .join("");
+    const filterBtns = ["all", "Critical", "High", "Medium"]
+      .map(
+        (s) =>
+          `<button class="ctad-risk-filter-btn${s === "all" ? " active" : ""}" data-action="cta-risk-filter" data-sev="${s}">${s === "all" ? "All" : s}</button>`,
+      )
+      .join("");
+    const riskAnalHtml = review.riskAnalysis
+      ? (() => {
+          const ra = review.riskAnalysis;
+          const cells = (ra.riskHeatmap || [])
+            .map((cell) => {
+              const l = { Low: 1, Medium: 2, High: 3 }[cell.likelihood] || 1;
+              const im = { Low: 1, Medium: 2, High: 3 }[cell.impact] || 1;
+              const risk = l * im;
+              const cc =
+                risk >= 6 ? "#ef4444" : risk >= 3 ? "#f59e0b" : "#22c55e";
+              return `<div style="padding:6px 10px;border-radius:6px;border:1px solid ${cc}40;background:${cc}15;display:flex;align-items:center;justify-content:space-between">
+              <span style="font-size:11px;font-weight:600">${escHtml(cell.domain)}</span>
+              <span style="font-size:10px;font-weight:700;color:${cc}">L:${escHtml(cell.likelihood)} × I:${escHtml(cell.impact)}</span>
+            </div>`;
+            })
+            .join("");
+          return `<div class="ctad-card" style="margin-top:16px">
+            <div class="ctad-card-title">🔥 Risk Analysis</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:12px">
+              <div>
+                <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.55;margin-bottom:6px">Probability of Incident</div>
+                <div style="font-size:13px;line-height:1.6;opacity:.9">${escHtml(ra.probabilityOfIncident || "—")}</div>
+                <div style="margin-top:10px"><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.55;margin-bottom:4px">Time to Risk</div>
+                <div style="font-size:14px;font-weight:800;color:#ef4444">${escHtml(ra.timeToRisk || "—")}</div></div>
+              </div>
+              <div><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.55;margin-bottom:8px">Risk Heatmap (Likelihood × Impact)</div>
+                <div style="display:flex;flex-direction:column;gap:5px">${cells}</div>
+              </div>
+            </div>
+          </div>`;
+        })()
       : "";
+    const risksPanel = `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+        <span style="font-size:12px;font-weight:600;opacity:.6">Filter by severity:</span>
+        ${filterBtns}
+      </div>
+      <div>${issueCards || '<div class="ctad-card"><div style="opacity:.5;padding:12px">No issues found.</div></div>'}</div>
+      ${riskAnalHtml}`;
 
-    const verdictBanner = `
-      <div style="border-radius:16px;padding:28px 32px;margin-bottom:24px;background:${vc.bg};border:1.5px solid ${vc.border};display:flex;align-items:center;gap:20px;flex-wrap:wrap">
-        <div style="width:64px;height:64px;border-radius:16px;background:${vc.color}22;border:2px solid ${vc.border};display:flex;align-items:center;justify-content:center;font-size:32px;flex-shrink:0">${vc.icon}</div>
-        <div style="flex:1;min-width:200px">
-          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.1em;font-weight:700;color:${vc.color};margin-bottom:4px">CTA Architecture Verdict</div>
-          <div style="font-size:26px;font-weight:800;color:${vc.color};line-height:1.1">${escHtml(review.verdict)} — ${vc.label}</div>
-          <div style="font-size:12px;opacity:.6;margin-top:6px">✨ ${escHtml(review.modelUsed || "AI")} &nbsp;·&nbsp; ${review.generatedAt ? new Date(review.generatedAt).toLocaleString() : "Just now"}</div>
-          ${maturityBadge}
-        </div>
-        <div style="display:flex;gap:8px;flex-shrink:0;align-items:center">
-          <select id="cta-model-select" style="padding:5px 10px;border-radius:6px;border:1px solid var(--vscode-input-border,#444);background:var(--vscode-input-background,#1e1e1e);color:var(--vscode-input-foreground,#ccc);font-size:11px;cursor:pointer" title="Select AI model">
-            <option value="auto">Auto</option>
-            <option value="claude-sonnet">Claude Sonnet</option>
-            <option value="claude-opus">Claude Opus</option>
-            <option value="gpt-4o">GPT-4o</option>
-          </select>
-          <button class="btn btn-ghost" data-action="export-cta-pdf" style="font-size:12px;padding:8px 14px">📄 Export PDF</button>
-          <button class="btn btn-secondary" data-action="run-cta-review" style="font-size:12px;padding:8px 18px">🔄 Regenerate</button>
-        </div>
-      </div>`;
-
-    // ── §2 Executive Summary ───────────────────────────────────────────────
-    const execSummary = `
-      <div class="section-card" style="margin-bottom:20px">
-        <div class="cta-section-header">
-          <div class="cta-section-icon" style="background:rgba(1,118,211,.15)">📋</div>
-          <span class="cta-section-title">Executive Summary</span>
-          <span class="cta-section-badge">§1</span>
-        </div>
-        <p style="margin:0;line-height:1.75;font-size:13px;opacity:.9">${escHtml(review.executiveSummary || "")}</p>
-      </div>`;
-
-    // ── §3 Architecture Maturity ───────────────────────────────────────────
-    const maturitySection = review.architectureMaturity
+    // ─────────────────────────────────────────────────────────────────────────
+    // TAB 3: ARCHITECTURE ANALYSIS
+    // ─────────────────────────────────────────────────────────────────────────
+    const maturityBlockHtml = review.architectureMaturity
       ? (() => {
           const m = review.architectureMaturity;
-          const maturityLabels = [
+          const matLabels = [
             "Ad Hoc",
-            "Repeatable",
+            "Reactive",
             "Defined",
             "Managed",
-            "Optimised",
+            "Optimized",
           ];
-          const maturityColors = [
+          const matColors2 = [
             "#ef4444",
             "#f97316",
             "#f59e0b",
             "#22c55e",
             "#0176d3",
           ];
-          const steps = maturityLabels
+          const steps = matLabels
             .map((lbl, i) => {
               const active = i + 1 === m.level;
               const past = i + 1 < m.level;
-              return `<div class="cta-maturity-step ${active ? "active" : past ? "past" : ""}" style="${active ? `background:${maturityColors[i]};color:#fff;border-color:${maturityColors[i]}` : past ? `border-color:${maturityColors[i]};color:${maturityColors[i]}` : ""}">
-          <div class="cta-maturity-num">${i + 1}</div>
-          <div class="cta-maturity-lbl">${lbl}</div>
+              const sc2 = matColors2[i];
+              return `<div class="cta-maturity-step ${active ? "active" : past ? "past" : ""}" style="${active ? `background:${sc2};color:#fff;border-color:${sc2}` : past ? `border-color:${sc2};color:${sc2}` : ""}">
+          <div class="cta-maturity-num">${i + 1}</div><div class="cta-maturity-lbl">${lbl}</div>
         </div>`;
             })
             .join('<div class="cta-maturity-connector"></div>');
-          return `
-        <div class="section-card" style="margin-bottom:20px">
-          <div class="cta-section-header">
-            <div class="cta-section-icon" style="background:rgba(139,92,246,.15)">🏅</div>
-            <span class="cta-section-title">Architecture Maturity</span>
-            <span class="cta-section-badge">§2</span>
-          </div>
-          <div class="cta-maturity-gauge">${steps}</div>
-          <p style="margin:12px 0 0;font-size:13px;opacity:.85;line-height:1.6">${escHtml(m.summary)}</p>
-        </div>`;
+          return `<div class="ctad-card" style="margin-bottom:16px">
+        <div class="ctad-card-title">🏅 Architecture Maturity — Level ${m.level}: ${escHtml(m.label)}</div>
+        <div class="cta-maturity-gauge" style="margin:12px 0">${steps}</div>
+        <p style="margin:0;font-size:13px;line-height:1.7;opacity:.9">${escHtml(m.summary || "—")}</p>
+      </div>`;
         })()
       : "";
-
-    // ── §4 Business Impact Summary ─────────────────────────────────────────
-    const impactSection = review.businessImpactSummary
-      ? (() => {
-          const b = review.businessImpactSummary;
-          const sevColor =
-            {
-              Critical: "#ef4444",
-              High: "#f59e0b",
-              Medium: "#f59e0b",
-              Low: "#22c55e",
-            }[b.overallSeverity] || "#f59e0b";
-          const sevBg =
-            {
-              Critical: "rgba(239,68,68,.12)",
-              High: "rgba(245,158,11,.12)",
-              Medium: "rgba(245,158,11,.12)",
-              Low: "rgba(34,197,94,.12)",
-            }[b.overallSeverity] || "rgba(245,158,11,.12)";
-          return `
-        <div class="section-card" style="margin-bottom:20px">
-          <div class="cta-section-header">
-            <div class="cta-section-icon" style="background:rgba(239,68,68,.12)">💼</div>
-            <span class="cta-section-title">Business Impact Summary</span>
-            <span class="cta-section-badge">§3</span>
-            <span style="margin-left:auto;font-size:11px;font-weight:700;color:${sevColor};background:${sevBg};padding:3px 12px;border-radius:20px">${escHtml(b.overallSeverity)} Severity</span>
-          </div>
-          <div class="cta-impact-grid">
-            <div class="cta-impact-card" style="border-top-color:#ef4444">
-              <div class="cta-impact-label">💰 Revenue Risk</div>
-              <div class="cta-impact-text">${escHtml(b.revenueRisk)}</div>
-            </div>
-            <div class="cta-impact-card" style="border-top-color:#f59e0b">
-              <div class="cta-impact-label">⚙️ Operational Risk</div>
-              <div class="cta-impact-text">${escHtml(b.operationalRisk)}</div>
-            </div>
-            <div class="cta-impact-card" style="border-top-color:#8b5cf6">
-              <div class="cta-impact-label">🔏 Compliance Risk</div>
-              <div class="cta-impact-text">${escHtml(b.complianceRisk)}</div>
+    const domainCardsHtml = (review.domainFindings || [])
+      .map((d) => {
+        const cfg2 = sc(d.status);
+        const dIcon = DOMAIN_ICONS[d.domain] || "📋";
+        return `<div style="background:var(--vscode-editor-background,#fff);border:1px solid ${cfg2.color}40;border-radius:12px;padding:20px;position:relative;overflow:hidden">
+        <div style="position:absolute;top:0;left:0;right:0;height:3px;background:${cfg2.color}"></div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <div style="width:36px;height:36px;border-radius:9px;background:${cfg2.bg};display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">${dIcon}</div>
+          <div style="flex:1">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span style="font-size:14px;font-weight:700">${escHtml(d.domain)}</span>
+              <span style="font-size:11px;font-weight:700;color:${cfg2.color};background:${cfg2.bg};padding:2px 8px;border-radius:20px">${cfg2.icon} ${escHtml(d.status)}</span>
             </div>
           </div>
-        </div>`;
-        })()
-      : "";
-
-    // ── §5 Org Profile ─────────────────────────────────────────────────────
-    const profileSection = review.orgProfile
-      ? (() => {
-          const p = review.orgProfile;
-          const cxColor =
-            {
-              Simple: "#22c55e",
-              Moderate: "#f59e0b",
-              Complex: "#f97316",
-              Enterprise: "#ef4444",
-            }[p.complexity] || "#f59e0b";
-          return `
-        <div class="section-card" style="margin-bottom:20px">
-          <div class="cta-section-header">
-            <div class="cta-section-icon" style="background:rgba(6,182,212,.12)">🏢</div>
-            <span class="cta-section-title">Org Profile</span>
-            <span class="cta-section-badge">§4</span>
-          </div>
-          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-top:4px">
-            <div class="cta-profile-item"><div class="cta-profile-label">Complexity</div><div class="cta-profile-value" style="color:${cxColor}">${escHtml(p.complexity)}</div></div>
-            <div class="cta-profile-item"><div class="cta-profile-label">User Scale</div><div class="cta-profile-value">${escHtml(p.userScale)}</div></div>
-            <div class="cta-profile-item"><div class="cta-profile-label">Integrations</div><div class="cta-profile-value">${escHtml(p.integrationFootprint)}</div></div>
-            <div class="cta-profile-item"><div class="cta-profile-label">Customisation</div><div class="cta-profile-value">${escHtml(p.customizationLevel)}</div></div>
-          </div>
-        </div>`;
-        })()
-      : "";
-
-    // ── §6 Health Score Breakdown ──────────────────────────────────────────
-    const scoreSection = (review.healthScoreBreakdown || []).length
-      ? (() => {
-          const trendIcon = (t) =>
-            ({ improving: "↑", stable: "→", declining: "↓" })[t] || "→";
-          const trendColor = (t) =>
-            ({ improving: "#22c55e", stable: "#6b7280", declining: "#ef4444" })[
-              t
-            ] || "#6b7280";
-          const bars = (review.healthScoreBreakdown || [])
-            .map((s) => {
-              const pct = Math.min(
-                100,
-                Math.round((s.score / (s.maxScore || 100)) * 100),
-              );
-              const barColor =
-                pct >= 75 ? "#22c55e" : pct >= 50 ? "#f59e0b" : "#ef4444";
-              return `
-          <div class="cta-score-row">
-            <div class="cta-score-label">${escHtml(s.area)}</div>
-            <div class="cta-score-bar-wrap">
-              <div class="cta-score-bar" style="width:${pct}%;background:${barColor}"></div>
-            </div>
-            <div class="cta-score-num" style="color:${barColor}">${s.score}</div>
-            <div class="cta-score-trend" style="color:${trendColor(s.trend)}">${trendIcon(s.trend)}</div>
-            <div class="cta-score-finding">${escHtml(s.keyFinding)}</div>
-          </div>`;
-            })
-            .join("");
-          return `
-        <div class="section-card" style="margin-bottom:20px">
-          <div class="cta-section-header">
-            <div class="cta-section-icon" style="background:rgba(34,197,94,.12)">📊</div>
-            <span class="cta-section-title">Health Score Breakdown</span>
-            <span class="cta-section-badge">§5</span>
-          </div>
-          <div class="cta-score-list">${bars}</div>
-        </div>`;
-        })()
-      : "";
-
-    // ── §7 Top Critical Issues ─────────────────────────────────────────────
-    const critIssuesSection = (review.topCriticalIssues || []).length
-      ? (() => {
-          const rows = (review.topCriticalIssues || [])
-            .map((issue) => {
-              const sevColor =
-                issue.severity === "Critical" ? "#ef4444" : "#f59e0b";
-              const sevBg =
-                issue.severity === "Critical"
-                  ? "rgba(239,68,68,.12)"
-                  : "rgba(245,158,11,.12)";
-              return `<tr>
-          <td style="padding:10px 12px;font-weight:700;font-size:13px;width:30px;text-align:center;border-bottom:1px solid var(--vscode-widget-border)">${issue.rank}</td>
-          <td style="padding:10px 12px;font-weight:600;font-size:13px;border-bottom:1px solid var(--vscode-widget-border)">
-            ${escHtml(issue.title)}
-            <div style="font-size:11px;opacity:.55;font-weight:400;margin-top:2px">${escHtml(issue.domain)}</div>
-          </td>
-          <td style="padding:10px 12px;border-bottom:1px solid var(--vscode-widget-border)">
-            <span style="font-size:11px;font-weight:700;color:${sevColor};background:${sevBg};padding:2px 8px;border-radius:20px">${escHtml(issue.severity)}</span>
-          </td>
-          <td style="padding:10px 12px;font-size:12px;opacity:.85;border-bottom:1px solid var(--vscode-widget-border)">${escHtml(issue.impact)}</td>
-          <td style="padding:10px 12px;font-size:12px;opacity:.8;border-bottom:1px solid var(--vscode-widget-border)">${escHtml(issue.remediation)}</td>
-          <td style="padding:10px 12px;font-size:11px;opacity:.6;border-bottom:1px solid var(--vscode-widget-border);white-space:nowrap">${escHtml(issue.effortEstimate)}</td>
-        </tr>`;
-            })
-            .join("");
-          return `
-        <div class="section-card" style="margin-bottom:20px">
-          <div class="cta-section-header">
-            <div class="cta-section-icon" style="background:rgba(239,68,68,.12)">🚨</div>
-            <span class="cta-section-title">Top Critical Issues</span>
-            <span class="cta-section-badge">§6</span>
-          </div>
-          <div style="overflow-x:auto">
-            <table style="width:100%;border-collapse:collapse;margin-top:4px">
-              <thead><tr style="border-bottom:2px solid var(--vscode-widget-border)">
-                <th style="text-align:center;padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6;width:40px">#</th>
-                <th style="text-align:left;padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Issue</th>
-                <th style="text-align:left;padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6;width:90px">Severity</th>
-                <th style="text-align:left;padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Impact</th>
-                <th style="text-align:left;padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Remediation</th>
-                <th style="text-align:left;padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Effort</th>
-              </tr></thead>
-              <tbody>${rows}</tbody>
-            </table>
-          </div>
-        </div>`;
-        })()
-      : "";
-
-    // ── §8 Risk Analysis ───────────────────────────────────────────────────
-    const riskSection = review.riskAnalysis
-      ? (() => {
-          const ra = review.riskAnalysis;
-          const heatmapCells = (ra.riskHeatmap || [])
-            .map((cell) => {
-              const l = { Low: 1, Medium: 2, High: 3 }[cell.likelihood] || 1;
-              const im = { Low: 1, Medium: 2, High: 3 }[cell.impact] || 1;
-              const risk = l * im;
-              const cellColor =
-                risk >= 6 ? "#ef4444" : risk >= 3 ? "#f59e0b" : "#22c55e";
-              const cellBg =
-                risk >= 6
-                  ? "rgba(239,68,68,.15)"
-                  : risk >= 3
-                    ? "rgba(245,158,11,.15)"
-                    : "rgba(34,197,94,.1)";
-              return `<div class="cta-heatmap-cell" style="border-color:${cellColor}40;background:${cellBg}">
-          <div class="cta-heatmap-domain">${escHtml(cell.domain)}</div>
-          <div class="cta-heatmap-vals" style="color:${cellColor}">L:${escHtml(cell.likelihood)} I:${escHtml(cell.impact)}</div>
-        </div>`;
-            })
-            .join("");
-          return `
-        <div class="section-card" style="margin-bottom:20px">
-          <div class="cta-section-header">
-            <div class="cta-section-icon" style="background:rgba(239,68,68,.12)">🔥</div>
-            <span class="cta-section-title">Risk Analysis</span>
-            <span class="cta-section-badge">§7</span>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:4px;flex-wrap:wrap">
-            <div>
-              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.55;margin-bottom:6px">Probability of Incident</div>
-              <div style="font-size:13px;line-height:1.6;opacity:.9">${escHtml(ra.probabilityOfIncident)}</div>
-              <div style="margin-top:10px">
-                <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.55;margin-bottom:6px">Time to Risk</div>
-                <div style="font-size:13px;font-weight:700;color:#ef4444">${escHtml(ra.timeToRisk)}</div>
-              </div>
-            </div>
-            <div>
-              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.55;margin-bottom:8px">Risk Heatmap (Likelihood × Impact)</div>
-              <div class="cta-heatmap-grid">${heatmapCells}</div>
-            </div>
-          </div>
-        </div>`;
-        })()
-      : "";
-
-    // ── §9 Benchmark Comparison ────────────────────────────────────────────
-    const benchmarkSection = (review.benchmarkComparison || []).length
-      ? (() => {
-          const rows = (review.benchmarkComparison || [])
+        </div>
+        <p style="margin:0 0 10px;font-size:12px;line-height:1.6;opacity:.9">${escHtml(d.analysis)}</p>
+        ${d.risks && d.risks.length ? `<div style="margin-bottom:8px"><div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.6;margin-bottom:5px">Risks</div>${d.risks.map((r) => `<div style="display:flex;gap:6px;margin-bottom:3px;font-size:11px"><span style="color:#ef4444;flex-shrink:0">●</span><span style="opacity:.85">${escHtml(r)}</span></div>`).join("")}</div>` : ""}
+        ${d.recommendations && d.recommendations.length ? `<div><div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.6;margin-bottom:5px">Fixes</div>${d.recommendations.map((r) => `<div style="display:flex;gap:6px;margin-bottom:3px;font-size:11px"><span style="color:#22c55e;flex-shrink:0">→</span><span style="opacity:.85">${escHtml(r)}</span></div>`).join("")}</div>` : ""}
+      </div>`;
+      })
+      .join("");
+    const benchHtml = (review.benchmarkComparison || []).length
+      ? `<div class="ctad-card" style="margin-top:16px">
+      <div class="ctad-card-title">📈 Benchmark Comparison</div>
+      <div style="overflow-x:auto;margin-top:10px">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="border-bottom:2px solid var(--vscode-widget-border,#e5e7eb)">
+            <th style="text-align:left;padding:7px 10px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Metric</th>
+            <th style="text-align:center;padding:7px 10px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Your Org</th>
+            <th style="text-align:center;padding:7px 10px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Industry Avg</th>
+            <th style="text-align:center;padding:7px 10px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Top Quartile</th>
+            <th style="text-align:center;padding:7px 10px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Status</th>
+          </tr></thead>
+          <tbody>${(review.benchmarkComparison || [])
             .map((b, i) => {
-              const stColor =
+              const stC =
                 { Above: "#22c55e", At: "#f59e0b", Below: "#ef4444" }[
                   b.status
                 ] || "#f59e0b";
@@ -1883,114 +2171,130 @@
                   At: "rgba(245,158,11,.1)",
                   Below: "rgba(239,68,68,.1)",
                 }[b.status] || "rgba(245,158,11,.1)";
-              return `<tr style="background:${i % 2 ? "var(--vscode-editor-background)" : "transparent"}">
-          <td style="padding:10px 12px;font-weight:600;font-size:13px;border-bottom:1px solid var(--vscode-widget-border)">${escHtml(b.metric)}</td>
-          <td style="padding:10px 12px;font-size:13px;font-weight:700;border-bottom:1px solid var(--vscode-widget-border)">${escHtml(String(b.orgValue))}</td>
-          <td style="padding:10px 12px;font-size:12px;opacity:.7;border-bottom:1px solid var(--vscode-widget-border)">${escHtml(String(b.industryAvg))}</td>
-          <td style="padding:10px 12px;font-size:12px;opacity:.7;border-bottom:1px solid var(--vscode-widget-border)">${escHtml(String(b.topQuartile))}</td>
-          <td style="padding:10px 12px;border-bottom:1px solid var(--vscode-widget-border)"><span style="font-size:11px;font-weight:700;color:${stColor};background:${stBg};padding:2px 8px;border-radius:20px">${escHtml(b.status)}</span></td>
-        </tr>`;
+              return `<tr style="background:${i % 2 ? "var(--vscode-editor-background,#f9fafb)" : "transparent"}">
+              <td style="padding:8px 10px;font-weight:600;border-bottom:1px solid var(--vscode-widget-border,#f3f4f6)">${escHtml(b.metric)}</td>
+              <td style="padding:8px 10px;text-align:center;font-weight:700;border-bottom:1px solid var(--vscode-widget-border,#f3f4f6)">${escHtml(String(b.orgValue))}</td>
+              <td style="padding:8px 10px;text-align:center;opacity:.7;border-bottom:1px solid var(--vscode-widget-border,#f3f4f6)">${escHtml(String(b.industryAvg))}</td>
+              <td style="padding:8px 10px;text-align:center;opacity:.7;border-bottom:1px solid var(--vscode-widget-border,#f3f4f6)">${escHtml(String(b.topQuartile))}</td>
+              <td style="padding:8px 10px;text-align:center;border-bottom:1px solid var(--vscode-widget-border,#f3f4f6)"><span style="font-size:11px;font-weight:700;color:${stC};background:${stBg};padding:2px 8px;border-radius:20px">${escHtml(b.status)}</span></td>
+            </tr>`;
             })
-            .join("");
-          return `
-        <div class="section-card" style="margin-bottom:20px">
-          <div class="cta-section-header">
-            <div class="cta-section-icon" style="background:rgba(6,182,212,.12)">📈</div>
-            <span class="cta-section-title">Benchmark Comparison</span>
-            <span class="cta-section-badge">§8</span>
-          </div>
-          <table style="width:100%;border-collapse:collapse;margin-top:4px">
-            <thead><tr style="border-bottom:2px solid var(--vscode-widget-border)">
-              <th style="text-align:left;padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Metric</th>
-              <th style="text-align:left;padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Your Org</th>
-              <th style="text-align:left;padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Industry Avg</th>
-              <th style="text-align:left;padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Top Quartile</th>
-              <th style="text-align:left;padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Status</th>
-            </tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>`;
-        })()
+            .join("")}</tbody>
+        </table>
+      </div>
+    </div>`
       : "";
+    const archPanel = `
+      ${maturityBlockHtml}
+      ${domainCardsHtml ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-bottom:16px">${domainCardsHtml}</div>` : ""}
+      ${benchHtml}`;
 
-    // ── §10 Domain Findings ────────────────────────────────────────────────
-    const domainCards = (review.domainFindings || [])
-      .map((d) => {
-        const cfg = sc(d.status);
-        const domIcon = DOMAIN_ICONS[d.domain] || "📋";
-        return `
-        <div style="background:var(--vscode-editor-background);border:1px solid ${cfg.color}40;border-radius:12px;padding:20px;position:relative;overflow:hidden">
-          <div style="position:absolute;top:0;left:0;right:0;height:3px;background:${cfg.color}"></div>
-          <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:12px">
-            <div style="width:40px;height:40px;border-radius:10px;background:${cfg.bg};display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0">${domIcon}</div>
-            <div style="flex:1;min-width:0">
-              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                <span style="font-size:14px;font-weight:700">${escHtml(d.domain)}</span>
-                <span style="font-size:11px;font-weight:700;color:${cfg.color};background:${cfg.bg};padding:2px 8px;border-radius:20px">${cfg.icon} ${escHtml(d.status)}</span>
-              </div>
-            </div>
+    // ─────────────────────────────────────────────────────────────────────────
+    // TAB 4: RECOMMENDATIONS
+    // ─────────────────────────────────────────────────────────────────────────
+    const rec = review.recommendations || {};
+    const qwHtml = (rec.quickWins || [])
+      .map(
+        (w, i) => `
+      <div style="display:flex;align-items:flex-start;gap:12px;padding:12px 16px;border-radius:10px;background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.2);margin-bottom:8px">
+        <span style="width:24px;height:24px;border-radius:50%;background:#22c55e;color:#fff;font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px">${i + 1}</span>
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:600;margin-bottom:4px">${escHtml(w.action)}</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            <span style="font-size:10px;font-weight:700;color:${ec(w.effort)};background:${ecBg(w.effort)};padding:1px 7px;border-radius:10px">${escHtml(w.effort || "")} Effort</span>
+            <span style="font-size:11px;opacity:.6">${escHtml(w.impact || "—")}</span>
           </div>
-          <p style="margin:0 0 12px;font-size:13px;line-height:1.6;opacity:.9">${escHtml(d.analysis)}</p>
-          ${d.risks && d.risks.length ? `<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.6;margin-bottom:6px">Risks</div>${d.risks.map((r) => `<div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:4px;font-size:12px"><span style="color:#ef4444;flex-shrink:0">●</span><span style="opacity:.85">${escHtml(r)}</span></div>`).join("")}</div>` : ""}
-          ${d.recommendations && d.recommendations.length ? `<div><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.6;margin-bottom:6px">Recommendations</div>${d.recommendations.map((r) => `<div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:4px;font-size:12px"><span style="color:#22c55e;flex-shrink:0">→</span><span style="opacity:.85">${escHtml(r)}</span></div>`).join("")}</div>` : ""}
-        </div>`;
-      })
-      .join("");
-
-    const domainSection = `
-      <div style="margin-bottom:20px">
-        <div class="cta-section-header" style="margin-bottom:16px">
-          <div class="cta-section-icon" style="background:rgba(1,118,211,.12)">🏗️</div>
-          <span class="cta-section-title">Domain Findings</span>
-          <span class="cta-section-badge">§9</span>
         </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px">${domainCards}</div>
-      </div>`;
-
-    // ── §11 AI Insights ────────────────────────────────────────────────────
-    const insightsSection = review.aiInsights
+        <span style="font-size:10px;font-weight:700;color:#6b7280;opacity:.5">P${i + 1}</span>
+      </div>`,
+      )
+      .join("");
+    const stHtml = (rec.strategic || [])
+      .map(
+        (s, i) => `
+      <div style="display:flex;gap:14px;padding:14px 16px;border-radius:10px;background:rgba(1,118,211,.06);border:1px solid rgba(1,118,211,.2);margin-bottom:8px">
+        <div style="width:38px;height:38px;border-radius:9px;background:rgba(1,118,211,.15);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;flex-shrink:0;color:#0176d3">${i + 1}</div>
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:600;margin-bottom:5px">${escHtml(s.action)}</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            ${s.timeline ? `<span style="font-size:11px;opacity:.6">📅 ${escHtml(s.timeline)}</span>` : ""}
+            <span style="font-size:10px;font-weight:700;color:${ec(s.effort)};background:${ecBg(s.effort)};padding:1px 7px;border-radius:10px">${escHtml(s.effort || "")} Effort</span>
+            <span style="font-size:11px;opacity:.6">${escHtml(s.impact || "—")}</span>
+          </div>
+        </div>
+      </div>`,
+      )
+      .join("");
+    const inactionHtml = review.costOfInaction
       ? (() => {
-          const ai = review.aiInsights;
-          const insightBlock = (icon, title, items, color) =>
-            items && items.length
-              ? `
-        <div style="flex:1;min-width:200px">
-          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${color};margin-bottom:8px">${icon} ${title}</div>
-          ${items.map((it) => `<div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:6px;font-size:12px"><span style="color:${color};flex-shrink:0;margin-top:2px">▸</span><span style="opacity:.85;line-height:1.5">${escHtml(it)}</span></div>`).join("")}
-        </div>`
-              : "";
-          return `
-        <div class="section-card" style="margin-bottom:20px">
-          <div class="cta-section-header">
-            <div class="cta-section-icon" style="background:rgba(139,92,246,.12)">✨</div>
-            <span class="cta-section-title">AI Insights</span>
-            <span class="cta-section-badge">§10</span>
-          </div>
-          <div style="display:flex;flex-wrap:wrap;gap:20px;margin-top:4px">
-            ${insightBlock("🔍", "Hidden Risks", ai.hiddenRisks, "#ef4444")}
-            ${insightBlock("🔮", "Predictions", ai.predictions, "#8b5cf6")}
-            ${insightBlock("⚡", "Unusual Patterns", ai.unusualPatterns, "#f59e0b")}
-          </div>
-        </div>`;
+          const c = review.costOfInaction;
+          return `<div style="background:rgba(239,68,68,.06);border:1.5px solid rgba(239,68,68,.25);border-radius:12px;padding:20px;margin-top:16px">
+        <div class="ctad-card-title" style="color:#ef4444;margin-bottom:12px">⏳ Cost of Inaction</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px">
+          <div><div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#ef4444;margin-bottom:6px">Financial Impact</div><div style="font-size:13px;line-height:1.5;opacity:.9">${escHtml(c.financialImpact || "—")}</div></div>
+          <div><div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#f59e0b;margin-bottom:6px">Technical Debt Growth</div><div style="font-size:13px;line-height:1.5;opacity:.9">${escHtml(c.technicalDebtGrowth || "—")}</div></div>
+        </div>
+        ${c.risks && c.risks.length ? c.risks.map((r) => `<div style="display:flex;gap:6px;margin-bottom:4px;font-size:12px"><span style="color:#ef4444;flex-shrink:0">●</span><span style="opacity:.85">${escHtml(r)}</span></div>`).join("") : ""}
+      </div>`;
         })()
       : "";
-
-    // ── §12 Architecture Observations (SWOT) ──────────────────────────────
-    const swotSection = (review.architectureObservations || []).length
+    const finalRecHtml = review.finalRecommendation
       ? (() => {
-          const classMap = {
+          const f = review.finalRecommendation;
+          return `<div style="background:${vc.bg};border:1.5px solid ${vc.border};border-radius:12px;padding:20px;margin-top:16px">
+        <div class="ctad-card-title" style="color:${vc.color};margin-bottom:10px">${vc.icon} Final CTA Recommendation</div>
+        <p style="margin:0 0 14px;font-size:14px;line-height:1.75;font-weight:500;opacity:.95">${escHtml(f.summary || "—")}</p>
+        ${f.nextSteps && f.nextSteps.length ? `<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.55;margin-bottom:8px">Immediate Next Steps</div>${f.nextSteps.map((step, i) => `<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:6px;font-size:13px"><span style="width:20px;height:20px;border-radius:50%;background:${vc.color};color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px">${i + 1}</span><span style="opacity:.9;line-height:1.5">${escHtml(step)}</span></div>`).join("")}` : ""}
+        ${f.proposedTimeline ? `<div style="background:rgba(0,0,0,.06);border-radius:8px;padding:11px 14px;font-size:12px;opacity:.8;margin-top:10px"><span style="font-weight:700">📅 Timeline: </span>${escHtml(f.proposedTimeline)}</div>` : ""}
+      </div>`;
+        })()
+      : "";
+    const recsPanel = `
+      ${
+        qwHtml
+          ? `<div class="ctad-card" style="margin-bottom:16px">
+        <div class="ctad-card-title">🟢 Quick Wins <span style="font-size:11px;opacity:.5;font-weight:400">(1–2 sprints)</span></div>
+        <div style="margin-top:12px">${qwHtml}</div>
+      </div>`
+          : ""
+      }
+      ${
+        stHtml
+          ? `<div class="ctad-card" style="margin-bottom:16px">
+        <div class="ctad-card-title">🔵 Strategic Initiatives</div>
+        <div style="margin-top:12px">${stHtml}</div>
+      </div>`
+          : ""
+      }
+      ${inactionHtml}
+      ${finalRecHtml}`;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TAB 5: AI INSIGHTS
+    // ─────────────────────────────────────────────────────────────────────────
+    const ai = review.aiInsights || {};
+    const aiBlock = (icon, title, items, color) =>
+      items && items.length
+        ? `<div class="ctad-card" style="margin-bottom:14px;border-left:3px solid ${color}">
+            <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${color};margin-bottom:10px">${icon} ${title}</div>
+            ${items.map((it) => `<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:7px;font-size:13px"><span style="color:${color};flex-shrink:0;margin-top:2px">▸</span><span style="opacity:.9;line-height:1.5">${escHtml(it)}</span></div>`).join("")}
+          </div>`
+        : "";
+    const swotHtml = (review.architectureObservations || []).length
+      ? (() => {
+          const clrMap = {
             Strength: "#22c55e",
             Weakness: "#ef4444",
             Opportunity: "#0176d3",
             Threat: "#f59e0b",
           };
-          const classBg = {
-            Strength: "rgba(34,197,94,.08)",
-            Weakness: "rgba(239,68,68,.08)",
-            Opportunity: "rgba(1,118,211,.08)",
-            Threat: "rgba(245,158,11,.08)",
+          const bgMap = {
+            Strength: "rgba(34,197,94,.07)",
+            Weakness: "rgba(239,68,68,.07)",
+            Opportunity: "rgba(1,118,211,.07)",
+            Threat: "rgba(245,158,11,.07)",
           };
-          const classIcon = {
+          const icMap = {
             Strength: "💪",
             Weakness: "⚠️",
             Opportunity: "🚀",
@@ -2006,143 +2310,144 @@
             if (grouped[o.classification])
               grouped[o.classification].push(o.observation);
           });
-          const quadrant = (cls) => `
-        <div style="padding:16px;border-radius:10px;background:${classBg[cls]};border:1px solid ${classMap[cls]}30">
-          <div style="font-size:12px;font-weight:700;color:${classMap[cls]};margin-bottom:10px">${classIcon[cls]} ${cls}s</div>
-          ${grouped[cls].map((obs) => `<div style="font-size:12px;opacity:.85;margin-bottom:6px;display:flex;gap:6px"><span style="color:${classMap[cls]};flex-shrink:0">·</span>${escHtml(obs)}</div>`).join("") || '<div style="font-size:12px;opacity:.4">None identified</div>'}
-        </div>`;
-          return `
-        <div class="section-card" style="margin-bottom:20px">
-          <div class="cta-section-header">
-            <div class="cta-section-icon" style="background:rgba(1,118,211,.12)">🔭</div>
-            <span class="cta-section-title">Architecture Observations</span>
-            <span class="cta-section-badge">§11</span>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:4px">
-            ${quadrant("Strength")}${quadrant("Weakness")}${quadrant("Opportunity")}${quadrant("Threat")}
-          </div>
-        </div>`;
+          const quad = (
+            cls,
+          ) => `<div style="padding:14px;border-radius:10px;background:${bgMap[cls]};border:1px solid ${clrMap[cls]}30">
+        <div style="font-size:11px;font-weight:700;color:${clrMap[cls]};margin-bottom:9px">${icMap[cls]} ${cls}s</div>
+        ${grouped[cls].map((obs) => `<div style="font-size:12px;opacity:.85;margin-bottom:5px;display:flex;gap:6px"><span style="color:${clrMap[cls]};flex-shrink:0">·</span>${escHtml(obs)}</div>`).join("") || `<div style="font-size:12px;opacity:.35">None identified</div>`}
+      </div>`;
+          return `<div class="ctad-card" style="margin-top:14px">
+        <div class="ctad-card-title">🔭 Architecture Observations (SWOT)</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">${quad("Strength")}${quad("Weakness")}${quad("Opportunity")}${quad("Threat")}</div>
+      </div>`;
         })()
       : "";
+    const aiPanel = `
+      ${aiBlock("🔍", "Hidden Risks", ai.hiddenRisks, "#ef4444")}
+      ${aiBlock("🔮", "Predictions", ai.predictions, "#8b5cf6")}
+      ${aiBlock("⚡", "Unusual Patterns", ai.unusualPatterns, "#f59e0b")}
+      ${!ai.hiddenRisks && !ai.predictions && !ai.unusualPatterns ? `<div class="ctad-card"><div style="opacity:.5;padding:12px">No AI insights available. Run a CTA Review in Standard or Advanced mode to generate insights.</div></div>` : ""}
+      ${swotHtml}`;
 
-    // ── §13 Recommendations ────────────────────────────────────────────────
-    const recsSection = review.recommendations
-      ? (() => {
-          const rec = review.recommendations;
-          const qwRows = (rec.quickWins || [])
-            .map(
-              (w, i) => `
-        <div style="display:flex;align-items:flex-start;gap:12px;padding:10px 14px;border-radius:8px;background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.15);margin-bottom:8px">
-          <span style="width:22px;height:22px;border-radius:50%;background:#22c55e;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px">${i + 1}</span>
-          <div style="flex:1"><div style="font-size:13px;opacity:.9;line-height:1.5">${escHtml(w.action)}</div>
-          <div style="margin-top:4px;display:flex;gap:8px">
-            <span style="font-size:10px;font-weight:700;color:${ec(w.effort)};background:${ecBg(w.effort)};padding:1px 6px;border-radius:10px">${escHtml(w.effort)} Effort</span>
-            <span style="font-size:11px;opacity:.6">${escHtml(w.impact)}</span>
-          </div></div>
-        </div>`,
-            )
-            .join("");
-          const stRows = (rec.strategic || [])
-            .map(
-              (s, i) => `
-        <div style="display:flex;gap:16px;padding:12px 16px;border-radius:8px;background:rgba(1,118,211,.06);border:1px solid rgba(1,118,211,.15);margin-bottom:8px">
-          <div style="width:36px;height:36px;border-radius:8px;background:rgba(1,118,211,.15);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;color:#0176d3">${i + 1}</div>
-          <div style="flex:1">
-            <div style="font-size:13px;font-weight:600;opacity:.95;margin-bottom:4px">${escHtml(s.action)}</div>
-            <div style="display:flex;flex-wrap:wrap;gap:8px">
-              <span style="font-size:11px;opacity:.6">📅 ${escHtml(s.timeline)}</span>
-              <span style="font-size:10px;font-weight:700;color:${ec(s.effort)};background:${ecBg(s.effort)};padding:1px 6px;border-radius:10px">${escHtml(s.effort)} Effort</span>
-              <span style="font-size:11px;opacity:.6">${escHtml(s.impact)}</span>
-            </div>
-          </div>
-        </div>`,
-            )
-            .join("");
-          return `
-        <div class="section-card" style="margin-bottom:20px">
-          <div class="cta-section-header">
-            <div class="cta-section-icon" style="background:rgba(34,197,94,.12)">⚡</div>
-            <span class="cta-section-title">Recommendations</span>
-            <span class="cta-section-badge">§12</span>
-          </div>
-          ${qwRows ? `<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.6;margin:12px 0 8px">Quick Wins (1-2 sprints)</div>${qwRows}` : ""}
-          ${stRows ? `<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.6;margin:16px 0 8px">Strategic Initiatives</div>${stRows}` : ""}
-        </div>`;
-        })()
+    // ─────────────────────────────────────────────────────────────────────────
+    // TAB 6: DATA CONFIDENCE
+    // ─────────────────────────────────────────────────────────────────────────
+    const legacyWarning = isLegacyReview
+      ? `<div style="background:rgba(245,158,11,.1);border:1.5px solid rgba(245,158,11,.35);border-radius:10px;padding:14px 18px;margin-bottom:14px;display:flex;align-items:center;gap:12px">
+          <span style="font-size:20px">⚠️</span>
+          <div><div style="font-weight:700;font-size:13px">Legacy review format detected</div>
+          <div style="font-size:12px;opacity:.8;margin-top:2px">This review was generated with an older version of OrgPulse. Click <strong>Regenerate</strong> for the full premium report.</div></div>
+        </div>`
       : "";
+    const confLevel =
+      overallScore >= 70 ? "High" : overallScore >= 40 ? "Medium" : "Low";
+    const confColor =
+      confLevel === "High"
+        ? "#22c55e"
+        : confLevel === "Medium"
+          ? "#f59e0b"
+          : "#ef4444";
+    const confidencePanel = `
+      ${legacyWarning}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+        <div class="ctad-card">
+          <div class="ctad-card-title">🔐 Scan Confidence</div>
+          <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
+            <div style="font-size:32px;font-weight:800;color:${confColor}">${confLevel}</div>
+            <div style="font-size:12px;opacity:.7;line-height:1.5">Based on ${(review.healthScoreBreakdown || []).length} scoring dimensions analysed.</div>
+          </div>
+        </div>
+        <div class="ctad-card">
+          <div class="ctad-card-title">🤖 AI Model Used</div>
+          <div style="margin-top:12px">
+            <div style="font-size:16px;font-weight:700">${escHtml(modelUsed)}</div>
+            <div style="font-size:11px;opacity:.55;margin-top:4px">Generated ${scanDate}</div>
+          </div>
+        </div>
+      </div>
+      <div class="ctad-card">
+        <div class="ctad-card-title">📊 Scoring Dimensions Coverage</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-top:12px">
+          ${(review.healthScoreBreakdown || [])
+            .map((s) => {
+              const pct = Math.min(
+                100,
+                Math.round((s.score / (s.maxScore || 100)) * 100),
+              );
+              const bc =
+                pct >= 75 ? "#22c55e" : pct >= 50 ? "#f59e0b" : "#ef4444";
+              return `<div style="padding:10px 14px;border-radius:8px;background:var(--vscode-editor-background,#f9fafb);border:1px solid var(--vscode-widget-border,#e5e7eb)">
+              <div style="font-size:11px;font-weight:600;margin-bottom:6px">${escHtml(s.area)}</div>
+              <div style="height:5px;border-radius:3px;background:#e5e7eb;overflow:hidden"><div style="height:5px;border-radius:3px;background:${bc};width:${pct}%"></div></div>
+              <div style="font-size:10px;font-weight:700;color:${bc};margin-top:4px">${s.score} / ${s.maxScore || 100}</div>
+            </div>`;
+            })
+            .join("")}
+          ${!(review.healthScoreBreakdown || []).length ? `<div style="opacity:.5;font-size:12px">No dimension data available.</div>` : ""}
+        </div>
+      </div>`;
 
-    // ── §14 Cost of Inaction ───────────────────────────────────────────────
-    const inactionSection = review.costOfInaction
-      ? (() => {
-          const c = review.costOfInaction;
-          return `
-        <div class="cta-inaction-card" style="margin-bottom:20px">
-          <div class="cta-section-header">
-            <div class="cta-section-icon" style="background:rgba(239,68,68,.12)">⏳</div>
-            <span class="cta-section-title">Cost of Inaction</span>
-            <span class="cta-section-badge">§13</span>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px">
-            <div><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#ef4444;margin-bottom:6px">Financial Impact</div><div style="font-size:13px;opacity:.9;line-height:1.5">${escHtml(c.financialImpact)}</div></div>
-            <div><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#f59e0b;margin-bottom:6px">Technical Debt Growth</div><div style="font-size:13px;opacity:.9;line-height:1.5">${escHtml(c.technicalDebtGrowth)}</div></div>
-          </div>
-          ${c.risks && c.risks.length ? `<div style="margin-top:12px"><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.55;margin-bottom:6px">Compounding Risks</div>${c.risks.map((r) => `<div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:4px;font-size:12px"><span style="color:#ef4444;flex-shrink:0">●</span><span style="opacity:.85">${escHtml(r)}</span></div>`).join("")}</div>` : ""}
-        </div>`;
-        })()
-      : "";
+    // ─────────────────────────────────────────────────────────────────────────
+    // FULL DASHBOARD WRAPPER
+    // ─────────────────────────────────────────────────────────────────────────
+    const tabDefs = [
+      { id: "overview", label: "Overview", badge: "" },
+      {
+        id: "risks",
+        label: "Risks & Issues",
+        badge: allIssues.length ? String(allIssues.length) : "",
+      },
+      { id: "arch", label: "Architecture Analysis", badge: "" },
+      { id: "recs", label: "Recommendations", badge: "" },
+      {
+        id: "ai",
+        label: "AI Insights",
+        badge: aiInsightCount > 0 ? String(aiInsightCount) : "",
+      },
+      {
+        id: "confidence",
+        label: "Data Confidence",
+        badge: isLegacyReview ? "!" : "",
+      },
+    ];
+    const tabNav = tabDefs
+      .map((t) => {
+        const active = t.id === "overview";
+        return `<button class="cta-dash-tab-btn${active ? " active" : ""}" data-action="cta-sub-tab" data-tab="${t.id}">${active ? `<span class="ctad-tab-active-dot">●</span>` : ""}${t.label}${t.badge ? `<span class="ctad-tab-badge">${t.badge}</span>` : ""}</button>`;
+      })
+      .join("");
 
-    // ── §15 Final CTA Recommendation ──────────────────────────────────────
-    const finalSection = review.finalRecommendation
-      ? (() => {
-          const f = review.finalRecommendation;
-          return `
-        <div style="background:${vc.bg};border:1.5px solid ${vc.border};border-radius:14px;padding:28px;margin-bottom:20px">
-          <div class="cta-section-header" style="margin-bottom:16px">
-            <div class="cta-section-icon" style="background:${vc.color}22">${vc.icon}</div>
-            <span class="cta-section-title">Final CTA Recommendation</span>
-            <span class="cta-section-badge">§14</span>
-          </div>
-          <p style="margin:0 0 16px;font-size:14px;line-height:1.75;opacity:.95;font-weight:500">${escHtml(f.summary)}</p>
-          ${
-            f.nextSteps && f.nextSteps.length
-              ? `
-            <div style="margin-bottom:14px">
-              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.55;margin-bottom:8px">Immediate Next Steps</div>
-              ${f.nextSteps
-                .map(
-                  (step, i) => `
-                <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:6px;font-size:13px">
-                  <span style="width:20px;height:20px;border-radius:50%;background:${vc.color};color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px">${i + 1}</span>
-                  <span style="opacity:.9;line-height:1.5">${escHtml(step)}</span>
-                </div>`,
-                )
-                .join("")}
-            </div>`
-              : ""
-          }
-          ${f.proposedTimeline ? `<div style="background:rgba(0,0,0,.06);border-radius:8px;padding:12px 16px;font-size:12px;opacity:.8;line-height:1.6"><span style="font-weight:700">📅 Proposed Timeline: </span>${escHtml(f.proposedTimeline)}</div>` : ""}
-        </div>`;
-        })()
-      : "";
+    const ctaHeaderLogo = window.ORGPULSE_ICON_URI
+      ? `<img class="cta-dash-logo-img" src="${window.ORGPULSE_ICON_URI}" alt="OrgPulse" />`
+      : "🏥";
 
     return `
-      <div style="padding:28px 24px;max-width:1100px;margin:0 auto">
-        ${staleBanner}
-        ${verdictBanner}
-        ${execSummary}
-        ${maturitySection}
-        ${impactSection}
-        ${profileSection}
-        ${scoreSection}
-        ${critIssuesSection}
-        ${riskSection}
-        ${benchmarkSection}
-        ${domainSection}
-        ${insightsSection}
-        ${swotSection}
-        ${recsSection}
-        ${inactionSection}
-        ${finalSection}
+      <div class="cta-dash-wrap">
+        <div class="cta-dash-header">
+          <div class="cta-dash-header-brand">
+            <span class="cta-dash-logo">${ctaHeaderLogo}</span>
+            <span class="cta-dash-brand-text">OrgPulse</span>
+            <span class="cta-dash-breadcrumb">›</span>
+            <span class="cta-dash-header-title">CTA Architecture Health Report</span>
+          </div>
+          <div class="cta-dash-header-actions">
+            <span class="cta-dash-date">📅 ${scanDate}</span>
+            <span class="cta-dash-score-pill" style="background:${matColor}20;color:${matColor};border:1px solid ${matColor}50">← ${overallScore}%</span>
+            <button class="cta-dash-scan-btn" data-action="run-cta-review">🔄 Review again</button>
+          </div>
+        </div>
+        <div class="cta-dash-tab-bar">
+          <div class="cta-dash-tab-left">${tabNav}</div>
+          <button class="btn btn-ghost cta-pdf-btn" data-action="export-cta-pdf">📄 Download PDF</button>
+        </div>
+        <div class="cta-dash-body">
+          <div class="cta-dash-panel" data-panel="overview">${overviewPanel}</div>
+          <div class="cta-dash-panel hidden" data-panel="risks">${risksPanel}</div>
+          <div class="cta-dash-panel hidden" data-panel="arch">${archPanel}</div>
+          <div class="cta-dash-panel hidden" data-panel="recs">${recsPanel}</div>
+          <div class="cta-dash-panel hidden" data-panel="ai">${aiPanel}</div>
+          <div class="cta-dash-panel hidden" data-panel="confidence">${confidencePanel}</div>
+        </div>
       </div>`;
   }
 
@@ -2221,11 +2526,15 @@
           : "c-critical";
 
     return `
+      <!-- Incomplete-data banner (some analysis steps failed) -->
+      ${renderIncompleteBanner()}
+
       <!-- Score Ring + Category Cards -->
       <div class="overview-top mb-24">
         <div class="score-ring-wrap">
           ${renderScoreRing(s.overall)}
           <div class="ring-grade ${scoreColorClass(s.overall)}">${getGrade(s.overall).grade} — ${getGrade(s.overall).description}</div>
+          ${renderTrendBadge()}
           <div class="ring-desc" style="font-size:11px;color:var(--sf-text-muted);text-align:center">
             ${formatTs(results.timestamp)}
           </div>
@@ -2322,12 +2631,67 @@
         </div>
       </div>`
           : ""
-      }
+      }`;
+  }
 
-      <!-- Recommendations -->
-      <div>
-        <div class="section-title">💡 Architectural Recommendations</div>
-        ${renderRecommendations(s)}
+  // ── Executive Overview helpers (v1.10) ────────────────────────────────────
+
+  function renderIncompleteBanner() {
+    const warnings = (results.metadata && results.metadata.warnings) || [];
+    if (!warnings.length) return "";
+    return `
+      <div class="incomplete-banner" style="display:flex;gap:10px;align-items:flex-start;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.45);border-radius:8px;padding:12px 14px;margin-bottom:16px">
+        <span style="font-size:18px;line-height:1">⚠️</span>
+        <div style="font-size:12px;line-height:1.5">
+          <strong>Partial results.</strong> ${warnings.length} analysis section${warnings.length > 1 ? "s" : ""} could not be completed, so a "0" there may mean "not scanned" rather than "no issues":
+          <span style="color:var(--sf-text-muted)">${warnings.map(escHtml).join(", ")}</span>.
+          Check the OrgPulse output channel for details and re-run.
+        </div>
+      </div>`;
+  }
+
+  function renderTrendBadge() {
+    const trends = results.trends || [];
+    if (trends.length < 2) {
+      return `<div class="trend-badge" style="font-size:11px;color:var(--sf-text-muted);text-align:center;margin-top:4px">First run — trend appears next time</div>`;
+    }
+    const curr = trends[trends.length - 1];
+    const prev = trends[trends.length - 2];
+    const delta = Math.round((curr.overall || 0) - (prev.overall || 0));
+    const arrow = delta > 0 ? "▲" : delta < 0 ? "▼" : "▬";
+    const col = delta > 0 ? "var(--sf-success, #2e844a)" : delta < 0 ? "var(--sf-critical, #ea001e)" : "var(--sf-text-muted)";
+    const label = delta === 0 ? "no change vs last run" : `${arrow} ${Math.abs(delta)} pt${Math.abs(delta) > 1 ? "s" : ""} vs last run`;
+    return `<div class="trend-badge" style="font-size:12px;font-weight:700;text-align:center;margin-top:4px;color:${col}">${label}</div>`;
+  }
+
+  function renderLiveLimitsSection() {
+    const limits = (results.orgLimits || []).slice();
+    if (!limits.length) return "";
+    limits.sort((a, b) => (b.usedPct || 0) - (a.usedPct || 0));
+    const rows = limits
+      .map((l) => {
+        const pct = l.usedPct || 0;
+        const cls = pct >= 90 ? "c-critical" : pct >= 75 ? "c-fair" : "c-good";
+        const barCol = pct >= 90 ? "#ea001e" : pct >= 75 ? "#fe9339" : "#2e844a";
+        return `
+        <tr>
+          <td>${escHtml(l.label || l.name)}</td>
+          <td style="text-align:right">${Number(l.used).toLocaleString()}</td>
+          <td style="text-align:right">${Number(l.max).toLocaleString()}</td>
+          <td style="width:160px">
+            <div class="cat-score-bar"><div class="cat-score-bar-fill" style="width:${Math.min(100, pct)}%;background:${barCol}"></div></div>
+          </td>
+          <td class="${cls}" style="text-align:right;font-weight:700">${pct}%</td>
+        </tr>`;
+      })
+      .join("");
+    return `
+      <div class="mb-24">
+        <div class="section-title">📊 Live Governor Limits <span style="font-size:11px;color:var(--sf-text-muted);font-weight:400">(current org usage via REST /limits)</span></div>
+        <table class="data-table" style="width:100%;font-size:12px">
+          <thead><tr><th>Limit</th><th style="text-align:right">Used</th><th style="text-align:right">Max</th><th>Utilisation</th><th style="text-align:right">%</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
       </div>`;
   }
 
@@ -2368,102 +2732,6 @@
       </div>`;
   }
 
-  function renderRecommendations(scores) {
-    const recs = buildRecs(scores);
-    return `<div class="rec-grid">${recs
-      .map(
-        (r) => `
-      <div class="rec-card">
-        <div class="rec-card-header">
-          <span class="rec-icon">${r.icon}</span>
-          <span class="rec-title">${r.title}</span>
-          <span class="rec-impact ${r.impact}">${r.impact.toUpperCase()}</span>
-        </div>
-        <div class="rec-body">${r.body}</div>
-        <div class="rec-tags">${r.tags.map((t) => `<span class="rec-tag">${t}</span>`).join("")}</div>
-      </div>`,
-      )
-      .join("")}</div>`;
-  }
-
-  function buildRecs(scores) {
-    const recs = [];
-
-    if (scores.codeQuality < 80) {
-      recs.push({
-        icon: "🏗️",
-        title: "Adopt FFLIB / Apex Enterprise Patterns",
-        impact: "high",
-        body: "Classes without a sharing declaration or with large trigger bodies indicate missing separation of concerns. Implement Service, Domain, Selector, and UnitOfWork layers.",
-        tags: ["FFLIB", "Trigger Framework", "DRY"],
-      });
-    }
-    if (scores.automationDesign < 80) {
-      recs.push({
-        icon: "⚡",
-        title: "Consolidate Automation per Object",
-        impact: "high",
-        body: "Multiple triggers and flows on the same object can cause ordering conflicts and recursion. Aim for one trigger + one orchestration flow per object.",
-        tags: ["Trigger Framework", "Flow Governor", "One-Trigger Pattern"],
-      });
-    }
-    if (scores.performance < 80) {
-      recs.push({
-        icon: "🚀",
-        title: "Fix SOQL Anti-Patterns",
-        impact: "high",
-        body: "SOQL in loops, missing indexed filters, or SELECT * patterns cause governor limit exceptions at scale. Add LIMIT clauses and move queries outside loops.",
-        tags: ["SOQL Best Practices", "Bulkification", "LDV"],
-      });
-    }
-    if (scores.security < 80) {
-      recs.push({
-        icon: "🛡️",
-        title: "Enforce Least-Privilege Access",
-        impact: "high",
-        body: "PermissionSets with Modify All Data or View All Data bypass all record-level security. Replace with fine-grained object and field permissions.",
-        tags: ["Security Review", "ISV", "CRUD/FLS"],
-      });
-    }
-    if (scores.testing < 75) {
-      recs.push({
-        icon: "🧪",
-        title: "Increase Test Coverage to ≥ 85%",
-        impact: "medium",
-        body: "Low coverage blocks deployments and masks bugs. Write unit tests for every Apex class using @IsTest + Test.startTest/stopTest with positive, negative, and bulk scenarios.",
-        tags: ["Test Coverage", "CI/CD", "Deployment"],
-      });
-    }
-    if (scores.integration < 80) {
-      recs.push({
-        icon: "🔌",
-        title: "Migrate to Named Credentials + OAuth",
-        impact: "medium",
-        body: "Hard-coded credentials or password-based Named Credentials create security exposure. Use OAuth 2.0 Named Credentials with JWT or Client Credentials flow.",
-        tags: ["Named Credentials", "OAuth 2.0", "Zero-Trust"],
-      });
-    }
-    if (scores.dataModel < 80) {
-      recs.push({
-        icon: "🗄️",
-        title: "Reduce Custom Field Sprawl",
-        impact: "medium",
-        body: "Unused custom fields increase maintenance burden and degrade Salesforce search indexing. Audit fields older than 12 months with no references.",
-        tags: ["Data Model", "Metadata Hygiene", "LDV"],
-      });
-    }
-
-    // Always add at least one architectural best-practice card
-    recs.push({
-      icon: "🎯",
-      title: "Adopt Event-Driven Architecture",
-      impact: "low",
-      body: "Platform Events and Change Data Capture decouple integrations from core business logic, improving resilience and enabling real-time processing at scale.",
-      tags: ["Platform Events", "CDC", "Event-Driven"],
-    });
-
-    return recs;
-  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // CODE QUALITY TAB (merged: Code Quality + Technical Debt)
@@ -2621,27 +2889,7 @@
           : ""
       }
 
-      <!-- CTA-Style Recommendations -->
-      <div>
-        <div class="section-title">💡 Code Quality Recommendations</div>
-        <div class="rec-grid">
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🏗️</span><span class="rec-title">Apply with sharing Everywhere</span><span class="rec-impact high">HIGH</span></div>
-            <div class="rec-body">All non-utility Apex classes should declare <code>with sharing</code> unless there is an explicit reason to bypass record visibility rules. This is a Security Review blocker for ISVs.</div>
-            <div class="rec-tags"><span class="rec-tag">Security</span><span class="rec-tag">ISV</span><span class="rec-tag">Best Practice</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🏗️</span><span class="rec-title">Adopt FFLIB / Apex Enterprise Patterns</span><span class="rec-impact high">HIGH</span></div>
-            <div class="rec-body">Implement Service, Domain, Selector, and UnitOfWork layers. This separates concerns, makes testing trivial, and eliminates trigger-body logic.</div>
-            <div class="rec-tags"><span class="rec-tag">FFLIB</span><span class="rec-tag">Trigger Framework</span><span class="rec-tag">DRY</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">📏</span><span class="rec-title">Enforce Method Length Limits</span><span class="rec-impact medium">MEDIUM</span></div>
-            <div class="rec-body">Methods exceeding 50 lines are hard to test and review. Extract helper methods or delegate to separate classes. Use PMD rules to enforce.</div>
-            <div class="rec-tags"><span class="rec-tag">Readability</span><span class="rec-tag">Testability</span></div>
-          </div>
-        </div>
-      </div>`;
+      `;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2691,7 +2939,7 @@
       <div class="mb-24">
         <div class="section-title">⚡ Automation Complexity Heatmap</div>
         <div class="heatmap-wrap">
-          <table class="heatmap-table">
+          <table class="sf-table sf-table--heatmap">
             <thead>
               <tr>
                 <th>Object</th>
@@ -2725,22 +2973,6 @@
               <tr><td colspan="6">Cells coloured by issue count: green=1, amber=2-3, orange=4-5, red>5</td></tr>
             </tfoot>
           </table>
-        </div>
-      </div>
-
-      <div class="mb-24" style="margin-top:24px">
-        <div class="section-title">💡 Automation Recommendations</div>
-        <div class="rec-grid">
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🎯</span><span class="rec-title">One Trigger Per Object</span><span class="rec-impact high">HIGH</span></div>
-            <div class="rec-body">Use a Trigger Dispatcher pattern (FFLIB or custom) to route to Domain classes. Eliminates ordering bugs and makes unit testing trivial.</div>
-            <div class="rec-tags"><span class="rec-tag">FFLIB</span><span class="rec-tag">Domain Layer</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🔄</span><span class="rec-title">Flows as Orchestrators Only</span><span class="rec-impact medium">MEDIUM</span></div>
-            <div class="rec-body">Flows should orchestrate business processes, not contain complex logic. Move data manipulation to Apex invocable methods to maintain governor limit visibility.</div>
-            <div class="rec-tags"><span class="rec-tag">Flow Best Practices</span><span class="rec-tag">Invocable Apex</span></div>
-          </div>
         </div>
       </div>`;
   }
@@ -3001,28 +3233,7 @@
         )}
       </div>`
           : ""
-      }
-
-      <div style="margin-top:24px">
-        <div class="section-title">💡 Data Model Recommendations</div>
-        <div class="rec-grid">
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🧹</span><span class="rec-title">Audit Unused Custom Fields</span><span class="rec-impact medium">MEDIUM</span></div>
-            <div class="rec-body">Fields not referenced in code, reports, or page layouts add cognitive overhead and inflate SOQL SELECT * bandwidth. Use Field Usage in Setup to identify candidates for deprecation.</div>
-            <div class="rec-tags"><span class="rec-tag">Metadata Hygiene</span><span class="rec-tag">Field Audit</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">⚡</span><span class="rec-title">One Trigger Per Object</span><span class="rec-impact high">HIGH</span></div>
-            <div class="rec-body">Multiple triggers per object create ordering ambiguity. Use a Trigger Dispatcher / Handler pattern to route all DML events through a single entry point.</div>
-            <div class="rec-tags"><span class="rec-tag">Trigger Framework</span><span class="rec-tag">FFLIB</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">📐</span><span class="rec-title">Add Field Descriptions</span><span class="rec-impact low">LOW</span></div>
-            <div class="rec-body">Every custom field should have a description and inline help text. This surfaces in Schema Builder, data dictionaries, and AI-assisted field selection tools.</div>
-            <div class="rec-tags"><span class="rec-tag">Documentation</span><span class="rec-tag">Developer Experience</span></div>
-          </div>
-        </div>
-      </div>`;
+      }`;
   }
 
   /** Export the Object Health Matrix table data as CSV.
@@ -3209,6 +3420,8 @@
 
     return `
       ${tabInfo}
+      <!-- Live Governor Limits (REST /limits) -->
+      ${renderLiveLimitsSection()}
       <!-- Performance Summary -->
       ${
         summaryItems.length
@@ -3320,7 +3533,7 @@
         simData.length
           ? `
       <div class="mb-24">
-        <div style="background:var(--vscode-editor-background);border:1px solid var(--vscode-widget-border);border-radius:12px;padding:20px 24px">
+        <div class="info-card">
           <div style="font-size:16px;font-weight:700;margin-bottom:6px">🔬 Governor Limits Simulator</div>
           <p style="margin:0 0 16px;opacity:.65;font-size:13px">Input a data volume to project how much of your governor limits each class will consume.</p>
           <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap">
@@ -3371,10 +3584,10 @@
       ${
         ldvObjects.length > 0
           ? `
-      <div class="mb-24" style="background:var(--vscode-editor-background);border:1px solid rgba(239,68,68,.3);border-radius:12px;padding:20px 24px">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-          <div style="width:32px;height:32px;background:rgba(239,68,68,.15);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px">📦</div>
-          <span style="font-size:15px;font-weight:700;color:#ef4444">Large Data Volume Objects (live counts)</span>
+      <div class="mb-24 info-card info-card--error">
+        <div class="section-header-row">
+          <div class="section-header-icon" style="background:rgba(239,68,68,.15)">📦</div>
+          <span style="font-size:15px;font-weight:700;color:var(--score-critical)">Large Data Volume Objects (live counts)</span>
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px">
           ${ldvObjects
@@ -3403,9 +3616,9 @@
       ${
         entryPoints.length > 0
           ? `
-      <div class="mb-24" style="background:var(--vscode-editor-background);border:1px solid rgba(245,158,11,.3);border-radius:12px;padding:20px 24px">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-          <div style="width:32px;height:32px;background:rgba(245,158,11,.15);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px">🌐</div>
+      <div class="mb-24 info-card info-card--warn">
+        <div class="section-header-row">
+          <div class="section-header-icon icon-amber">🌐</div>
           <span style="font-size:15px;font-weight:700">Public API Entry Points (${entryPoints.length})</span>
           <span style="font-size:12px;opacity:.6;margin-left:4px">Internet-exposed Apex endpoints — attack surface</span>
         </div>
@@ -3434,29 +3647,7 @@
         </div>
       </div>`
           : ""
-      }
-
-      <!-- Recommendations -->
-      <div>
-        <div class="section-title">💡 Performance & Limits Recommendations</div>
-        <div class="rec-grid">
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">📊</span><span class="rec-title">Move SOQL Outside Loops</span><span class="rec-impact high">HIGH</span></div>
-            <div class="rec-body">Collect all IDs first, then execute a single bulk SOQL query. Use Maps to look up records by Id in O(1) time inside the loop.</div>
-            <div class="rec-tags"><span class="rec-tag">Bulkification</span><span class="rec-tag">Governor Limits</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🎯</span><span class="rec-title">Add Selective Filters + LIMIT</span><span class="rec-impact high">HIGH</span></div>
-            <div class="rec-body">Always include a selective indexed field (e.g. Id, RecordTypeId, External ID) and a LIMIT clause. Enable query plan analysis in Workbench to verify index usage.</div>
-            <div class="rec-tags"><span class="rec-tag">SOQL</span><span class="rec-tag">LDV</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🏗️</span><span class="rec-title">Use Collections for DML</span><span class="rec-impact medium">MEDIUM</span></div>
-            <div class="rec-body">Accumulate SObject changes in Lists/Maps and perform a single insert/update/delete at the end of the transaction rather than per-record DML.</div>
-            <div class="rec-tags"><span class="rec-tag">DML Bulkification</span><span class="rec-tag">Apex Patterns</span></div>
-          </div>
-        </div>
-      </div>`;
+      }`;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -3655,34 +3846,7 @@
         )}
       </div>`
           : ""
-      }
-
-      <!-- Recommendations -->
-      <div>
-        <div class="section-title">💡 Security & Access Recommendations</div>
-        <div class="rec-grid">
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🔐</span><span class="rec-title">Apply Minimum Viable Permissions</span><span class="rec-impact high">HIGH</span></div>
-            <div class="rec-body">Permission Sets with Modify All Data bypass all record-level security. Prefer object-level CRUD + field-level security (FLS) grants.</div>
-            <div class="rec-tags"><span class="rec-tag">Zero-Trust</span><span class="rec-tag">CRUD/FLS</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🎯</span><span class="rec-title">Adopt Permission Set Groups</span><span class="rec-impact high">HIGH</span></div>
-            <div class="rec-body">Replace monolithic profiles with slim base profiles + Permission Set Groups. This enables modular, auditable permission management.</div>
-            <div class="rec-tags"><span class="rec-tag">PSG</span><span class="rec-tag">Least Privilege</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🔒</span><span class="rec-title">Minimise System Administrators</span><span class="rec-impact high">HIGH</span></div>
-            <div class="rec-body">Keep System Administrator count to ≤ 3 break-glass accounts. Use delegated admin profiles for day-to-day admin tasks.</div>
-            <div class="rec-tags"><span class="rec-tag">Zero Trust</span><span class="rec-tag">Least Privilege</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🧹</span><span class="rec-title">Deactivate Dormant Users</span><span class="rec-impact medium">MEDIUM</span></div>
-            <div class="rec-body">Run quarterly user access reviews. Deactivate users inactive for 90+ days to free up licenses and reduce attack surface.</div>
-            <div class="rec-tags"><span class="rec-tag">User Lifecycle</span><span class="rec-tag">License Optimisation</span></div>
-          </div>
-        </div>
-      </div>`;
+      }`;
   }
 
   // ── Sortable, paginated issue table ──────────────────────────────────────
@@ -3781,22 +3945,22 @@
     const paginationHtml =
       totalPages > 1
         ? `
-      <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid var(--vscode-widget-border);font-size:12px">
+      <div class="pagination-bar">
         <span style="opacity:.6">${showingFrom}–${showingTo} of ${sorted.length}</span>
         <span style="flex:1"></span>
-        <button class="btn btn-ghost" style="padding:3px 10px;font-size:11px" data-action="issue-page-prev" data-panel="${panelId}" ${state.page === 0 ? 'disabled style="opacity:.4;padding:3px 10px;font-size:11px"' : ""}>‹ Prev</button>
+        <button class="btn btn-ghost" data-action="issue-page-prev" data-panel="${panelId}" ${state.page === 0 ? "disabled" : ""}>‹ Prev</button>
         ${Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
           const pg =
             totalPages <= 7 ? i : state.page < 4 ? i : state.page - 3 + i;
           if (pg >= totalPages) return "";
-          return `<button class="btn ${pg === state.page ? "btn-primary" : "btn-ghost"}" style="padding:3px 8px;font-size:11px;min-width:28px" data-action="issue-page-go" data-panel="${panelId}" data-pg="${pg}">${pg + 1}</button>`;
+          return `<button class="btn ${pg === state.page ? "btn-primary" : "btn-ghost"}" data-action="issue-page-go" data-panel="${panelId}" data-pg="${pg}">${pg + 1}</button>`;
         }).join("")}
-        <button class="btn btn-ghost" style="padding:3px 10px;font-size:11px" data-action="issue-page-next" data-panel="${panelId}" ${state.page >= totalPages - 1 ? 'disabled style="opacity:.4;padding:3px 10px;font-size:11px"' : ""}>Next ›</button>
+        <button class="btn btn-ghost" data-action="issue-page-next" data-panel="${panelId}" ${state.page >= totalPages - 1 ? "disabled" : ""}>Next ›</button>
       </div>`
         : "";
 
     return `<div class="issue-table-wrap" id="issue-table-${panelId}">
-      <table class="issue-table"><thead><tr>
+      <table class="sf-table sf-table--issue"><thead><tr>
         <th class="it-sev" data-action="issue-sort" data-panel="${panelId}" data-col="sev" style="cursor:pointer;user-select:none">Sev ${sortArrow("sev")}</th>
         <th class="it-msg" data-action="issue-sort" data-panel="${panelId}" data-col="msg" style="cursor:pointer;user-select:none">Finding ${sortArrow("msg")}</th>
         <th class="it-cat" data-action="issue-sort" data-panel="${panelId}" data-col="cat" style="cursor:pointer;user-select:none">Category ${sortArrow("cat")}</th>
@@ -3807,75 +3971,6 @@
     </div>`;
   }
 
-  function renderTabRecs(panelId, scores) {
-    const recMap = {
-      "code-quality": [
-        {
-          icon: "🏗️",
-          title: "Apply with sharing Everywhere",
-          impact: "high",
-          body: "All non-utility Apex classes should declare with sharing unless you have an explicit reason to bypass record visibility rules.",
-          tags: ["Security", "ISV", "Best Practice"],
-        },
-        {
-          icon: "📏",
-          title: "Enforce Method Length Limits",
-          impact: "medium",
-          body: "Methods exceeding 50 lines are hard to test and review. Extract helper methods or delegate to separate classes.",
-          tags: ["Readability", "Testability"],
-        },
-      ],
-      performance: [
-        {
-          icon: "📊",
-          title: "Add LIMIT to All SOQL Queries",
-          impact: "high",
-          body: "Unbounded queries on large objects will eventually breach the 50,000 row governor. Always add LIMIT and consider using OFFSET-based pagination.",
-          tags: ["Governor Limits", "LDV", "SOQL"],
-        },
-      ],
-      security: [
-        {
-          icon: "🔐",
-          title: "Apply Minimum Viable Permissions",
-          impact: "high",
-          body: "Permission Sets with Modify All Data bypass all record-level security. Prefer object-level CRUD + field-level security (FLS) grants.",
-          tags: ["Zero-Trust", "CRUD/FLS", "AppExchange Security Review"],
-        },
-      ],
-      testing: [
-        {
-          icon: "🔁",
-          title: "Achieve 85%+ Coverage",
-          impact: "high",
-          body: "While 75% is the Salesforce minimum, aim for 85%+ with meaningful assertions, not just coverage. Cover bulk scenarios, error paths, and governor limit edge cases.",
-          tags: ["CI/CD", "Code Quality", "Deployment Safety"],
-        },
-      ],
-    };
-
-    const recs = recMap[panelId] || [];
-    if (!recs.length) return "";
-    return `
-      <div>
-        <div class="section-title">💡 Recommendations</div>
-        <div class="rec-grid">${recs
-          .map(
-            (r) => `
-          <div class="rec-card">
-            <div class="rec-card-header">
-              <span class="rec-icon">${r.icon}</span>
-              <span class="rec-title">${r.title}</span>
-              <span class="rec-impact ${r.impact}">${r.impact.toUpperCase()}</span>
-            </div>
-            <div class="rec-body">${r.body}</div>
-            <div class="rec-tags">${r.tags.map((t) => `<span class="rec-tag">${t}</span>`).join("")}</div>
-          </div>`,
-          )
-          .join("")}
-        </div>
-      </div>`;
-  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // DRILL-DOWN PANEL
@@ -4063,43 +4158,6 @@
     document.querySelectorAll(".tab-panel").forEach((p) => {
       p.classList.toggle("active", p.id === `panel-${tabId}`);
     });
-  }
-
-  function updateTabBadges() {
-    const catMap = {
-      code: ["code-quality", "technical-debt"],
-      automation: ["automation-design"],
-      datamodel: ["data-model"],
-      perflimits: ["performance", "governor-limits"],
-      secaccess: ["security", "user-governance", "profile-security"],
-      lwc: ["lwc-quality"],
-      dependencies: ["dependencies"],
-      stalemetadata: ["stale-metadata", "org-inventory"],
-    };
-
-    for (const [tabId, cats] of Object.entries(catMap)) {
-      const count = results.issues.filter(
-        (i) => cats.includes(i.category) && i.severity === "error",
-      ).length;
-      const badge = document.getElementById(`badge-${tabId}`);
-      if (!badge) {
-        continue;
-      }
-      if (count > 0) {
-        badge.textContent = count > 99 ? "99+" : String(count);
-        badge.style.display = "inline-flex";
-        badge.classList.add("has-errors");
-      } else {
-        const total = results.issues.filter((i) =>
-          cats.includes(i.category),
-        ).length;
-        if (total > 0) {
-          badge.textContent = total > 99 ? "99+" : String(total);
-          badge.style.display = "inline-flex";
-          badge.classList.remove("has-errors");
-        }
-      }
-    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -4741,7 +4799,7 @@
     function pageHeader(icon, title, scoreKey) {
       const scoreVal = s[scoreKey];
       const logoHtml = iconDataUri
-        ? `<img src="${iconDataUri}" style="width:22px;height:22px;object-fit:contain;border-radius:4px;vertical-align:middle;margin-right:6px;opacity:.7" alt="OrgPulse" />`
+        ? `<img src="${iconDataUri}" style="width:20px;height:20px;object-fit:contain;border-radius:4px;display:block" alt="OrgPulse" />`
         : "";
       const watermark = iconDataUri
         ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:0;opacity:.04">
@@ -4750,8 +4808,8 @@
         : "";
       return `
         ${watermark}
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding-bottom:8px;border-bottom:1px solid #e5e7eb;font-size:10px;color:#9ca3af">
-          <span>${logoHtml}OrgPulse · Salesforce Architecture Health Report</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding-bottom:8px;border-bottom:1px solid #e5e7eb;font-size:10px;color:#9ca3af;gap:10px">
+          <span style="display:inline-flex;align-items:center;gap:6px;line-height:1.2">${logoHtml}<span>OrgPulse · Salesforce Architecture Health Report</span></span>
           <span>${esc(org)} · ${now}</span>
         </div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px;padding-bottom:14px;border-bottom:2px solid #e5e7eb;position:relative;z-index:1">
@@ -6607,23 +6665,7 @@ ${bodyContent}
         )}
       </div>`
           : ""
-      }
-
-      <div>
-        <div class="section-title">💡 LWC Quality Recommendations</div>
-        <div class="rec-grid">
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🧪</span><span class="rec-title">Add Jest Tests to All Components</span><span class="rec-impact high">HIGH</span></div>
-            <div class="rec-body">Every LWC should have a co-located *.test.js file with unit tests. This catches regressions early and enables CI/CD gates.</div>
-            <div class="rec-tags"><span class="rec-tag">Jest</span><span class="rec-tag">CI/CD</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">♿</span><span class="rec-title">Fix Accessibility Issues</span><span class="rec-impact medium">MEDIUM</span></div>
-            <div class="rec-body">Ensure all interactive elements have ARIA labels and keyboard navigation. Salesforce Lightning requires WCAG 2.1 AA compliance.</div>
-            <div class="rec-tags"><span class="rec-tag">A11y</span><span class="rec-tag">WCAG 2.1</span></div>
-          </div>
-        </div>
-      </div>`;
+      }`;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -6684,9 +6726,9 @@ ${bodyContent}
 
     return `
       <!-- Explanation Header -->
-      <div class="mb-24" style="background:var(--vscode-editor-background);border:1px solid var(--vscode-widget-border);border-radius:12px;padding:20px 24px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-          <div style="width:36px;height:36px;background:rgba(99,102,241,.15);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px">🕸️</div>
+      <div class="mb-24 info-card">
+        <div class="section-header-row">
+          <div class="section-header-icon icon-purple">🕸️</div>
           <div>
             <div style="font-size:16px;font-weight:700">Dependency Analysis</div>
             <div style="font-size:13px;opacity:.65">Understanding how your org's components are connected</div>
@@ -6788,22 +6830,6 @@ ${bodyContent}
         <div class="dep-graph-container">
           ${renderDependencyGraph(graph)}
         </div>
-      </div>
-
-      <div>
-        <div class="section-title">💡 Dependency Recommendations</div>
-        <div class="rec-grid">
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">🔄</span><span class="rec-title">Break Circular Dependencies</span><span class="rec-impact high">HIGH</span></div>
-            <div class="rec-body">Use interfaces, Platform Events, or dependency injection to decouple tightly connected components. This enables independent deployment and testing.</div>
-            <div class="rec-tags"><span class="rec-tag">Architecture</span><span class="rec-tag">Deployment</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">📦</span><span class="rec-title">Reduce High Fan-In Components</span><span class="rec-impact medium">MEDIUM</span></div>
-            <div class="rec-body">Components with >15 dependents are change bottlenecks. Consider splitting into smaller, focused modules with stable interfaces.</div>
-            <div class="rec-tags"><span class="rec-tag">Modularity</span><span class="rec-tag">Blast Radius</span></div>
-          </div>
-        </div>
       </div>`;
   }
 
@@ -6837,11 +6863,11 @@ ${bodyContent}
 
     return `
       <!-- Description -->
-      <div class="mb-24" style="background:var(--vscode-editor-background);border:1px solid var(--vscode-widget-border);border-radius:12px;padding:20px 24px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-          <div style="width:36px;height:36px;background:rgba(234,179,8,.15);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px">🧹</div>
+      <div class="mb-24 info-card">
+        <div class="section-header-row">
+          <div class="section-header-icon icon-amber">🧹</div>
           <div>
-            <div style="font-size:16px;font-weight:700">Stale Metadata & Org Inventory</div>
+            <div style="font-size:16px;font-weight:700">Stale Metadata &amp; Org Inventory</div>
             <div style="font-size:13px;opacity:.65">Identify unused reports, dashboards, and metadata for cleanup</div>
           </div>
         </div>
@@ -7011,28 +7037,13 @@ ${bodyContent}
         )}
       </div>`
           : ""
-      }
-
-      <!-- Recommendations -->
-      <div>
-        <div class="section-title">💡 Metadata Hygiene Best Practices</div>
-        <div class="rec-grid">
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">📅</span><span class="rec-title">Annual Metadata Hygiene Sprint</span><span class="rec-impact medium">MEDIUM</span></div>
-            <div class="rec-body">Schedule a dedicated sprint once per year to archive or delete reports, dashboards, and fields unused for 12+ months. Keeps the org clean for end users.</div>
-            <div class="rec-tags"><span class="rec-tag">Metadata Hygiene</span><span class="rec-tag">User Experience</span></div>
-          </div>
-          <div class="rec-card">
-            <div class="rec-card-header"><span class="rec-icon">📁</span><span class="rec-title">Use Folder Governance</span><span class="rec-impact low">LOW</span></div>
-            <div class="rec-body">Organise reports and dashboards into governed folders by team/function. Set folder ownership and review schedules to prevent stale content accumulation.</div>
-            <div class="rec-tags"><span class="rec-tag">Governance</span><span class="rec-tag">Reporting</span></div>
-          </div>
-        </div>
-      </div>`;
+      }`;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // INIT
   // ═══════════════════════════════════════════════════════════════════════════
   showEmpty();
+  // Ask the extension which AI models are available (dynamic discovery).
+  vscode.postMessage({ command: "getModels" });
 })();

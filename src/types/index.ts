@@ -125,6 +125,21 @@ export interface AnalysisResult {
   entryPoints?: Array<{ name: string; type: 'RestResource' | 'InboundEmail'; annotation: string }>;
   /** Pre-computed Limits Simulator base data per class (used by dashboard simulator) */
   limitsSimulatorData?: LimitsSimulatorClassData[];
+  /** Live org governor-limit utilisation from the REST /limits endpoint */
+  orgLimits?: OrgLimitInfo[];
+}
+
+/** A single live org limit (used vs max) from the REST /limits endpoint. */
+export interface OrgLimitInfo {
+  /** Limit key, e.g. "DailyApiRequests", "DataStorageMB" */
+  name: string;
+  /** Human-friendly label derived from the key */
+  label: string;
+  max: number;
+  remaining: number;
+  used: number;
+  /** Percentage of the limit consumed (0–100) */
+  usedPct: number;
 }
 
 /** Per-class data for the Limits Simulator */
@@ -197,6 +212,8 @@ export interface AnalysisMetadata {
   analyzedProfiles?: number;
   /** Count of installed packages */
   installedPackages?: number;
+  /** Human-readable names of analysis steps that failed (partial results). */
+  warnings?: string[];
 }
 
 // ============================================================================
@@ -601,7 +618,9 @@ export type DashboardMessageType =
   | 'cancelAnalysis'
   | 'refresh'
   | 'exportDataModelCsv'
-  | 'exportCtaHtml';
+  | 'exportCtaHtml'
+  | 'askArchitect'
+  | 'getModels';
 
 export interface DashboardMessage {
   command: DashboardMessageType;

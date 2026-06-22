@@ -4,6 +4,37 @@ All notable changes to **OrgPulse — Salesforce Architecture Health & Insights*
 
 ---
 
+## [1.11.0] — 2026-06-18 🧠 Any AI Model, Local Agents & Dashboard Cleanup
+
+### New Features
+
+- **Dynamic AI model discovery** — The model picker now lists *every* model you actually have via the VS Code Language Model API (Copilot's Claude/GPT/Codex/Gemini and any third-party provider), instead of a fixed Copilot-centric list. Pick any of them for CTA Review and Ask the Architect.
+- **Local / custom AI backend** — Run AI with **no Copilot dependency** via a configurable OpenAI-compatible endpoint (`sfHealthAnalyzer.ai.custom.baseUrl/model/apiKey`), defaulting to Ollama (`http://localhost:11434/v1`); also works with LM Studio, vLLM, OpenAI, Codex, and Azure. Local models appear in the same picker as "Local: …". **Ask the Architect's live-org tool calling works on the local backend too** (read-only SOQL/limits/explain), degrading gracefully when a model lacks tool support. Consent prompts are backend-aware (localhost = data stays on your machine).
+
+### Improvements & Fixes
+
+- **Data Model — Standard Fields no longer always 0** — The total-fields aggregate now uses the required `EntityDefinition.IsCustomizable = true` filter (an unfiltered `FieldDefinition` aggregate is rejected by the Tooling API and silently returned zero).
+- **Cleaner dashboards** — Removed the License/Limits snapshot from the Overview tab (governor limits remain in Performance & Limits), removed the boilerplate "Recommendations" sections from every domain tab (AI-generated recommendations live in the CTA Review report), and removed the count badge next to each tab label.
+
+---
+
+## [1.10.0] — 2026-06-18 🤖 Ask the Architect, Executive Overview & Live Limits
+
+### New Features
+
+- **Ask the Architect (AI)** — A conversational, tool-augmented Q&A that lets Claude/Copilot query the connected org **live and read-only** to answer architecture questions. Built on the VS Code Language Model API with in-process tools wrapping existing org queries (`run_soql`, `run_tooling_soql`, `explain_query`, `get_org_limits`, `get_license_summary`); SELECT-only guarded, consent-gated, and disabled in Safe Mode. Available via the **OrgPulse: Ask the Architect** command and a Q&A box on the CTA tab.
+- **Executive Overview** — The Overview tab now shows a **run-over-run trend** (▲/▼ vs the previous scan, backed by a 10-run history buffer), a **license utilisation** snapshot, and a **top governor limits** snapshot.
+- **Live Governor Limits** — New REST `/limits` integration surfaces real org utilisation (daily API requests, data/file storage, async/bulk jobs) in the Performance & Limits tab and the Overview snapshot.
+- **Permission Set Group health** — Detects Outdated Permission Set Groups (aggregate permissions needing recalculation).
+
+### Improvements & Fixes
+
+- **AI model selection modernised & hardened** — Prefers the newest available Claude Opus (e.g. `claude-opus-4-8`), then Sonnet, then GPT-4o, matching by family **prefix** so selection no longer silently falls back to "any model" when the provider exposes a different family string. The resolved model is logged.
+- **Single source of truth for the Salesforce API version** — Resolves the connected org's version once at connect and threads it through all REST calls, replacing hardcoded `v63.0`/`62.0`/`60.0` references.
+- **Partial-failure transparency** — Analysis steps that fail are now recorded and surfaced as an "incomplete results" banner, so a section showing "0 issues" is never confused with a failed scan.
+
+---
+
 ## [1.9.5] — 2026-04-19 🖨️ Full CTA PDF Export & Data Model Fixes
 
 ### Bug Fixes

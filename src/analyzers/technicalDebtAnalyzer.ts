@@ -26,6 +26,14 @@ import {
 } from '../types';
 import { logInfo } from '../utils/logger';
 
+// ─── API version baseline ─────────────────────────────────────────────────────
+// A recent Salesforce release used as the "current" reference for outdated-API
+// debt. Salesforce ships ~3 releases/year; flag classes more than ~12 releases
+// (~4 years) behind, preserving the original intent of the old "< 50" check
+// without hardcoding a fixed target version in user-facing messages.
+const CURRENT_API_VERSION = 63;
+const OUTDATED_API_THRESHOLD = CURRENT_API_VERSION - 12;
+
 // ─── Regex patterns ───────────────────────────────────────────────────────────
 const RE_TODO_FIXME         = /\/\/\s*(TODO|FIXME|HACK|XXX|BUG|TEMP)\s*:?\s*(.+)/gi;
 const RE_EMPTY_CATCH        = /catch\s*\([^)]*\)\s*\{\s*\}/g;
@@ -134,15 +142,16 @@ function analyzeApexBody(
   }
 
   // ── API Version ────────────────────────────────────────────────────────
-  if (apiVersion && apiVersion < 50) {
+  if (apiVersion && apiVersion < OUTDATED_API_THRESHOLD) {
+    const target = `${CURRENT_API_VERSION}.0`;
     addDebt(
       'outdated-api',
-      `API version ${apiVersion} is outdated (current: 62.0). Upgrade to use latest features and security fixes.`,
+      `API version ${apiVersion} is outdated (recent: ${target}). Upgrade to use latest features and security fixes.`,
       estimateHours('outdated-api', 'warning'),
       ['API Upgrade', 'Migration', 'Security'],
       'warning',
-      `${name}: API version ${apiVersion} — should be upgraded to 62.0`,
-      'Change the API version in the metadata XML file to 62.0 and test for deprecated method removals.',
+      `${name}: API version ${apiVersion} — should be upgraded toward ${target}`,
+      `Raise the API version in the metadata XML file toward ${target} and test for deprecated method removals.`,
     );
   }
 

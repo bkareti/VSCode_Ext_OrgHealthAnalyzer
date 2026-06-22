@@ -64,7 +64,7 @@ import { initCache, createApexFileWatcher } from './utils/cache';
 import { pluginLoader } from './rules/plugin';
 
 // Types
-import { AnalysisResult, Issue, UserGovernanceSummary, ProfileSecuritySummary, StaleMetadataSummary, OrgInventorySummary, OrgDetailsInfo } from './types';
+import { AnalysisResult, Issue, UserGovernanceSummary, ProfileSecuritySummary, StaleMetadataSummary, OrgInventorySummary, OrgDetailsInfo, TrendPoint } from './types';
 
 // ============================================================================
 // Extension State
@@ -73,6 +73,9 @@ import { AnalysisResult, Issue, UserGovernanceSummary, ProfileSecuritySummary, S
 let currentResult: AnalysisResult | null = null;
 let activeAnalysisCts: vscode.CancellationTokenSource | null = null;
 const RESULT_STORAGE_KEY = 'sfHealthAnalyzer.lastResult';
+/** Ring buffer of recent run scores, used to render run-over-run trend deltas. */
+const HISTORY_STORAGE_KEY = 'sfHealthAnalyzer.scoreHistory';
+const HISTORY_MAX_POINTS = 10;
 const CACHE_FOLDER = '.orgpulse';
 const CACHE_FILE = 'cache.json';
 
@@ -278,6 +281,36 @@ function registerCommands(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand('sfHealthAnalyzer.askArchitect', async (preset?: string) => {
+      const ai = getAIService();
+      if (!ai) {
+        vscode.window.showWarningMessage('AI Service not initialised. Ensure GitHub Copilot or an Anthropic model is available.');
+        return;
+      }
+      const question = preset ?? await vscode.window.showInputBox({
+        title: 'Ask the Architect',
+        prompt: 'Ask a question about this Salesforce org (the AI can query it live, read-only).',
+        placeHolder: 'e.g. Which objects are at risk of large data volume issues?',
+        ignoreFocusOut: true,
+      });
+      if (!question || !question.trim()) { return; }
+
+      const answer = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Ask the Architect — analysing org…' },
+        async () => ai.askArchitect(question, currentResult),
+      );
+      if (!answer) { return; }
+
+      // Render the answer as a read-only Markdown preview.
+      const doc = await vscode.workspace.openTextDocument({
+        language: 'markdown',
+        content: `# Ask the Architect\n\n**Q:** ${question}\n\n---\n\n${answer}\n`,
+      });
+      await vscode.commands.executeCommand('markdown.showPreview', doc.uri);
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('sfHealthAnalyzer.explainIssue', async (issue: Issue) => {
       const ai = getAIService();
       if (!ai) { return; }
@@ -436,6 +469,13 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
         showOutput();
 
         const issues: Issue[] = [];
+        // Names of analysis steps that failed, surfaced in the dashboard so a
+        // section showing "0 issues" is never confused with a failed fetch.
+        const stepWarnings: string[] = [];
+        const failStep = (label: string, e: unknown): void => {
+          logError(`${label} failed`, e as Error);
+          stepWarnings.push(label);
+        };
         let analyzedFiles = 0;
         let analyzedClasses = 0;
         let analyzedTriggers = 0;
@@ -664,7 +704,7 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
           governorRisks       = govResult.governorRisks;
           limitsSimulatorData = govResult.limitsSimulatorData;
         } catch (e) {
-          logError('Governor limits analysis failed', e as Error);
+          failStep('Governor Limits', e);
         }
 
         if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
@@ -686,7 +726,7 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
               analyzedLwcComponents = lwcSummary?.totalComponents ?? 0;
             }
           } catch (e) {
-            logError('LWC analysis failed', e as Error);
+            failStep('LWC Quality', e);
           }
         }
 
@@ -705,7 +745,7 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
           issues.push(...debtResult.issues);
           debtSummary = debtResult.debtSummary;
         } catch (e) {
-          logError('Technical debt analysis failed', e as Error);
+          failStep('Technical Debt', e);
         }
 
         if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
@@ -722,7 +762,7 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
             issues.push(...scaleResult.issues);
             scaleCenterMetrics = scaleResult.scaleCenterMetrics;
           } catch (e) {
-            logError('Scale Center analysis failed', e as Error);
+            failStep('Scale Center', e);
           }
         }
 
@@ -739,7 +779,7 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
           issues.push(...depResult.issues);
           dependencyGraph = depResult.dependencyGraph;
         } catch (e) {
-          logError('Dependency analysis failed', e as Error);
+          failStep('Dependencies', e);
         }
 
         // ─── Step 15: Calculate scores & display ──────────────────────────────
@@ -794,7 +834,7 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
             analyzedUsers  = userSummary.totalActiveUsers;
             currentResult.userSummary = userSummary;
           } catch (e) {
-            logError('User governance analysis failed', e as Error);
+            failStep('User Governance', e);
           }
         }
 
@@ -825,7 +865,7 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
 
             currentResult.profileSummary = profileSummary;
           } catch (e) {
-            logError('Profile security analysis failed', e as Error);
+            failStep('Profile Security', e);
           }
         }
 
@@ -844,7 +884,7 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
             staleMetadata    = smResult.staleMetadata;
             currentResult.staleMetadata = staleMetadata;
           } catch (e) {
-            logError('Stale metadata analysis failed', e as Error);
+            failStep('Stale Metadata', e);
           }
         }
 
@@ -863,7 +903,7 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
             orgInventory      = invResult.orgInventory;
             currentResult.orgInventory = orgInventory;
           } catch (e) {
-            logError('Org inventory analysis failed', e as Error);
+            failStep('Org Inventory', e);
           }
         }
 
@@ -887,8 +927,16 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
             currentResult.objectRecordCounts   = ctaResult.objectRecordCounts;
             currentResult.entryPoints          = ctaResult.entryPoints;
           } catch (e) {
-            logError('CTA architecture analysis failed', e as Error);
+            failStep('CTA Architecture', e);
           }
+        }
+
+        // ─── Live governor-limit utilisation (REST /limits) ──────────────────
+        try {
+          const orgLimits = await sfService.getOrgLimits();
+          if (orgLimits.length > 0) { currentResult.orgLimits = orgLimits; }
+        } catch (e) {
+          failStep('Org Limits', e);
         }
 
         // Update metadata with new counts
@@ -896,10 +944,31 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
           currentResult.metadata.analyzedUsers    = analyzedUsers;
           currentResult.metadata.analyzedProfiles = analyzedProfiles;
           currentResult.metadata.installedPackages = orgInventory?.installedPackages?.length ?? 0;
+          if (stepWarnings.length > 0) { currentResult.metadata.warnings = stepWarnings; }
         }
 
         // Recompute summary with added issues from steps 16-19
         currentResult.summary = healthScoreCalculator.createSummary(currentResult.issues);
+
+        // ─── Run-over-run trend history ──────────────────────────────────────
+        // Append this run's scores to a small ring buffer so the Overview tab
+        // can render ▲/▼ deltas vs the previous run.
+        const priorHistory = context.globalState.get<TrendPoint[]>(HISTORY_STORAGE_KEY) ?? [];
+        const s = currentResult.scores;
+        const trendPoint: TrendPoint = {
+          timestamp: currentResult.timestamp instanceof Date
+            ? currentResult.timestamp.toISOString()
+            : new Date().toISOString(),
+          overall: s.overall,
+          codeQuality: s.codeQuality,
+          automationDesign: s.automationDesign,
+          performance: s.performance,
+          security: s.security,
+          testing: s.testing,
+        };
+        const history = [...priorHistory, trendPoint].slice(-HISTORY_MAX_POINTS);
+        context.globalState.update(HISTORY_STORAGE_KEY, history);
+        currentResult.trends = history;
 
         // Persist result for restore on reload
         context.globalState.update(RESULT_STORAGE_KEY, currentResult);

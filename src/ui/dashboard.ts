@@ -74,6 +74,22 @@ export class HealthDashboardPanel {
   public updateResults(result: AnalysisResult): void {
     this.currentResult = result;
     this.postMessage({ type: 'analysisResults', data: result });
+    void this.pushAvailableModels();
+  }
+
+  /** Enumerate the user's available AI models and send them to the webview. */
+  public async pushAvailableModels(): Promise<void> {
+    const ai = getAIService();
+    if (!ai) {
+      this.postMessage({ type: 'availableModels', data: [{ id: 'auto', label: 'Auto (best available)', backend: 'vscode-lm' }] });
+      return;
+    }
+    try {
+      const models = await ai.listModels();
+      this.postMessage({ type: 'availableModels', data: models });
+    } catch {
+      this.postMessage({ type: 'availableModels', data: [{ id: 'auto', label: 'Auto (best available)', backend: 'vscode-lm' }] });
+    }
   }
 
   /** Show the spinner / progress screen. */
@@ -271,6 +287,42 @@ export class HealthDashboardPanel {
         break;
       }
 
+      case 'getModels': {
+        await this.pushAvailableModels();
+        break;
+      }
+
+      case 'askArchitect': {
+        const question = (message.data as { question?: string })?.question ?? '';
+        const model = (message.data as { model?: string })?.model;
+        if (this.securityMode === 'safe') {
+          this.panel.webview.postMessage({
+            type: 'architectAnswer',
+            data: null,
+            error: 'Ask the Architect is disabled in Safe Mode. Switch to Standard or Advanced mode to query the org with AI.',
+          });
+          break;
+        }
+        const ai = getAIService();
+        if (!ai) {
+          this.panel.webview.postMessage({
+            type: 'architectAnswer',
+            data: null,
+            error: 'AI service not available. Ensure GitHub Copilot or an Anthropic model is installed and enabled.',
+          });
+          break;
+        }
+        this.panel.webview.postMessage({ type: 'architectAnswerLoading', data: true });
+        try {
+          const answer = await ai.askArchitect(question, this.currentResult, model);
+          this.panel.webview.postMessage({ type: 'architectAnswer', data: answer });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.panel.webview.postMessage({ type: 'architectAnswer', data: null, error: msg });
+        }
+        break;
+      }
+
       case 'cancelAnalysis': {
         await vscode.commands.executeCommand('sfHealthAnalyzer.cancelAnalysis');
         break;
@@ -356,16 +408,17 @@ export class HealthDashboardPanel {
   private buildHtml(): string {
     const webview = this.panel.webview;
     const nonce   = this.getNonce();
+    const assetVersion = Date.now().toString();
 
     const cssUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.css')
-    );
+    ).with({ query: `v=${assetVersion}` });
     const jsUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.js')
-    );
+    ).with({ query: `v=${assetVersion}` });
     const iconUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.png')
-    );
+    ).with({ query: `v=${assetVersion}` });
 
     return `<!DOCTYPE html>
 <html lang="en">
