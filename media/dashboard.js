@@ -27,6 +27,7 @@
   // Dynamically-discovered AI models (VS Code LM providers + local/custom endpoint)
   let availableModels = [{ id: "auto", label: "Auto (best available)", backend: "vscode-lm" }];
   let selectedModelId = "auto";
+  let claudeAuthorized = false;
 
   function registerIssue(iss) {
     issueRegistry.push(iss);
@@ -37,6 +38,8 @@
   const saved = vscode.getState();
   if (saved) {
     activeTab = saved.activeTab || "overview";
+    // 'lwc' tab was merged into Code Quality — redirect any persisted state.
+    if (activeTab === "lwc") { activeTab = "code"; }
     filters = saved.filters || filters;
     securityMode = saved.securityMode || null;
     selectedModelId = saved.selectedModelId || "auto";
@@ -131,6 +134,17 @@
       const modelSelect = document.getElementById("cta-model-select");
       const selectedModel = modelSelect ? modelSelect.value : "auto";
       vscode.postMessage({ command: "runCtaReview", model: selectedModel });
+    } else if (a === "regenerate-cta-review") {
+      if (securityMode === "safe") return;
+      const modelSelect = document.getElementById("cta-model-select");
+      const selectedModel = modelSelect ? modelSelect.value : "auto";
+      vscode.postMessage({ command: "runCtaReview", model: selectedModel, force: true });
+    } else if (a === "authorize-claude") {
+      const btn = document.getElementById("authorize-claude-btn");
+      if (btn) { btn.textContent = "⏳ Connecting Claude…"; btn.setAttribute("disabled", "true"); }
+      vscode.postMessage({ command: "authorizeClaude" });
+    } else if (a === "disconnect-claude") {
+      vscode.postMessage({ command: "disconnectClaude" });
     } else if (a === "ask-architect") {
       if (securityMode === "safe") return;
       const input = document.getElementById("ask-architect-input");
@@ -383,6 +397,39 @@
       </details>`;
   }
 
+  // Short, always-visible plain-language pointer shown at the top of every tab
+  // so users immediately know what the tab is for and how to read it (#6).
+  const TAB_INTROS = {
+    overview:
+      "<strong>Start here.</strong> A one-glance health snapshot: overall grade, per-category scores, and headline counts for your org. Use it to spot which area needs attention, then open that tab for detail.",
+    orginfo:
+      "<strong>Org facts.</strong> Edition, instance, API version, limits and licence usage for the connected org — the environment context behind every other tab.",
+    datamodel:
+      "<strong>Objects &amp; fields.</strong> Custom objects, field counts and unused custom fields. \"Unused\" = no references found via the Salesforce Dependency API. Trim unused fields to reduce page-layout and reporting clutter.",
+    code:
+      "<strong>Apex, LWC, Flows &amp; Triggers quality.</strong> Static-analysis findings, anti-patterns, code inventory and test coverage. Tackle errors first, then warnings; aim for 75%+ org-wide coverage.",
+    automation:
+      "<strong>How work is automated.</strong> Inventory of Flows (by type), Process Builders, Workflow Rules, Triggers and Validation Rules, with per-object complexity. Watch for multiple automations on the same object — a common source of conflicts.",
+    perflimits:
+      "<strong>Will it scale?</strong> Predicted governor-limit usage, classes at risk, a what-if simulator, and large-data-volume objects. Red means a class may breach a limit under load — read the \"How to read this\" note in each section.",
+    security:
+      "<strong>Who can do what.</strong> Users by profile, permission sets and groups (with user counts), and a grouped list of security findings. Focus on broad permissions (Modify/View All Data) and dormant or over-privileged access.",
+    dependencies:
+      "<strong>What's connected to what.</strong> Component relationships, most-connected hubs and circular dependencies. High fan-in = wide blast radius if changed; circular deps block clean deployments.",
+    stalemetadata:
+      "<strong>Cleanup candidates.</strong> Reports, dashboards and metadata untouched for a long time, plus org inventory. Use it to plan hygiene sprints that reduce clutter and maintenance load.",
+    cta:
+      "<strong>AI architecture review.</strong> An optional, consent-gated AI summary that turns this org's health snapshot into a CTA-grade verdict with risks and recommendations. Pick a model and generate.",
+    askarchitect:
+      "<strong>Ask the Architect.</strong> Ask any question about this org and get an AI answer backed by live Salesforce CLI queries — read-only. Great for drilling into specific issues flagged in other tabs.",
+  };
+
+  function renderTabIntro(id) {
+    const text = TAB_INTROS[id];
+    if (!text) { return ""; }
+    return `<div class="tab-intro">${text}</div>`;
+  }
+
   function renderPaginatedDataTable(tableId, headers, rows, opts) {
     opts = opts || {};
     const PAGE = opts.pageSize || DATA_TABLE_PAGE_SIZE;
@@ -633,6 +680,30 @@
         }
         break;
       }
+      case "claudeAuthStatus": {
+        claudeAuthorized = !!msg.authorized;
+        // On a fresh successful connection, default the picker to Claude (auto).
+        if (claudeAuthorized && availableModels.some((m) => m.id === "anthropic:auto")) {
+          selectedModelId = "anthropic:auto";
+        } else if (!claudeAuthorized && selectedModelId.indexOf("anthropic:") === 0) {
+          selectedModelId = "auto";
+        }
+        // Re-render the CTA panel so the button + model picker reflect the new
+        // state (covers both the pre-review screen and the regenerate bar shown
+        // above an already-generated review).
+        if (results) {
+          const ctaPanel = document.getElementById("panel-cta");
+          if (ctaPanel) {
+            ctaPanel.innerHTML = renderTabIntro("cta") + renderCtaReview();
+          }
+        }
+        populateModelSelects();
+        if (msg.error) {
+          const btn = document.getElementById("authorize-claude-btn");
+          if (btn) { btn.removeAttribute("disabled"); }
+        }
+        break;
+      }
       case "analysisProgress": {
         // Show the progress overlay in appEl directly (before results arrive)
         const stepIdx = typeof msg.step === "number" ? msg.step : -1;
@@ -736,7 +807,27 @@
         }
         const ctaPanel = document.getElementById("panel-cta");
         if (ctaPanel) {
-          ctaPanel.innerHTML = renderCtaReviewContent(msg.data) + renderAskArchitect();
+          ctaPanel.innerHTML =
+            renderCtaRegenerateBar() + renderCtaReviewContent(msg.data);
+          populateModelSelects();
+        }
+        activateTab("cta");
+        break;
+      }
+      case "ctaReviewError": {
+        // Always unblock the loading spinner with a readable, actionable error (#11).
+        const ctaPanelErr = document.getElementById("panel-cta");
+        if (ctaPanelErr) {
+          ctaPanelErr.innerHTML =
+            `<div class="cta-error-banner" style="margin:16px 0;padding:16px 18px;border:1px solid var(--err-border,#f5c2c7);background:var(--err-bg,#fff5f5);border-radius:10px">
+               <div style="font-size:14px;font-weight:700;color:#b42318;margin-bottom:6px">⚠️ CTA Architecture Review couldn't run</div>
+               <div style="font-size:12.5px;color:#1f2937;line-height:1.6">${escHtml(msg.message || "Unknown error.")}</div>
+               <div style="font-size:11.5px;color:#6b7280;margin-top:10px;line-height:1.6">
+                 Tip: GitHub Copilot models work in-place once Copilot Chat is signed in. For a Claude or ChatGPT
+                 subscription, add an API key under <b>Settings → sfHealthAnalyzer.ai.custom</b> (baseUrl + model + apiKey),
+                 then pick the <b>Custom (API key)</b> model and try again.
+               </div>
+             </div>` + renderCtaReview();
         }
         activateTab("cta");
         break;
@@ -1209,16 +1300,16 @@
 
     const tabs = [
       { id: "overview", icon: "📊", label: "Overview" },
+      { id: "orginfo", icon: "🏢", label: "Org Info" },
+      { id: "datamodel", icon: "🗄️", label: "Data Model" },
       { id: "code", icon: "💻", label: "Code Quality" },
       { id: "automation", icon: "⚡", label: "Automation" },
-      { id: "datamodel", icon: "🗄️", label: "Data Model" },
       { id: "perflimits", icon: "🚀", label: "Performance & Limits" },
       { id: "secaccess", icon: "🛡️", label: "Security & Access" },
-      { id: "lwc", icon: "🧩", label: "LWC Quality" },
       { id: "dependencies", icon: "🕸️", label: "Dependencies" },
       { id: "stalemetadata", icon: "🧹", label: "Stale Metadata" },
-      { id: "orginfo", icon: "🏢", label: "Org Info" },
       { id: "cta", icon: "🧠", label: "CTA Review" },
+      { id: "askarchitect", icon: "💬", label: "Ask Architect" },
     ];
 
     appEl.innerHTML = `
@@ -1226,11 +1317,11 @@
         <div class="header-brand">
           <span class="logo"><img class="logo-icon-img" src="${window.ORGPULSE_ICON_URI || ""}" alt="OrgPulse" /></span>
           <h1>OrgPulse</h1>
-          <span class="org-badge">🔗 ${escHtml(orgLabel)}</span>
+          <span class="org-conn-chip"><span class="org-conn-dot"></span>${escHtml(orgLabel)}</span>
         </div>
         <div class="header-actions">
-          <button class="btn btn-ghost" data-action="export-report">⬇️ Export</button>
-          <button class="btn btn-primary" data-action="run-analysis">🔍 Re-Analyse</button>
+          <button class="btn btn-ghost" data-action="export-report">Export</button>
+          <button class="btn btn-primary" data-action="run-analysis">Re-Analyse</button>
         </div>
       </div>
 
@@ -1239,24 +1330,24 @@
           .map(
             (t) => `
           <button class="tab-btn" id="tab-btn-${t.id}" data-action="activate-tab" data-tab="${t.id}">
-            ${t.icon} ${t.label}
+            ${t.label}
           </button>`,
           )
           .join("")}
       </nav>
 
       <div class="tab-panels" id="tab-panels">
-        <div class="tab-panel" id="panel-overview">${renderOverview()}</div>
-        <div class="tab-panel" id="panel-code">${renderCodeQuality()}</div>
-        <div class="tab-panel" id="panel-automation">${renderAutomation()}</div>
-        <div class="tab-panel" id="panel-datamodel">${renderDataModel()}</div>
-        <div class="tab-panel" id="panel-perflimits">${renderPerformanceLimits()}</div>
-        <div class="tab-panel" id="panel-secaccess">${renderSecurityAccess()}</div>
-        <div class="tab-panel" id="panel-lwc">${renderLwc()}</div>
-        <div class="tab-panel" id="panel-dependencies">${renderDependencies()}</div>
-        <div class="tab-panel" id="panel-stalemetadata">${renderStaleMetadata()}</div>
-        <div class="tab-panel" id="panel-orginfo">${renderOrgInfo()}</div>
-        <div class="tab-panel" id="panel-cta">${renderCtaReview()}${renderAskArchitect()}</div>
+        <div class="tab-panel" id="panel-overview">${renderTabIntro("overview")}${renderOverview()}</div>
+        <div class="tab-panel" id="panel-orginfo">${renderTabIntro("orginfo")}${renderOrgInfo()}</div>
+        <div class="tab-panel" id="panel-datamodel">${renderTabIntro("datamodel")}${renderDataModel()}</div>
+        <div class="tab-panel" id="panel-code">${renderTabIntro("code")}${renderCodeQuality()}</div>
+        <div class="tab-panel" id="panel-automation">${renderTabIntro("automation")}${renderAutomation()}</div>
+        <div class="tab-panel" id="panel-perflimits">${renderTabIntro("perflimits")}${renderPerformanceLimits()}</div>
+        <div class="tab-panel" id="panel-secaccess">${renderTabIntro("security")}${renderSecurityAccess()}</div>
+        <div class="tab-panel" id="panel-dependencies">${renderTabIntro("dependencies")}${renderDependencies()}</div>
+        <div class="tab-panel" id="panel-stalemetadata">${renderTabIntro("stalemetadata")}${renderStaleMetadata()}</div>
+        <div class="tab-panel" id="panel-cta">${renderTabIntro("cta")}${renderCtaReview()}</div>
+        <div class="tab-panel" id="panel-askarchitect">${renderTabIntro("askarchitect")}${renderAskArchitect()}</div>
       </div>`;
   }
 
@@ -1419,17 +1510,13 @@
           </div>
         </div>
 
-        <!-- Org Stats Row -->
+        <!-- Org Stats Row (environment-specific only — inventory counts live on their own tabs) -->
         <div class="stat-cards mb-24" style="flex-wrap:wrap">
-          ${kpiCard("📦", inv ? inv.apexClassCount || 0 : 0, "Apex Classes", "")}
-          ${kpiCard("🔄", inv ? inv.flowCount || 0 : 0, "Flows", "")}
-          ${kpiCard("🗄️", inv ? inv.customObjectCount || 0 : 0, "Custom Objects", "")}
-          ${kpiCard("📋", inv ? inv.customFieldCount || 0 : 0, "Custom Fields", "")}
           ${kpiCard("🖥️", od.consoleAppCount || 0, "Console Apps", od.consoleAppCount > 0 ? "var(--sf-blue,#0176d3)" : "")}
           ${kpiCard("📱", od.standardAppCount || 0, "Standard Apps", "")}
-          ${kpiCard("🔐", inv ? inv.permissionSetCount || 0 : 0, "Permission Sets", "")}
           ${kpiCard("👥", licenses.length > 0 ? licenses.reduce((s, l) => s + l.usedLicenses, 0) : 0, "Active Users (lic)", "")}
         </div>
+        <div style="font-size:11.5px;color:var(--sf-text-muted);margin:-12px 0 20px">Looking for component counts? Apex / Triggers / Flows / LWC are on the <strong>Code Quality</strong> tab, objects &amp; custom fields on <strong>Data Model</strong>, and permission sets on <strong>Security &amp; Access</strong>.</div>
 
         <!-- Apps Breakdown -->
         ${
@@ -1548,6 +1635,25 @@
   // ═══════════════════════════════════════════════════════════════════════════
   // CTA REVIEW TAB
   // ═══════════════════════════════════════════════════════════════════════════
+
+  // Toolbar shown above an already-generated review so the user can switch the
+  // model and re-run without re-analysing the whole org.
+  function renderCtaRegenerateBar() {
+    if (securityMode === "safe") return "";
+    return `
+      <div class="cta-regen-bar" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 14px;margin-bottom:16px;border:1px solid var(--sf-border);border-radius:10px;background:var(--vscode-editor-background)">
+        <span style="font-size:12.5px;font-weight:700">🔁 Re-run review</span>
+        <label for="cta-model-select" style="font-size:12px;opacity:.7">Model:</label>
+        ${renderModelSelect("cta-model-select")}
+        ${
+          claudeAuthorized
+            ? `<span style="font-size:11.5px;color:var(--score-excellent,#22c55e)">✓ Claude connected</span>`
+            : `<button class="btn btn-secondary" id="authorize-claude-btn" data-action="authorize-claude" style="font-size:11.5px;padding:5px 10px">🔑 Authorize Claude</button>`
+        }
+        <button class="btn btn-primary" data-action="regenerate-cta-review" style="font-size:12.5px;padding:6px 16px;margin-left:auto">↻ Regenerate</button>
+      </div>`;
+  }
+
   function renderCtaReview() {
     // Safe mode — CTA is disabled
     if (securityMode === "safe") {
@@ -1572,7 +1678,7 @@
     }
 
     if (results && results.ctaReview) {
-      return renderCtaReviewContent(results.ctaReview);
+      return renderCtaRegenerateBar() + renderCtaReviewContent(results.ctaReview);
     }
     return `
       <div style="padding:32px;max-width:800px;margin:0 auto">
@@ -1582,11 +1688,24 @@
           <p style="opacity:.7;margin:0 0 24px">Get a board-room-quality architectural review powered by Claude / Copilot AI.
           The AI analyses your org health snapshot (scores, issues, inventory, licence data) and produces
           a structured Salesforce CTA-grade verdict with domain findings, critical risks, and quick wins.</p>
-          <div style="margin-bottom:16px;display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap">
+          <div style="margin-bottom:12px;display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap">
             <label for="cta-model-select" style="font-size:13px;font-weight:600;opacity:.8">AI Model:</label>
             ${renderModelSelect("cta-model-select")}
+            ${
+              claudeAuthorized
+                ? `<span style="font-size:12px;font-weight:600;color:var(--score-excellent,#22c55e)">✓ Claude connected</span>
+                   <button id="disconnect-claude-btn" class="btn btn-secondary" data-action="disconnect-claude" style="font-size:11px;padding:4px 10px">Disconnect</button>`
+                : `<button id="authorize-claude-btn" class="btn btn-secondary" data-action="authorize-claude" style="font-size:12px;padding:6px 14px">🔑 Authorize Claude</button>`
+            }
           </div>
-          ${noModelsAvailable() ? `<div style="font-size:12px;opacity:.65;margin-bottom:12px">No AI model detected — sign in to a VS Code language-model provider (e.g. GitHub Copilot) or configure a local endpoint in <strong>Settings → sfHealthAnalyzer.ai.custom</strong>.</div>` : ""}
+          ${noModelsAvailable() && !claudeAuthorized ? `<div style="font-size:12px;opacity:.65;margin-bottom:12px">No AI model detected — click <strong>Authorize Claude</strong> to connect with an Anthropic API key, sign in to GitHub Copilot, or configure a local endpoint in <strong>Settings → sfHealthAnalyzer.ai.custom</strong>.</div>` : ""}
+          <div style="font-size:11.5px;opacity:.6;margin-bottom:14px;max-width:580px;margin-left:auto;margin-right:auto;line-height:1.55">
+            ${
+              claudeAuthorized
+                ? `Claude is connected via your Anthropic API key — pick a <strong>Claude</strong> model above (or <strong>Claude (auto)</strong>) and generate. GitHub Copilot models also work in-place.`
+                : `Have a <strong>Claude</strong> subscription/API key? Click <strong>Authorize Claude</strong> and paste your Anthropic key — your Claude models then appear in the picker. GitHub Copilot models work in-place. Keys are stored securely in VS Code Secret Storage.`
+            }
+          </div>
           <button class="btn btn-primary" data-action="run-cta-review" style="font-size:15px;padding:10px 28px">
             ✨ Generate CTA Architecture Review
           </button>
@@ -2455,183 +2574,301 @@
   // OVERVIEW TAB
   // ═══════════════════════════════════════════════════════════════════════════
   function renderOverview() {
-    const s = results.scores;
-    const sum = results.summary;
+    const s = results.scores || {};
+    const sum = results.summary || {};
     const meta = results.metadata || {};
-
-    const topRisks = [...results.issues]
-      .filter((i) => i.severity === "error")
-      .slice(0, 5);
+    const od = results.orgDetails || {};
 
     const catDefs = [
-      {
-        key: "codeQuality",
-        label: "Code Quality",
-        icon: "💻",
-        weight: 25,
-        tab: "code",
-      },
-      {
-        key: "automationDesign",
-        label: "Automation",
-        icon: "⚡",
-        weight: 20,
-        tab: "automation",
-      },
-      {
-        key: "dataModel",
-        label: "Data Model",
-        icon: "🗄️",
-        weight: 15,
-        tab: "datamodel",
-      },
-      {
-        key: "performance",
-        label: "Performance",
-        icon: "🚀",
-        weight: 20,
-        tab: "perflimits",
-      },
-      {
-        key: "security",
-        label: "Security",
-        icon: "🛡️",
-        weight: 10,
-        tab: "secaccess",
-      },
-      {
-        key: "testing",
-        label: "Testing",
-        icon: "🧪",
-        weight: 5,
-        tab: "overview",
-      },
-      {
-        key: "integration",
-        label: "Integration",
-        icon: "🔌",
-        weight: 5,
-        tab: "overview",
-      },
+      { key: "codeQuality",     label: "Code Quality", weight: 25, tab: "code" },
+      { key: "automationDesign",label: "Automation",   weight: 20, tab: "automation" },
+      { key: "performance",     label: "Performance",  weight: 20, tab: "perflimits" },
+      { key: "dataModel",       label: "Data Model",   weight: 15, tab: "datamodel" },
+      { key: "security",        label: "Security",     weight: 10, tab: "secaccess" },
+      { key: "testing",         label: "Testing",      weight:  5, tab: "code" },
+      { key: "integration",     label: "Integration",  weight:  5, tab: "overview" },
     ];
 
-    // Test coverage %
-    const testCov = s.testing != null ? s.testing : meta.testCoverage || 0;
-    const testCovPct = typeof testCov === "number" ? testCov : 0;
-    const testCovCls =
-      testCovPct >= 85
-        ? "c-excellent"
-        : testCovPct >= 75
-          ? "c-fair"
-          : "c-critical";
+    // Score color (same thresholds as the rest of the dashboard)
+    const ovScoreColor = (sc) =>
+      sc >= 90 ? "#3fb950" : sc >= 75 ? "#9bc24a" : sc >= 50 ? "#e0913a" : "#f0584a";
+
+    // Test coverage
+    const cov = results.testCoverageSummary;
+    const testCovPct =
+      cov && typeof cov.averageCoverage === "number"
+        ? cov.averageCoverage
+        : (s.testing != null ? s.testing : (meta.testCoverage || 0));
+
+    // Canonical counts
+    const lwcCount = (results.lwcSummary && results.lwcSummary.totalComponents) || meta.analyzedLwcComponents || 0;
+    const totalIssues = (results.issues || []).length;
+
+    // ── Incomplete banner ─────────────────────────────────────────────────
+    const incompleteBanner = renderIncompleteBanner();
+
+    // ── Org identity strip ────────────────────────────────────────────────
+    const orgName = od.orgName || meta.orgUsername || meta.orgAlias || "Connected Org";
+    const orgId   = meta.orgId || od.orgId || "";
+    const orgIdentityStrip = `
+      <div class="ovn-org-strip">
+        <div>
+          <div class="ovn-org-name-row">
+            <div class="ovn-org-name">${escHtml(orgName)}</div>
+            <span class="ovn-pill-connected"><span class="ovn-pill-connected-dot"></span>Connected</span>
+          </div>
+          <div class="ovn-org-chips">
+            ${od.orgType     ? `<span class="ovn-chip-meta">${escHtml(od.orgType)}</span>` : ""}
+            ${od.instanceName? `<span class="ovn-chip-meta">Instance ${escHtml(od.instanceName)}</span>` : ""}
+            <span class="ovn-chip-meta">API v${escHtml(od.apiVersion || meta.apiVersion || "—")}</span>
+            ${orgId          ? `<span class="ovn-chip-id">${escHtml(orgId)}</span>` : ""}
+          </div>
+        </div>
+        <div class="ovn-org-meta-blocks">
+          <div class="ovn-meta-block"><span class="ovn-meta-label">Scanned</span><span class="ovn-meta-val">${meta.analyzedFiles || 0} files</span></div>
+          <div class="ovn-meta-block"><span class="ovn-meta-label">Duration</span><span class="ovn-meta-val">${results.duration ? (results.duration / 1000).toFixed(1) + "s" : "—"}</span></div>
+          <div class="ovn-meta-block"><span class="ovn-meta-label">As of</span><span class="ovn-meta-val">${formatTs(results.timestamp)}</span></div>
+        </div>
+      </div>`;
+
+    // ── Grade ring ────────────────────────────────────────────────────────
+    const overallScore = s.overall || 0;
+    const CIRC = 427.26;                              // 2π × 68
+    const ringOffset = CIRC * (1 - overallScore / 100);
+    const ringColor  = ovScoreColor(overallScore);
+    const grade      = getGrade(overallScore);
+
+    // Trend text
+    const trends = results.trends || [];
+    let trendText = "First run — trend appears next time";
+    let trendColor = "var(--ov-faint)";
+    if (trends.length >= 2) {
+      const delta = Math.round((trends[trends.length - 1].overall || 0) - (trends[trends.length - 2].overall || 0));
+      if (delta === 0) { trendText = "no change vs last run"; }
+      else {
+        const arrow = delta > 0 ? "▲" : "▼";
+        trendColor = delta > 0 ? "#3fb950" : "#f0584a";
+        trendText = `${arrow} ${Math.abs(delta)} pt${Math.abs(delta) !== 1 ? "s" : ""} vs last run`;
+      }
+    }
+
+    const gradeCard = `
+      <div class="ovn-grade-card">
+        <div class="ovn-ring-wrap">
+          <svg class="ovn-ring-svg" viewBox="0 0 160 160">
+            <circle cx="80" cy="80" r="68" fill="none" stroke="var(--ov-p2)" stroke-width="11"></circle>
+            <circle cx="80" cy="80" r="68" fill="none" stroke="${ringColor}" stroke-width="11"
+              stroke-linecap="round"
+              stroke-dasharray="${CIRC}"
+              stroke-dashoffset="${ringOffset.toFixed(2)}"
+              style="animation:ovnRing 1s ease-out"></circle>
+          </svg>
+          <div class="ovn-ring-center">
+            <div class="ovn-ring-score" style="color:${ringColor}">${overallScore}</div>
+            <div class="ovn-ring-of100">/ 100</div>
+          </div>
+        </div>
+        <div class="ovn-grade-row">
+          <span class="ovn-grade-letter" style="color:${ringColor}">${grade.grade}</span>
+          <span class="ovn-grade-desc">${grade.description}</span>
+        </div>
+        <div class="ovn-trend" style="color:${trendColor}">${trendText}</div>
+      </div>`;
+
+    // ── Needs Attention ───────────────────────────────────────────────────
+    const TAB_LABELS = {
+      code: "Code Quality", datamodel: "Data Model", automation: "Automation",
+      perflimits: "Performance", secaccess: "Security", dependencies: "Dependencies",
+      stalemetadata: "Stale Metadata", cta: "CTA Review", overview: "Overview",
+    };
+    const attentionItems = [];
+
+    // 0% test coverage is the most critical signal
+    if (testCovPct < 1) {
+      attentionItems.push({
+        title: "No Apex test coverage",
+        sub: `0% across ${meta.analyzedClasses || 0} classes — deployments at risk`,
+        color: "#f0584a", tab: "code",
+      });
+    } else if (testCovPct < 75) {
+      attentionItems.push({
+        title: "Low test coverage",
+        sub: `${Math.round(testCovPct)}% — below the 75% deployment threshold`,
+        color: "#f0584a", tab: "code",
+      });
+    }
+    // High error count
+    if (sum.errorCount > 0) {
+      attentionItems.push({
+        title: `${sum.errorCount} blocking error${sum.errorCount !== 1 ? "s" : ""}`,
+        sub: "Resolve before next deployment",
+        color: "#f0584a", tab: "code",
+      });
+    }
+    // Worst-scoring categories (critical then warning)
+    const sortedCats = catDefs
+      .map(c => ({ ...c, score: s[c.key] != null ? s[c.key] : 100 }))
+      .sort((a, b) => a.score - b.score);
+    for (const cat of sortedCats) {
+      if (attentionItems.length >= 4) break;
+      if (cat.score < 60) {
+        attentionItems.push({
+          title: `${cat.label} health critically low`,
+          sub: `Score ${cat.score} / 100 — review ${cat.label.toLowerCase()} design`,
+          color: cat.score < 40 ? "#f0584a" : "#e0913a",
+          tab: cat.tab,
+        });
+      } else if (cat.score < 80) {
+        attentionItems.push({
+          title: `${cat.label} below target`,
+          sub: `Score ${cat.score} / 100${sum.warningCount > 0 ? ` — ${sum.warningCount} warnings to triage` : ""}`,
+          color: "#e0913a",
+          tab: cat.tab,
+        });
+      }
+    }
+    // Fallback when everything looks good
+    if (attentionItems.length === 0) {
+      attentionItems.push({
+        title: "All categories are healthy",
+        sub: `Score ${overallScore} / 100 — great shape`,
+        color: "#3fb950", tab: "overview",
+      });
+    }
+
+    const attentionRows = attentionItems.slice(0, 4).map(item => `
+      <div class="ovn-att-row" data-action="activate-tab" data-tab="${item.tab}">
+        <span class="ovn-att-dot" style="background:${item.color};box-shadow:0 0 8px ${item.color}"></span>
+        <div class="ovn-att-body">
+          <div class="ovn-att-title">${escHtml(item.title)}</div>
+          <div class="ovn-att-sub">${escHtml(item.sub)}</div>
+        </div>
+        <span class="ovn-att-tab">${escHtml(TAB_LABELS[item.tab] || item.tab)}</span>
+        <span class="ovn-att-arrow">›</span>
+      </div>`).join("");
+
+    const attentionPanel = `
+      <div class="ovn-attention-panel">
+        <div class="ovn-attention-header">
+          <div class="ovn-attention-title">Needs attention</div>
+          <div class="ovn-attention-count">${totalIssues} issues total</div>
+        </div>
+        <div class="ovn-attention-list">${attentionRows}</div>
+      </div>`;
+
+    // ── Category scores ───────────────────────────────────────────────────
+    const catCards = catDefs.map(cat => {
+      const sc = s[cat.key] != null ? s[cat.key] : 0;
+      const col = ovScoreColor(sc);
+      return `
+        <div class="ovn-cat-card" data-action="activate-tab" data-tab="${cat.tab}" title="View ${cat.label}">
+          <div class="ovn-cat-top">
+            <div class="ovn-cat-name-row">
+              <span class="ovn-cat-swatch" style="background:${col}"></span>
+              <span class="ovn-cat-name">${cat.label}</span>
+            </div>
+            <span class="ovn-cat-weight">${cat.weight}%</span>
+          </div>
+          <div class="ovn-cat-score-row">
+            <span class="ovn-cat-score" style="color:${col}">${sc}</span>
+            <span class="ovn-cat-of100">/ 100</span>
+          </div>
+          <div class="ovn-cat-bar"><div class="ovn-cat-fill" style="width:${sc}%;background:${col}"></div></div>
+        </div>`;
+    }).join("");
+
+    // ── Headline counts ───────────────────────────────────────────────────
+    const accentColor = "var(--ov-accent)";
+    const textColor   = "var(--sf-text-primary)";
+    const critColor   = "#f0584a";
+    const warnColor   = "#e0913a";
+    const countItems = [
+      { value: sum.errorCount || 0,            label: "Errors",       color: critColor },
+      { value: sum.warningCount || 0,           label: "Warnings",     color: warnColor },
+      { value: sum.infoCount || 0,              label: "Info",         color: accentColor },
+      { value: Math.round(testCovPct) + "%",    label: "Test Coverage",color: testCovPct >= 75 ? "#3fb950" : critColor },
+      { value: meta.analyzedClasses || 0,       label: "Apex Classes", color: textColor },
+      { value: meta.analyzedTriggers || 0,      label: "Triggers",     color: textColor },
+      { value: meta.analyzedFlows || 0,         label: "Flows",        color: textColor },
+      { value: lwcCount,                         label: "LWC",          color: textColor },
+      { value: meta.analyzedObjects || 0,        label: "Objects",      color: textColor },
+    ];
+    const countCards = countItems.map(c => `
+      <div class="ovn-count-card">
+        <div class="ovn-count-value" style="color:${c.color}">${c.value}</div>
+        <div class="ovn-count-label">${c.label}</div>
+      </div>`).join("");
+
+    // ── Apex code size ────────────────────────────────────────────────────
+    const ci = results.codeInventory;
+    const apexUsed  = (ci && ci.apexCodeChars) || 0;
+    const apexLimit = (ci && ci.apexCodeCharLimit) || 6000000;
+    const apexPct   = apexLimit > 0 ? Math.min(100, (apexUsed / apexLimit) * 100) : 0;
+    const apexColor = apexPct >= 85 ? "#f0584a" : apexPct >= 60 ? "#e0913a" : "#3fb950";
+    const apexCard = `
+      <div class="ovn-apex-card">
+        <div class="ovn-apex-header">
+          <span class="ovn-apex-title">Apex code size</span>
+          <span class="ovn-apex-pct" style="color:${apexColor}">${apexPct < 1 ? "<1" : Math.round(apexPct)}% of limit</span>
+        </div>
+        <div class="ovn-apex-track">
+          <div class="ovn-apex-fill" style="width:${Math.max(apexPct, 0.2)}%;background:${apexColor}"></div>
+        </div>
+        <div class="ovn-apex-note">${Number(apexUsed).toLocaleString()} / ${Number(apexLimit).toLocaleString()} chars</div>
+      </div>`;
+
+    // ── Footer: data usage + export ───────────────────────────────────────
+    const aiUsed = (typeof securityMode !== "undefined") && securityMode !== "safe";
+    const modeLabel = (typeof getSecurityModeLabel !== "undefined") ? getSecurityModeLabel() : "Safe Mode";
+    const privacyItems = [
+      "No record data accessed",
+      "No PII processed (emails, names, IPs)",
+      "No data stored externally",
+      `AI: ${aiUsed ? "anonymised insights only" : "disabled (Safe Mode)"}`,
+      `User-selected scan mode`,
+      "Full control over shared data",
+    ];
+    const footerRow = `
+      <div class="ovn-footer">
+        <div class="ovn-data-card">
+          <div class="ovn-data-header">
+            <span class="ovn-data-title">Data usage &amp; security</span>
+            <span class="ovn-mode-pill">${escHtml(modeLabel)}</span>
+          </div>
+          <div class="ovn-privacy-grid">
+            ${privacyItems.map(p => `
+              <div class="ovn-privacy-item">
+                <span class="ovn-check">✔</span>${escHtml(p)}
+              </div>`).join("")}
+          </div>
+          <div class="ovn-data-footer">Enriched AI insights enabled — no raw code or PII shared.</div>
+        </div>
+        <div class="ovn-export-card">
+          <div class="ovn-export-title">Export all issues</div>
+          <div class="ovn-export-sub">${totalIssues} issues across all categories</div>
+          <div class="ovn-export-btns">
+            <button class="ovn-export-btn" data-action="export-issues-csv">Export CSV</button>
+            <button class="ovn-export-btn" data-action="export-issues-excel">Export Excel</button>
+            <button class="ovn-export-btn" data-action="export-issues-pdf">Export PDF</button>
+          </div>
+        </div>
+      </div>`;
 
     return `
-      <!-- Incomplete-data banner (some analysis steps failed) -->
-      ${renderIncompleteBanner()}
-
-      <!-- Score Ring + Category Cards -->
-      <div class="overview-top mb-24">
-        <div class="score-ring-wrap">
-          ${renderScoreRing(s.overall)}
-          <div class="ring-grade ${scoreColorClass(s.overall)}">${getGrade(s.overall).grade} — ${getGrade(s.overall).description}</div>
-          ${renderTrendBadge()}
-          <div class="ring-desc" style="font-size:11px;color:var(--sf-text-muted);text-align:center">
-            ${formatTs(results.timestamp)}
-          </div>
-        </div>
-        <div class="category-scores">
-          ${catDefs.map((c) => renderCatCard(c, s[c.key])).join("")}
-        </div>
+      ${incompleteBanner}
+      ${orgIdentityStrip}
+      <div class="ovn-hero">
+        ${gradeCard}
+        ${attentionPanel}
       </div>
-
-      <!-- Stat Cards -->
-      <div class="stat-cards mb-24">
-        <div class="stat-card">
-          <span class="stat-icon">❌</span>
-          <div><div class="stat-value c-critical">${sum.errorCount}</div><div class="stat-label">Errors</div></div>
-        </div>
-        <div class="stat-card">
-          <span class="stat-icon">⚠️</span>
-          <div><div class="stat-value c-fair">${sum.warningCount}</div><div class="stat-label">Warnings</div></div>
-        </div>
-        <div class="stat-card">
-          <span class="stat-icon">ℹ️</span>
-          <div><div class="stat-value c-good">${sum.infoCount}</div><div class="stat-label">Info</div></div>
-        </div>
-        <div class="stat-card">
-          <span class="stat-icon">🧪</span>
-          <div><div class="stat-value ${testCovCls}">${testCovPct}%</div><div class="stat-label">Test Coverage</div></div>
-        </div>
-        <div class="stat-card">
-          <span class="stat-icon">📦</span>
-          <div><div class="stat-value">${meta.analyzedClasses || 0}</div><div class="stat-label">Apex Classes</div></div>
-        </div>
-        <div class="stat-card">
-          <span class="stat-icon">⚡</span>
-          <div><div class="stat-value">${meta.analyzedTriggers || 0}</div><div class="stat-label">Triggers</div></div>
-        </div>
-        <div class="stat-card">
-          <span class="stat-icon">🔄</span>
-          <div><div class="stat-value">${meta.analyzedFlows || 0}</div><div class="stat-label">Flows</div></div>
-        </div>
-        <div class="stat-card">
-          <span class="stat-icon">🗄️</span>
-          <div><div class="stat-value">${meta.analyzedObjects || 0}</div><div class="stat-label">Objects</div></div>
-        </div>
+      <div class="ovn-section-header">
+        <span class="ovn-section-label">Category scores</span>
+        <span class="ovn-section-sub">weighted contribution to overall grade</span>
       </div>
-
-      <!-- Data Usage & Security Transparency -->
-      ${renderTransparencyPanel()}
-
-      <!-- Export All Issues -->
-      <div class="mb-24">
-        <div class="section-title">📥 Export All Issues (${(results.issues || []).length} total)</div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
-          <button class="btn btn-secondary" data-action="export-issues-csv" style="font-size:12px">📄 Export CSV</button>
-          <button class="btn btn-secondary" data-action="export-issues-excel" style="font-size:12px">📊 Export Excel</button>
-          <button class="btn btn-secondary" data-action="export-issues-pdf" style="font-size:12px">📕 Export PDF</button>
-        </div>
-      </div>
-
-      <!-- Org Metadata -->
-      <div class="mb-24">
-        <div class="section-title">🔗 Connected Org</div>
-        <div class="org-meta-card">
-          <div class="org-meta-grid">
-            <div class="org-meta-item"><div class="org-meta-label">Username</div><div class="org-meta-value">${escHtml(meta.orgUsername || "—")}</div></div>
-            <div class="org-meta-item"><div class="org-meta-label">Alias</div><div class="org-meta-value">${escHtml(meta.orgAlias || "—")}</div></div>
-            <div class="org-meta-item"><div class="org-meta-label">Org ID</div><div class="org-meta-value">${escHtml(meta.orgId || "—")}</div></div>
-            <div class="org-meta-item"><div class="org-meta-label">API Version</div><div class="org-meta-value">${escHtml(meta.apiVersion || "—")}</div></div>
-            <div class="org-meta-item"><div class="org-meta-label">Duration</div><div class="org-meta-value">${results.duration ? (results.duration / 1000).toFixed(1) + "s" : "—"}</div></div>
-            <div class="org-meta-item"><div class="org-meta-label">Files Scanned</div><div class="org-meta-value">${meta.analyzedFiles || 0}</div></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Top Risks -->
-      ${
-        topRisks.length > 0
-          ? `
-      <div class="mb-24">
-        <div class="section-title">🚨 Top Critical Issues</div>
-        <div class="top-risks">
-          ${topRisks
-            .map((iss) => {
-              const idx = registerIssue(iss);
-              return `
-            <div class="risk-item ${iss.severity}" data-action="open-drill" data-idx="${idx}" style="cursor:pointer">
-              <span class="risk-sev-icon">${sevIcon(iss.severity)}</span>
-              <div class="risk-body">
-                <div class="risk-message">${escHtml(iss.message)}</div>
-                <div class="risk-meta">${formatCatLabel(iss.category)} · ${iss.file ? shortPath(iss.file) : iss.object || ""}</div>
-              </div>
-            </div>`;
-            })
-            .join("")}
-        </div>
-      </div>`
-          : ""
-      }`;
+      <div class="ovn-cat-grid">${catCards}</div>
+      <div class="ovn-counts-grid">${countCards}</div>
+      ${apexCard}
+      ${footerRow}`;
   }
 
   // ── Executive Overview helpers (v1.10) ────────────────────────────────────
@@ -2755,6 +2992,7 @@
       "<strong>Issues are categorised</strong> as: <em>code-quality</em> (structural problems in Apex) and <em>technical-debt</em> (maintainability concerns like missing descriptions, complex nesting).",
       "<strong>Apex Trigger rules</strong> enforce one-trigger-per-object, no DML/SOQL in trigger bodies, and no logic directly in the trigger (prefer handler classes).",
       "<strong>Scoring</strong>: Code Quality score starts at 100 and deducts points for each issue weighted by severity and the proportion of your codebase affected.",
+      "<strong>Code inventory</strong>: Batch/Queueable/Schedulable counts are detected from class bodies (<code>implements</code> clause); Scheduled Jobs are active <code>CronTrigger</code> records (Scheduled Apex). <strong>LWC quality</strong> is now shown in this tab.",
     ]);
 
     const errors = allIssues.filter((i) => i.severity === "error");
@@ -2801,36 +3039,54 @@
       .sort((a, b) => b[1].total - a[1].total)
       .slice(0, 10);
 
+    // Canonical inventory + coverage (from the analysis pipeline)
+    const meta = results.metadata || {};
+    const ci = results.codeInventory || {};
+    const cov = results.testCoverageSummary;
+    const lwcSum = results.lwcSummary;
+    const lwcCount = (lwcSum && lwcSum.totalComponents) || meta.analyzedLwcComponents || 0;
+    const covPct =
+      cov && typeof cov.averageCoverage === "number" ? cov.averageCoverage : s.testing || 0;
+    const covCls = covPct >= 85 ? "c-excellent" : covPct >= 75 ? "c-fair" : "c-critical";
+    const cqCard = (num, label, cls) =>
+      `<div class="lwc-summary-card"><div class="lwc-summary-num ${cls || ""}">${num}</div><div class="lwc-summary-label">${label}</div></div>`;
+    // Test-coverage offenders surfaced as issues (category 'testing')
+    const coverageIssues = results.issues.filter((i) => i.category === "testing");
+    const coverageRows = coverageIssues
+      .slice(0, 200)
+      .map((iss) => [
+        `<span style="font-weight:600">${escHtml(iss.object || (iss.file ? shortPath(iss.file) : "—"))}</span>`,
+        `<span class="${iss.severity === "error" ? "c-critical" : "c-fair"}">${escHtml(iss.message)}</span>`,
+      ]);
+
     return `
       ${tabInfo}
-      <!-- CTA-Style Summary -->
+      <!-- Code Inventory by component type -->
       <div class="mb-24">
-        <div class="section-title">💻 Code Quality Summary</div>
+        <div class="section-title">💻 Code Inventory & Quality</div>
         <div class="lwc-summary-cards">
-          <div class="lwc-summary-card">
-            <div class="lwc-summary-num">${s.codeQuality || 0}</div>
-            <div class="lwc-summary-label">Quality Score</div>
-          </div>
-          <div class="lwc-summary-card">
-            <div class="lwc-summary-num c-critical">${errors.length}</div>
-            <div class="lwc-summary-label">Critical Issues</div>
-          </div>
-          <div class="lwc-summary-card">
-            <div class="lwc-summary-num c-fair">${warnings.length}</div>
-            <div class="lwc-summary-label">Warnings</div>
-          </div>
-          <div class="lwc-summary-card">
-            <div class="lwc-summary-num c-good">${infos.length}</div>
-            <div class="lwc-summary-label">Info</div>
-          </div>
-          <div class="lwc-summary-card">
-            <div class="lwc-summary-num ${apTotal > 10 ? "c-critical" : apTotal > 5 ? "c-fair" : "c-excellent"}">${apTotal}</div>
-            <div class="lwc-summary-label">Anti-Patterns</div>
-          </div>
-          <div class="lwc-summary-card">
-            <div class="lwc-summary-num ${sprints > 10 ? "c-critical" : sprints > 5 ? "c-fair" : "c-excellent"}">${sprints || allIssues.length}</div>
-            <div class="lwc-summary-label">${sprints ? "Sprint Cycles" : "Total Items"}</div>
-          </div>
+          ${cqCard(s.codeQuality || 0, "Quality Score", scoreColorClass(s.codeQuality || 0))}
+          ${cqCard(covPct + "%", "Test Coverage", covCls)}
+          ${cqCard(ci.apexClasses != null ? ci.apexClasses : meta.analyzedClasses || 0, "Apex Classes")}
+          ${cqCard(ci.apexTriggers != null ? ci.apexTriggers : meta.analyzedTriggers || 0, "Triggers")}
+          ${cqCard(lwcCount, "LWC")}
+          ${cqCard(meta.analyzedFlows || 0, "Flows")}
+          ${cqCard(ci.batchClasses || 0, "Batch")}
+          ${cqCard(ci.queueableClasses || 0, "Queueable")}
+          ${cqCard(ci.schedulableClasses || 0, "Schedulable")}
+          ${cqCard(ci.scheduledJobs || 0, "Scheduled Jobs")}
+        </div>
+      </div>
+
+      <!-- Issue severity / anti-pattern roll-up -->
+      <div class="mb-24">
+        <div class="section-title">🚦 Apex Issue Breakdown</div>
+        <div class="lwc-summary-cards">
+          ${cqCard(errors.length, "Critical", "c-critical")}
+          ${cqCard(warnings.length, "Warnings", "c-fair")}
+          ${cqCard(infos.length, "Info", "c-good")}
+          ${cqCard(apTotal, "Anti-Patterns", apTotal > 10 ? "c-critical" : apTotal > 5 ? "c-fair" : "c-excellent")}
+          ${cqCard(sprints || allIssues.length, sprints ? "Sprint Cycles" : "Total Items", sprints > 10 ? "c-critical" : "")}
         </div>
       </div>
 
@@ -2889,6 +3145,32 @@
           : ""
       }
 
+      <!-- Test Coverage detail -->
+      ${
+        cov
+          ? `
+      <div class="mb-24">
+        <div class="section-title">🧪 Test Coverage (${covPct}% org-wide)</div>
+        <div class="lwc-summary-cards" style="margin-bottom:12px">
+          ${cqCard(covPct + "%", "Avg Coverage", covCls)}
+          ${cqCard(cov.totalClasses || 0, "Classes Measured")}
+          ${cqCard(cov.classesBelow75 || 0, "Below 75%", (cov.classesBelow75 || 0) > 0 ? "c-fair" : "c-excellent")}
+          ${cqCard(cov.zeroCoverageCount || 0, "Zero Coverage", (cov.zeroCoverageCount || 0) > 0 ? "c-critical" : "c-excellent")}
+        </div>
+        ${
+          coverageRows.length
+            ? renderPaginatedDataTable("code-coverage", ["Class", "Coverage Finding"], coverageRows, { emptyMsg: "" })
+            : `<div style="font-size:12px;color:var(--sf-text-muted)">All measured classes meet the 75% threshold. ✓</div>`
+        }
+      </div>`
+          : ""
+      }
+
+      <!-- Lightning Web Components (merged from the former LWC tab) -->
+      <div class="mb-24">
+        <div class="section-title">🧩 Lightning Web Components</div>
+        ${renderLwc()}
+      </div>
       `;
   }
 
@@ -2896,64 +3178,91 @@
   // AUTOMATION TAB
   // ═══════════════════════════════════════════════════════════════════════════
   function renderAutomation() {
-    const autoIssues = results.issues.filter(
-      (i) => i.category === "automation-design",
-    );
+    const auto = results.automationSummary || {};
+    const objectMap = auto.objectMap || {};
+    const flowInv = auto.flowInventory || [];
+    const wfInv = auto.workflowInventory || [];
 
     const tabInfo = renderTabInfo("automation", [
-      "<strong>Data source</strong>: Active Apex Triggers (Tooling API <code>ApexTrigger</code>), Active Flows (<code>Flow</code> object, falls back to <code>FlowDefinition</code>), and Validation Rules (<code>ValidationRule</code>) — all limited to non-managed-package records.",
-      "<strong>Flows</strong> include all <em>ProcessType</em> variants: Screen Flows, Record-Triggered Flows, Scheduled Flows, Platform Event Flows, and Auto-Launched Flows. Trigger object is resolved via <code>FlowVersion.TriggerObjectOrEventReference</code>.",
-      "<strong>Object Heatmap</strong> shows how many automation issues each object has, colour-coded: green=1, amber=2-3, orange=4-5, red >5.",
-      "<strong>Automation Inventory</strong> groups all automations by object, counting triggers, flows, and validation rules per object. Objects with multiple triggers per object are flagged as <em>Critical</em>.",
-      "<strong>Complexity scoring</strong>: objects with more than 8 combined automations (triggers + flows + validation rules) are considered over-automated and flagged for review.",
-      "<strong>Inactive flows</strong> are excluded — only <em>Status = Active</em> flows are shown. Deactivated flows should be cleaned up via Salesforce Setup → Flows.",
-      "<strong>Standard objects</strong> (Account, Contact, etc.) appear only if they have at least one trigger, flow, or validation rule attached.",
+      "<strong>Data source</strong>: Active Apex Triggers (<code>ApexTrigger</code>), Flows (<code>Flow</code>/<code>FlowDefinition</code>), Validation Rules (<code>ValidationRule</code>), and classic Workflow Rules (<code>WorkflowRule</code>) — all non-managed-package.",
+      "<strong>Flows by type</strong>: Screen, Record-Triggered, Scheduled, Platform-Event, and Auto-Launched (via <em>ProcessType</em>/<em>TriggerType</em>). <strong>Process Builders</strong> are <code>ProcessType=Workflow</code> flows and are counted separately (deprecated).",
+      "<strong>Automation by Object</strong> shows real per-object counts of triggers, flows, and validation rules (not just issues). Cells: green=1, amber=2-3, orange=4-5, red >5.",
+      "<strong>Architecture signals</strong> flag deprecated Process Builders/Workflow Rules, objects with multiple triggers (undefined execution order), and over-automated objects (>8 combined).",
     ]);
 
-    // Build heatmap data from issues
-    const objectMap = {};
-    for (const iss of autoIssues) {
-      const obj = iss.object || "Unknown";
-      if (!objectMap[obj]) {
-        objectMap[obj] = {
-          triggers: 0,
-          flows: 0,
-          validations: 0,
-          process: 0,
-          total: 0,
-        };
-      }
-      objectMap[obj].total++;
-      if (/trigger/i.test(iss.ruleId)) objectMap[obj].triggers++;
-      else if (/flow/i.test(iss.ruleId)) objectMap[obj].flows++;
-      else if (/valid/i.test(iss.ruleId)) objectMap[obj].validations++;
-      else objectMap[obj].process++;
-    }
+    // Flow-type breakdown (derived from the canonical flow inventory)
+    const realFlows = flowInv.filter((f) => f.processType !== "Workflow");
+    const recordFlows = flowInv.filter((f) => f.processType === "RecordTriggeredFlow").length;
+    const autoLaunched = flowInv.filter((f) => f.processType === "AutoLaunchedFlow").length;
+    const screenFlows = auto.totalScreenFlows != null ? auto.totalScreenFlows : flowInv.filter((f) => f.processType === "Flow").length;
+    const scheduledFlows = auto.totalScheduledFlows || 0;
+    const eventFlows = auto.totalEventFlows || 0;
+    const processBuilders = auto.totalProcessBuilders || 0;
+    const workflowRules = auto.totalWorkflowRules != null ? auto.totalWorkflowRules : wfInv.length;
+    const triggers = auto.totalTriggers || 0;
+    const vrules = auto.totalValidationRules || 0;
 
-    const objects = Object.entries(objectMap).sort(
-      (a, b) => b[1].total - a[1].total,
-    );
+    const card = (num, label, cls) =>
+      `<div class="lwc-summary-card"><div class="lwc-summary-num ${cls || ""}">${num}</div><div class="lwc-summary-label">${label}</div></div>`;
+    const prettyType = (t) =>
+      ({ Flow: "Screen Flow", AutoLaunchedFlow: "Auto-Launched", RecordTriggeredFlow: "Record-Triggered", Workflow: "Process Builder" })[t] || t || "—";
+
+    // Architecture signals
+    const multiTriggerObjects = Object.entries(objectMap).filter(([, d]) => (d.triggers || 0) > 1);
+    const overAutomated = Object.entries(objectMap).filter(([, d]) => (d.total || 0) > 8);
+
+    // Per-object inventory (real counts from automationSummary.objectMap)
+    const objects = Object.entries(objectMap).sort((a, b) => (b[1].total || 0) - (a[1].total || 0));
+
+    const hasSignals = processBuilders > 0 || workflowRules > 0 || multiTriggerObjects.length > 0 || overAutomated.length > 0;
 
     return `
       ${tabInfo}
+
+      <!-- Automation inventory KPIs -->
       <div class="mb-24">
-        <div class="section-title">⚡ Automation Complexity Heatmap</div>
+        <div class="section-title">⚡ Automation Inventory</div>
+        <div class="lwc-summary-cards">
+          ${card(triggers, "Apex Triggers")}
+          ${card(realFlows.length, "Flows (total)")}
+          ${card(recordFlows, "Record-Triggered")}
+          ${card(screenFlows, "Screen Flows")}
+          ${card(scheduledFlows, "Scheduled")}
+          ${card(eventFlows, "Platform-Event")}
+          ${card(autoLaunched, "Auto-Launched")}
+          ${card(processBuilders, "Process Builders", processBuilders > 0 ? "c-fair" : "c-excellent")}
+          ${card(workflowRules, "Workflow Rules", workflowRules > 0 ? "c-fair" : "")}
+          ${card(vrules, "Validation Rules")}
+        </div>
+      </div>
+
+      ${
+        hasSignals
+          ? `
+      <div class="mb-24">
+        <div class="section-title">🧠 Architecture Signals</div>
+        <div class="perf-summary-grid">
+          ${processBuilders > 0 ? `<div class="perf-summary-card sev-border-warning"><div class="perf-summary-top"><span class="perf-summary-icon">🛠️</span><span class="perf-summary-count c-fair">${processBuilders}</span></div><div class="perf-summary-label">Process Builders</div><div class="perf-summary-tip">Deprecated — Salesforce is retiring Process Builder. Migrate to Record-Triggered Flows.</div></div>` : ""}
+          ${workflowRules > 0 ? `<div class="perf-summary-card sev-border-warning"><div class="perf-summary-top"><span class="perf-summary-icon">📜</span><span class="perf-summary-count c-fair">${workflowRules}</span></div><div class="perf-summary-label">Workflow Rules</div><div class="perf-summary-tip">Classic Workflow Rules are legacy — consolidate into Flows for a single automation model.</div></div>` : ""}
+          ${multiTriggerObjects.length ? `<div class="perf-summary-card sev-border-error"><div class="perf-summary-top"><span class="perf-summary-icon">⚠️</span><span class="perf-summary-count c-critical">${multiTriggerObjects.length}</span></div><div class="perf-summary-label">Objects with Multiple Triggers</div><div class="perf-summary-tip">Multiple triggers per object give undefined execution order. Use one trigger + handler per object.</div></div>` : ""}
+          ${overAutomated.length ? `<div class="perf-summary-card sev-border-warning"><div class="perf-summary-top"><span class="perf-summary-icon">🔥</span><span class="perf-summary-count c-fair">${overAutomated.length}</span></div><div class="perf-summary-label">Over-Automated Objects</div><div class="perf-summary-tip">More than 8 combined automations on one object — high recursion and maintenance risk.</div></div>` : ""}
+        </div>
+      </div>`
+          : ""
+      }
+
+      <!-- Automation by object (real counts) -->
+      <div class="mb-24">
+        <div class="section-title">📊 Automation by Object (${objects.length})</div>
         <div class="heatmap-wrap">
           <table class="sf-table sf-table--heatmap">
             <thead>
-              <tr>
-                <th>Object</th>
-                <th>Triggers</th>
-                <th>Flows</th>
-                <th>Validations</th>
-                <th>Other</th>
-                <th>Total Issues</th>
-              </tr>
+              <tr><th>Object</th><th>Triggers</th><th>Flows</th><th>Validations</th><th>Total</th></tr>
             </thead>
             <tbody>
               ${
                 objects.length === 0
-                  ? `<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--sf-text-muted)">No automation issues detected ✅</td></tr>`
+                  ? `<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--sf-text-muted)">No automation detected ✅</td></tr>`
                   : objects
                       .map(
                         ([obj, d]) => `
@@ -2962,7 +3271,6 @@
                     <td><span class="heatmap-cell ${hmClass(d.triggers)}">${d.triggers || "—"}</span></td>
                     <td><span class="heatmap-cell ${hmClass(d.flows)}">${d.flows || "—"}</span></td>
                     <td><span class="heatmap-cell ${hmClass(d.validations)}">${d.validations || "—"}</span></td>
-                    <td><span class="heatmap-cell ${hmClass(d.process)}">${d.process || "—"}</span></td>
                     <td><span class="heatmap-cell ${hmClass(d.total)}" style="font-size:14px">${d.total}</span></td>
                   </tr>`,
                       )
@@ -2970,11 +3278,47 @@
               }
             </tbody>
             <tfoot>
-              <tr><td colspan="6">Cells coloured by issue count: green=1, amber=2-3, orange=4-5, red>5</td></tr>
+              <tr><td colspan="5">Cells coloured by count: green=1, amber=2-3, orange=4-5, red>5</td></tr>
             </tfoot>
           </table>
         </div>
-      </div>`;
+      </div>
+
+      ${
+        realFlows.length
+          ? `
+      <div class="mb-24">
+        <div class="section-title">🔄 Flow Inventory (${realFlows.length})</div>
+        ${renderPaginatedDataTable(
+          "auto-flows",
+          ["Flow Name", "Type", "Object", "Status"],
+          realFlows.map((f) => [
+            `<span style="font-weight:600">${escHtml(f.name)}</span>`,
+            escHtml(prettyType(f.processType)),
+            escHtml(f.objectApiName || "—"),
+            `<span class="${f.isActive ? "pill-ok" : "pill-warn"}">${f.isActive ? "Active" : "Inactive"}</span>`,
+          ]),
+        )}
+      </div>`
+          : ""
+      }
+
+      ${
+        wfInv.length
+          ? `
+      <div class="mb-24">
+        <div class="section-title">📜 Workflow Rules (${wfInv.length})</div>
+        ${renderPaginatedDataTable(
+          "auto-wf",
+          ["Workflow Rule", "Object"],
+          wfInv.map((w) => [
+            `<span style="font-weight:600">${escHtml(w.name)}</span>`,
+            escHtml(w.objectApiName || "—"),
+          ]),
+        )}
+      </div>`
+          : ""
+      }`;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2989,18 +3333,14 @@
     const tabInfo = renderTabInfo("datamodel", [
       "<strong>Objects fetched via</strong> <code>EntityDefinition</code> (Tooling API) — all <em>IsCustomizable=true</em> objects including standard and custom.",
       "<strong>Standard objects</strong> (e.g. Account, Contact) are shown only when they have custom fields, flows, triggers, or validation rules. All <code>__c</code> custom objects are always included.",
-      "<strong>Field counts</strong>: Std Fields = total fields − custom fields (via parallel <code>FieldDefinition COUNT GROUP BY</code> queries). Custom Fields uses <code>CustomField WHERE NamespacePrefix = null</code> to exclude managed-package fields.",
-      "<strong>Unused fields</strong> are estimated by counting custom fields on an object that have no matching reference (<code>Object.Field__c</code>) in the local workspace source code. This is a code-reference heuristic — it does not scan page layouts, reports, or formula fields.",
+      "<strong>Custom field counts</strong> use <code>CustomField WHERE NamespacePrefix = null</code> to exclude managed-package fields.",
+      "<strong>Unused fields</strong> are custom fields with <em>no references</em> in the Salesforce <strong>Dependency API</strong> (<code>MetadataComponentDependency</code>) — matched by component Id, name, or local workspace usage. This is <em>reference-based, not last-used-date</em>; it reflects metadata references (Apex, flows, layouts, reports) but not hard-coded external integrations. Falls back to a workspace-only estimate if the Dependency API is unavailable.",
       "<strong>Triggers, Flows, Validation Rules</strong> are aggregate counts from <code>ApexTrigger</code>, <code>Flow</code>, and <code>ValidationRule</code> Tooling API objects grouped by <code>EntityDefinitionId</code>.",
       "<strong>Field Limit %</strong> = Custom Fields ÷ 800 × 100. Objects above 25% are flagged in the Governor Limit Risk table above the main matrix.",
       "<strong>Managed-package objects</strong> are filtered out in JavaScript: custom objects with a namespace prefix pattern (<code>ns__Name__c</code>) are excluded from the results.",
     ]);
 
     // ── Summary KPIs ──────────────────────────────────────────────────────
-    const totalStdFields = stats.reduce(
-      (s, o) => s + (o.standardFields || 0),
-      0,
-    );
     const totalCustFields = stats.reduce(
       (s, o) => s + (o.customFields || o.totalFields || 0),
       0,
@@ -3079,7 +3419,6 @@
           "dm-limit-risk",
           [
             "Object",
-            "Std Fields",
             "Custom Fields",
             "Total",
             "Limit %",
@@ -3101,7 +3440,6 @@
                   : "🟡 Caution";
             return [
               `<span style="font-weight:600">${escHtml(o.objectLabel || o.objectName)}</span><br><span style="font-size:11px;color:var(--sf-text-muted)">${escHtml(o.objectName)}</span>`,
-              String(o.standardFields != null ? o.standardFields : "—"),
               String(o.customFields != null ? o.customFields : "—"),
               String(o.totalFields || "—"),
               `<span class="${pct >= 50 ? "c-critical" : "c-fair"}">${pct}%</span>`,
@@ -3119,10 +3457,6 @@
           <div class="lwc-summary-card">
             <div class="lwc-summary-num">${mergedRows.length}</div>
             <div class="lwc-summary-label">Objects</div>
-          </div>
-          <div class="lwc-summary-card">
-            <div class="lwc-summary-num">${totalStdFields || "—"}</div>
-            <div class="lwc-summary-label">Std Fields</div>
           </div>
           <div class="lwc-summary-card">
             <div class="lwc-summary-num">${totalCustFields}</div>
@@ -3166,13 +3500,16 @@
           <div class="section-title" style="margin-bottom:0">🗄️ Object Health Matrix (${mergedRows.length} objects)</div>
           ${hasData ? '<button class="btn btn-ghost" data-action="export-dm-csv" style="font-size:11px;padding:5px 12px">📥 Export CSV</button>' : ""}
         </div>
+        <div style="font-size:11px;color:var(--sf-text-muted);margin:-4px 0 10px">
+          ♻ <strong>Unused</strong> = custom fields with no references in the Salesforce Dependency API
+          (<code>MetadataComponentDependency</code>) — reference-based, not last-used date.
+        </div>
         ${
           hasData
             ? renderPaginatedDataTable(
                 "dm-objects",
                 [
                   "Object",
-                  "Std Fields",
                   "Custom Fields",
                   "Unused ♻",
                   "Triggers",
@@ -3198,7 +3535,6 @@
                       : `<span style="font-weight:600">${escHtml(r.obj)}</span>`;
                   return [
                     labelHtml,
-                    r.stdFields != null ? String(r.stdFields) : "0",
                     `<span class="${r.fieldLimitPct > 50 ? "c-critical" : r.fieldLimitPct > 25 ? "c-fair" : ""}" title="${r.fieldLimitPct}% of 800-field limit">${r.custFields != null ? r.custFields : 0}</span>`,
                     `<span class="${r.unusedFields > 0 && unusedRatio > 0.3 ? "c-fair" : ""}">${r.unusedFields || 0}</span>`,
                     `<span class="${hasMultiTrigger ? "c-critical" : ""}">${r.triggers || 0}</span>`,
@@ -3256,7 +3592,6 @@
         return {
           obj,
           objLabel: fs.objectLabel || obj,
-          stdFields: fs.standardFields != null ? fs.standardFields : 0,
           custFields:
             fs.customFields != null ? fs.customFields : fs.totalFields || 0,
           unusedFields: fs.unusedFields || 0,
@@ -3279,10 +3614,10 @@
         return b.custFields - a.custFields;
       });
     const csvHeaders =
-      "Object API Name,Object Label,Std Fields,Custom Fields,Unused Fields,Triggers,Flows,Validation Rules,Field Limit %";
+      "Object API Name,Object Label,Custom Fields,Unused Fields,Triggers,Flows,Validation Rules,Field Limit %";
     const csvRows = rows.map(
       (r) =>
-        `"${r.obj}","${r.objLabel}",${r.stdFields},${r.custFields},${r.unusedFields},${r.triggers},${r.flows},${r.validations},${r.fieldLimitPct}`,
+        `"${r.obj}","${r.objLabel}",${r.custFields},${r.unusedFields},${r.triggers},${r.flows},${r.validations},${r.fieldLimitPct}`,
     );
     const csv = [csvHeaders, ...csvRows].join("\n");
     // Send to extension host — VS Code webviews block URL.createObjectURL
@@ -3450,6 +3785,7 @@
       <!-- Governor Limit Gauges -->
       <div class="mb-24">
         <div class="section-title">⚡ Predicted Governor Limit Usage (Worst-Case Class)</div>
+        <div class="how-to-note">📖 <strong>How to read this:</strong> each gauge shows the single <em>highest</em> projected value found across all analysed Apex classes for that limit (SOQL, DML, CPU, Heap) — i.e. your worst offender, not an org-wide total. Values are static estimates from code patterns (queries/DML in loops, etc.). A gauge near its cap means at least one class is at risk of hitting that governor limit under load.</div>
         <div class="gov-gauge-grid">
           ${gaugeData
             .map((g) => {
@@ -3479,6 +3815,7 @@
           ? `
       <div class="mb-24">
         <div class="section-title">🏷️ Apex Classes at Risk (Top ${Math.min(risks.length, 10)})</div>
+        <div class="how-to-note">📖 <strong>How to read this:</strong> classes ranked by predicted governor-limit consumption from static pattern analysis (SOQL/DML inside loops, large heap usage, high CPU patterns). Each cell is the projected per-transaction usage vs the governor cap shown in the header — <span class="c-critical">red</span> = approaching/over the limit, <span class="c-fair">amber</span> = watch. Start remediation with the red cells (bulkify queries/DML, move work to async). "Patterns" lists the risky constructs detected.</div>
         ${renderPaginatedDataTable(
           "pl-risk-classes",
           [
@@ -3535,7 +3872,7 @@
       <div class="mb-24">
         <div class="info-card">
           <div style="font-size:16px;font-weight:700;margin-bottom:6px">🔬 Governor Limits Simulator</div>
-          <p style="margin:0 0 16px;opacity:.65;font-size:13px">Input a data volume to project how much of your governor limits each class will consume.</p>
+          <div class="how-to-note" style="margin-bottom:14px">📖 <strong>How this works:</strong> pick a record volume below — the table projects how much of each governor limit every <em>at-risk</em> class/trigger would consume in a single Apex transaction at that volume. Only classes flagged with loop-based SOQL/DML or high-risk patterns are simulated (so an org with ${simData.length} risky class${simData.length === 1 ? "" : "es"} shows ${simData.length} row${simData.length === 1 ? "" : "s"} — clean classes are intentionally excluded). Watch for rows turning red as you raise the volume: that's where a class would breach a limit at scale.</div>
           <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap">
             <div style="display:flex;align-items:center;gap:12px;flex:1;min-width:220px">
               <label style="font-size:13px;font-weight:600;white-space:nowrap">Records in batch:</label>
@@ -3577,7 +3914,15 @@
           </div>
         </div>
       </div>`
-          : ""
+          : `
+      <div class="mb-24">
+        <div class="info-card">
+          <div style="font-size:16px;font-weight:700;margin-bottom:6px">🔬 Governor Limits Simulator</div>
+          <div style="padding:16px;border-radius:8px;background:var(--vscode-editor-background);font-size:13px;line-height:1.6;color:var(--sf-text-muted)">
+            ✓ <strong>Nothing to simulate.</strong> The simulator only includes classes/triggers that show governor-limit risk (SOQL or DML inside loops, or high/medium-risk patterns). None of your analysed Apex matched those patterns, so there are no rows to project. This is a good sign — your code currently has no obvious bulk-scaling hotspots. If you add loop-based queries/DML later, they'll appear here automatically.
+          </div>
+        </div>
+      </div>`
       }
 
       <!-- LDV Objects -->
@@ -3816,37 +4161,159 @@
           : ""
       }
 
-      <!-- Users by Profile -->
+      <!-- Permission Sets -->
+      ${
+        profSum && profSum.permissionSetList && profSum.permissionSetList.length
+          ? `
+      <div class="mb-24">
+        <div class="section-title">🎛️ Permission Sets (${profSum.permissionSetList.length})</div>
+        <div style="font-size:11.5px;color:var(--sf-text-muted);margin:-4px 0 10px">Custom permission sets and the active users assigned to each. Permission sets grant access additively on top of a user's profile.</div>
+        ${renderPaginatedDataTable(
+          "sec-permsets",
+          ["Permission Set", "Users", "Modify All", "View All", "Risk"],
+          profSum.permissionSetList
+            .slice()
+            .sort((a, b) => (b._userCount || 0) - (a._userCount || 0))
+            .map((ps) => {
+              const danger = (ps.PermissionsModifyAllData ? 1 : 0) + (ps.PermissionsViewAllData ? 1 : 0);
+              const riskCls = danger >= 2 ? "c-critical" : danger >= 1 ? "c-fair" : "c-excellent";
+              const riskLabel = danger >= 2 ? "⚠ High" : danger >= 1 ? "△ Medium" : "✓ Clean";
+              const yes = '<span style="color:var(--score-critical);font-weight:700">✓</span>';
+              const no = '<span style="color:var(--sf-text-muted)">—</span>';
+              return [
+                '<span style="font-weight:600">' + escHtml(ps.Label || ps.Name) + "</span>",
+                String(ps._userCount != null ? ps._userCount : "—"),
+                ps.PermissionsModifyAllData ? yes : no,
+                ps.PermissionsViewAllData ? yes : no,
+                '<span class="' + riskCls + '" style="font-weight:600">' + riskLabel + "</span>",
+              ];
+            }),
+        )}
+      </div>`
+          : ""
+      }
+
+      <!-- Permission Set Groups -->
+      ${
+        profSum && profSum.permissionSetGroupList && profSum.permissionSetGroupList.length
+          ? `
+      <div class="mb-24">
+        <div class="section-title">🧩 Permission Set Groups (${profSum.permissionSetGroupList.length})</div>
+        <div style="font-size:11.5px;color:var(--sf-text-muted);margin:-4px 0 10px">Modern permission model — groups bundle permission sets. <strong>Outdated</strong> status means the aggregate permissions need recalculation and should be reviewed.</div>
+        ${renderPaginatedDataTable(
+          "sec-psg",
+          ["Group", "Status", "Users"],
+          profSum.permissionSetGroupList
+            .slice()
+            .sort((a, b) => (b._userCount || 0) - (a._userCount || 0))
+            .map((g) => {
+              const outdated = (g.Status || "").toLowerCase() === "outdated";
+              const statusHtml = outdated
+                ? '<span class="c-critical" style="font-weight:600">⚠ Outdated</span>'
+                : '<span class="c-excellent" style="font-weight:600">✓ ' + escHtml(g.Status || "Updated") + "</span>";
+              return [
+                '<span style="font-weight:600">' + escHtml(g.MasterLabel || g.DeveloperName) + "</span>",
+                statusHtml,
+                String(g._userCount != null ? g._userCount : "—"),
+              ];
+            }),
+        )}
+      </div>`
+          : ""
+      }
+
+      <!-- Users by Profile (all) -->
       ${
         userSum &&
         userSum.profileDistribution &&
         userSum.profileDistribution.length
           ? `
       <div class="mb-24">
-        <div class="section-title">👥 Users by Profile (Top 15)</div>
+        <div class="section-title">👥 Users by Profile (${userSum.profileDistribution.length})</div>
         ${renderPaginatedDataTable(
           "sec-user-dist",
           ["Profile", "User Count", "% of Active"],
-          userSum.profileDistribution.slice(0, 15).map((p) => {
-            const pct = userSum.totalActiveUsers
-              ? Math.round((p.count / userSum.totalActiveUsers) * 100)
-              : 0;
-            return [
-              '<span style="font-weight:600">' +
-                escHtml(p.profileName) +
-                "</span>",
-              String(p.count),
-              '<div style="display:flex;align-items:center;gap:8px"><div style="flex:1;background:var(--sf-border);border-radius:3px;height:8px"><div style="width:' +
-                pct +
-                '%;background:var(--chart-1);height:8px;border-radius:3px"></div></div><span style="font-size:11px">' +
-                pct +
-                "%</span></div>",
-            ];
-          }),
+          userSum.profileDistribution
+            .slice()
+            .sort((a, b) => b.count - a.count)
+            .map((p) => {
+              const pct = userSum.totalActiveUsers
+                ? Math.round((p.count / userSum.totalActiveUsers) * 100)
+                : 0;
+              return [
+                '<span style="font-weight:600">' +
+                  escHtml(p.profileName) +
+                  "</span>",
+                String(p.count),
+                '<div style="display:flex;align-items:center;gap:8px"><div style="flex:1;background:var(--sf-border);border-radius:3px;height:8px"><div style="width:' +
+                  pct +
+                  '%;background:var(--chart-1);height:8px;border-radius:3px"></div></div><span style="font-size:11px">' +
+                  pct +
+                  "%</span></div>",
+              ];
+            }),
         )}
       </div>`
           : ""
-      }`;
+      }
+
+      <!-- Security Vulnerabilities -->
+      ${renderSecurityVulnerabilities(allIssues)}`;
+  }
+
+  // Grouped, human-readable list of all security findings (#5).
+  function renderSecurityVulnerabilities(allIssues) {
+    if (!allIssues || !allIssues.length) {
+      return `
+      <div class="mb-24">
+        <div class="section-title">🚨 Security Vulnerabilities</div>
+        <div style="padding:14px 16px;border-radius:8px;background:var(--vscode-editor-background);font-size:12.5px;color:var(--sf-text-muted)">✓ No security, profile, or user-governance findings were raised for this org.</div>
+      </div>`;
+    }
+    const order = { error: 0, warning: 1, info: 2 };
+    const sevMeta = {
+      error: { label: "Critical", cls: "c-critical", icon: "⛔" },
+      warning: { label: "Warning", cls: "c-fair", icon: "⚠️" },
+      info: { label: "Informational", cls: "", icon: "ℹ️" },
+    };
+    const sorted = allIssues
+      .slice()
+      .sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
+    const groups = { error: [], warning: [], info: [] };
+    sorted.forEach((i) => {
+      (groups[i.severity] || groups.info).push(i);
+    });
+    const blocks = ["error", "warning", "info"]
+      .filter((sev) => groups[sev].length)
+      .map((sev) => {
+        const m = sevMeta[sev];
+        const rows = groups[sev]
+          .map((i) => {
+            const why = i.description ? escHtml(i.description) : "";
+            const fix = i.suggestion
+              ? `<div style="font-size:11.5px;color:var(--sf-text-muted);margin-top:4px">💡 ${escHtml(i.suggestion)}</div>`
+              : "";
+            return `
+              <div style="padding:10px 12px;border-left:3px solid var(--sf-border);background:var(--vscode-editor-background);border-radius:0 6px 6px 0;margin-bottom:8px">
+                <div style="font-size:12.5px;font-weight:600">${escHtml(i.message || i.ruleId || "Finding")}</div>
+                ${why ? `<div style="font-size:11.5px;color:var(--sf-text-muted);margin-top:3px;line-height:1.5">${why}</div>` : ""}
+                ${fix}
+              </div>`;
+          })
+          .join("");
+        return `
+          <div style="margin-bottom:14px">
+            <div class="${m.cls}" style="font-size:12px;font-weight:700;margin-bottom:8px">${m.icon} ${m.label} (${groups[sev].length})</div>
+            ${rows}
+          </div>`;
+      })
+      .join("");
+    return `
+      <div class="mb-24">
+        <div class="section-title">🚨 Security Vulnerabilities (${allIssues.length})</div>
+        <div style="font-size:11.5px;color:var(--sf-text-muted);margin:-4px 0 12px">All security, profile-security, and user-governance findings, grouped by severity. Each shows why it matters and how to remediate.</div>
+        ${blocks}
+      </div>`;
   }
 
   // ── Sortable, paginated issue table ──────────────────────────────────────
@@ -4650,6 +5117,356 @@
       userSummary: results.userSummary || null,
       profileSummary: results.profileSummary || null,
     };
+  }
+
+  /**
+   * Build the data-driven CTA Architecture Review page HTML.
+   * Used by both the full health-report PDF and the standalone CTA PDF export.
+   * Returns an empty string when no ctaReview is available.
+   */
+  function buildCtaPageHtml(iconDataUri, org, now, isStandalone) {
+    function esc(str) {
+      if (!str) return "";
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    const ctaReview = results.ctaReview;
+    if (!ctaReview || !ctaReview.verdict) { return ""; }
+
+    const cvc = ctaReview.verdict === "Go" ? "#1a7f45" : ctaReview.verdict === "No-Go" ? "#c0392b" : "#b45309";
+    const cvBg = ctaReview.verdict === "Go" ? "#d1fae5" : ctaReview.verdict === "No-Go" ? "#fee2e2" : "#fef3c7";
+    const cvIcon = ctaReview.verdict === "Go" ? "✅" : ctaReview.verdict === "No-Go" ? "🚫" : "⚠️";
+    const cvLabel = ctaReview.verdict === "Go" ? "Architecture Approved" : ctaReview.verdict === "No-Go" ? "Significant Issues Found" : "Conditional Approval";
+
+    const pdfH = (icon, title, badge) =>
+      `<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding-bottom:10px;border-bottom:1.5px solid #e5e7eb">
+        <span style="font-size:20px">${icon}</span>
+        <span style="font-size:14px;font-weight:800;color:#1a1a2e;flex:1">${title}</span>
+        <span style="font-size:9px;color:#6b7280;background:#f3f4f6;padding:2px 8px;border-radius:10px">${badge}</span>
+      </div>`;
+    const pdfCard = (content) =>
+      `<div style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px 20px;margin-bottom:14px">${content}</div>`;
+    const effortColor = (e) => e === "Low" ? "#1a7f45" : e === "High" ? "#c0392b" : "#b45309";
+    const effortBg    = (e) => e === "Low" ? "#d1fae5" : e === "High" ? "#fee2e2" : "#fef3c7";
+    const statusColor = (s) => s === "Pass" ? "#1a7f45" : s === "Fail" ? "#c0392b" : "#b45309";
+    const statusBg    = (s) => s === "Pass" ? "#d1fae5" : s === "Fail" ? "#fee2e2" : "#fef3c7";
+
+    // §1 Verdict
+    const matLvl = ctaReview.architectureMaturity;
+    const maturityBadgePdf = matLvl
+      ? `<div style="margin-top:8px;font-size:11px;color:#6b7280">Architecture Maturity: <strong style="color:${cvc}">Level ${matLvl.level} — ${esc(matLvl.label)}</strong></div>`
+      : "";
+    const verdictBlock = `<div style="background:${cvBg};border:2px solid ${cvc}40;border-radius:10px;padding:16px 20px;margin-bottom:14px;display:flex;align-items:center;gap:14px">
+        <span style="font-size:28px">${cvIcon}</span>
+        <div>
+          <div style="font-size:17px;font-weight:800;color:${cvc}">${esc(ctaReview.verdict)} — ${cvLabel}</div>
+          <div style="font-size:10px;color:#6b7280;margin-top:3px">✨ ${esc(ctaReview.modelUsed || "AI")} · ${ctaReview.generatedAt ? new Date(ctaReview.generatedAt).toLocaleString() : "Generated"}</div>
+          ${maturityBadgePdf}
+        </div>
+      </div>`;
+
+    // §2 Executive Summary
+    const execBlock = pdfCard(
+      `<div style="font-size:9px;color:#0176d3;font-weight:700;text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px">§1 Executive Summary</div>` +
+      `<p style="font-size:12px;color:#1f2937;line-height:1.7;margin:0">${esc(ctaReview.executiveSummary || "")}</p>`
+    );
+
+    // §3 Architecture Maturity
+    const maturityBlock = matLvl
+      ? pdfCard(
+          pdfH("🏅", "Architecture Maturity", "§2") +
+          `<div style="display:flex;align-items:center;gap:4px;margin-bottom:8px">` +
+          ["Ad Hoc","Repeatable","Defined","Managed","Optimised"].map((lbl, i) => {
+            const active = i + 1 === matLvl.level;
+            const colors = ["#c0392b","#f97316","#b45309","#1a7f45","#0176d3"];
+            return `<div style="flex:1;text-align:center;padding:4px 2px;border-radius:4px;font-size:9px;font-weight:${active ? 800 : 400};background:${active ? colors[i] : "#f3f4f6"};color:${active ? "#fff" : "#6b7280"}">${i + 1}<br>${lbl}</div>`;
+          }).join('<div style="width:4px;height:4px;background:#d1d5db;border-radius:50%;margin-top:10px"></div>') +
+          `</div><p style="font-size:11px;color:#374151;line-height:1.6;margin:0">${esc(matLvl.summary)}</p>`
+        )
+      : "";
+
+    // §4 Business Impact
+    const bi = ctaReview.businessImpactSummary;
+    const biBlock = bi
+      ? pdfCard(
+          pdfH("💼", "Business Impact Summary", "§3") +
+          `<div style="display:flex;gap:10px;margin-bottom:8px">
+            <div style="flex:1;padding:10px;background:#fff5f5;border-radius:6px;border-top:3px solid #c0392b"><div style="font-size:9px;font-weight:700;color:#c0392b;margin-bottom:4px">💰 Revenue Risk</div><div style="font-size:11px;color:#374151">${esc(bi.revenueRisk)}</div></div>
+            <div style="flex:1;padding:10px;background:#fffbeb;border-radius:6px;border-top:3px solid #b45309"><div style="font-size:9px;font-weight:700;color:#b45309;margin-bottom:4px">⚙️ Operational Risk</div><div style="font-size:11px;color:#374151">${esc(bi.operationalRisk)}</div></div>
+            <div style="flex:1;padding:10px;background:#faf5ff;border-radius:6px;border-top:3px solid #7c3aed"><div style="font-size:9px;font-weight:700;color:#7c3aed;margin-bottom:4px">🔏 Compliance Risk</div><div style="font-size:11px;color:#374151">${esc(bi.complianceRisk)}</div></div>
+          </div>`
+        )
+      : "";
+
+    // §5 Org Profile
+    const op = ctaReview.orgProfile;
+    const opBlock = op
+      ? pdfCard(
+          pdfH("🏢", "Org Profile", "§4") +
+          `<div style="display:flex;flex-wrap:wrap;gap:8px">
+            <div style="flex:1;min-width:120px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280">Complexity</span><br><span style="font-size:12px;font-weight:700">${esc(op.complexity)}</span></div>
+            <div style="flex:1;min-width:120px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280">User Scale</span><br><span style="font-size:12px">${esc(op.userScale)}</span></div>
+            <div style="flex:1;min-width:120px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280">Integrations</span><br><span style="font-size:12px">${esc(op.integrationFootprint)}</span></div>
+            <div style="flex:1;min-width:120px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280">Customisation</span><br><span style="font-size:12px">${esc(op.customizationLevel)}</span></div>
+          </div>`
+        )
+      : "";
+
+    // §6 Health Score Breakdown
+    const hsbBlock = (ctaReview.healthScoreBreakdown || []).length
+      ? pdfCard(
+          pdfH("📊", "Health Score Breakdown", "§5") +
+          (ctaReview.healthScoreBreakdown || []).map((s) => {
+            const pct = Math.min(100, Math.round((s.score / (s.maxScore || 100)) * 100));
+            const barC = pct >= 75 ? "#1a7f45" : pct >= 50 ? "#b45309" : "#c0392b";
+            const tIcon = { improving: "↑", stable: "→", declining: "↓" }[s.trend] || "→";
+            return `<div style="margin-bottom:8px">
+              <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+                <span style="font-size:11px;font-weight:600">${esc(s.area)}</span>
+                <span style="font-size:11px;font-weight:700;color:${barC}">${s.score}/100 ${tIcon}</span>
+              </div>
+              <div style="height:6px;background:#f3f4f6;border-radius:3px;overflow:hidden">
+                <div style="height:6px;background:${barC};width:${pct}%;border-radius:3px"></div>
+              </div>
+              <div style="font-size:10px;color:#6b7280;margin-top:2px">${esc(s.keyFinding)}</div>
+            </div>`;
+          }).join("")
+        )
+      : "";
+
+    // §7 Top Critical Issues
+    const critIssBlock = (ctaReview.topCriticalIssues || []).length
+      ? pdfCard(
+          pdfH("🚨", "Top Critical Issues", "§6") +
+          `<table style="width:100%;border-collapse:collapse">
+            <thead><tr style="border-bottom:1.5px solid #e5e7eb">
+              <th style="text-align:center;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280;width:30px">#</th>
+              <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Issue</th>
+              <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280;width:70px">Severity</th>
+              <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Impact</th>
+              <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Effort</th>
+            </tr></thead>
+            <tbody>${(ctaReview.topCriticalIssues || []).map((iss, i) => {
+              const sC = iss.severity === "Critical" ? "#c0392b" : "#b45309";
+              const sBg = iss.severity === "Critical" ? "#fee2e2" : "#fef3c7";
+              return `<tr style="background:${i % 2 ? "#f9fafb" : "#fff"}">
+                <td style="padding:6px 8px;text-align:center;font-weight:700;font-size:11px;border-bottom:1px solid #e5e7eb">${iss.rank}</td>
+                <td style="padding:6px 8px;font-weight:600;font-size:11px;border-bottom:1px solid #e5e7eb">${esc(iss.title)}<br><span style="font-size:9px;color:#6b7280;font-weight:400">${esc(iss.domain)}</span></td>
+                <td style="padding:6px 8px;border-bottom:1px solid #e5e7eb"><span style="font-size:9px;font-weight:700;color:${sC};background:${sBg};padding:2px 6px;border-radius:10px">${esc(iss.severity)}</span></td>
+                <td style="padding:6px 8px;font-size:10px;border-bottom:1px solid #e5e7eb">${esc(iss.impact)}</td>
+                <td style="padding:6px 8px;font-size:10px;border-bottom:1px solid #e5e7eb">${esc(iss.effortEstimate)}</td>
+              </tr>`;
+            }).join("")}</tbody>
+          </table>`
+        )
+      : "";
+
+    // §8 Risk Analysis
+    const ra = ctaReview.riskAnalysis;
+    const riskBlock = ra
+      ? pdfCard(
+          pdfH("🔥", "Risk Analysis", "§7") +
+          `<div style="display:flex;gap:16px">
+            <div style="flex:1">
+              <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-bottom:4px">Probability of Incident</div>
+              <div style="font-size:11px;color:#374151;margin-bottom:8px">${esc(ra.probabilityOfIncident)}</div>
+              <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-bottom:4px">Time to Risk</div>
+              <div style="font-size:12px;font-weight:700;color:#c0392b">${esc(ra.timeToRisk)}</div>
+            </div>
+            <div style="flex:1">
+              <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-bottom:6px">Risk Heatmap</div>
+              ${(ra.riskHeatmap || []).map((cell) => {
+                const l = { Low: 1, Medium: 2, High: 3 }[cell.likelihood] || 1;
+                const im = { Low: 1, Medium: 2, High: 3 }[cell.impact] || 1;
+                const r = l * im;
+                const rc = r >= 6 ? "#c0392b" : r >= 3 ? "#b45309" : "#1a7f45";
+                const rb = r >= 6 ? "#fee2e2" : r >= 3 ? "#fef3c7" : "#d1fae5";
+                return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;padding:3px 6px;background:${rb};border-radius:4px;border-left:3px solid ${rc}">
+                  <span style="font-size:10px;flex:1">${esc(cell.domain)}</span>
+                  <span style="font-size:9px;font-weight:700;color:${rc}">L:${esc(cell.likelihood)} I:${esc(cell.impact)}</span>
+                </div>`;
+              }).join("")}
+            </div>
+          </div>`
+        )
+      : "";
+
+    // §9 Benchmark Comparison
+    const bmBlock = (ctaReview.benchmarkComparison || []).length
+      ? pdfCard(
+          pdfH("📈", "Benchmark Comparison", "§8") +
+          `<table style="width:100%;border-collapse:collapse">
+            <thead><tr style="border-bottom:1.5px solid #e5e7eb">
+              <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Metric</th>
+              <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Your Org</th>
+              <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Avg</th>
+              <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Top 25%</th>
+              <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Status</th>
+            </tr></thead>
+            <tbody>${(ctaReview.benchmarkComparison || []).map((b, i) => {
+              const stC = b.status === "Above" ? "#1a7f45" : b.status === "At" ? "#b45309" : "#c0392b";
+              const stBgc = b.status === "Above" ? "#d1fae5" : b.status === "At" ? "#fef3c7" : "#fee2e2";
+              return `<tr style="background:${i % 2 ? "#f9fafb" : "#fff"}">
+                <td style="padding:5px 8px;font-weight:600;font-size:11px;border-bottom:1px solid #e5e7eb">${esc(b.metric)}</td>
+                <td style="padding:5px 8px;font-size:11px;font-weight:700;border-bottom:1px solid #e5e7eb">${esc(String(b.orgValue))}</td>
+                <td style="padding:5px 8px;font-size:11px;color:#6b7280;border-bottom:1px solid #e5e7eb">${esc(String(b.industryAvg))}</td>
+                <td style="padding:5px 8px;font-size:11px;color:#6b7280;border-bottom:1px solid #e5e7eb">${esc(String(b.topQuartile))}</td>
+                <td style="padding:5px 8px;border-bottom:1px solid #e5e7eb"><span style="font-size:9px;font-weight:700;color:${stC};background:${stBgc};padding:2px 6px;border-radius:10px">${esc(b.status)}</span></td>
+              </tr>`;
+            }).join("")}</tbody>
+          </table>`
+        )
+      : "";
+
+    // §10 Domain Findings
+    const domainBlock = pdfCard(
+      pdfH("🏗️", "Domain Findings", "§9") +
+      `<table style="width:100%;border-collapse:collapse">
+        <thead><tr style="border-bottom:1.5px solid #e5e7eb">
+          <th style="text-align:left;padding:6px 10px;font-size:9px;text-transform:uppercase;color:#6b7280;width:20%">Domain</th>
+          <th style="text-align:left;padding:6px 10px;font-size:9px;text-transform:uppercase;color:#6b7280;width:10%">Status</th>
+          <th style="text-align:left;padding:6px 10px;font-size:9px;text-transform:uppercase;color:#6b7280">Analysis</th>
+        </tr></thead>
+        <tbody>${(ctaReview.domainFindings || []).map((d) => {
+          const stC = statusColor(d.status);
+          const stBgc = statusBg(d.status);
+          return `<tr style="border-bottom:1px solid #e5e7eb">
+            <td style="padding:8px 10px;font-weight:600;font-size:11px">${esc(d.domain)}</td>
+            <td style="padding:8px 10px"><span style="font-size:9px;font-weight:700;color:${stC};background:${stBgc};padding:2px 6px;border-radius:10px">${esc(d.status)}</span></td>
+            <td style="padding:8px 10px;font-size:11px;line-height:1.5">${esc(d.analysis || "")}</td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table>`
+    );
+
+    // §11 AI Insights
+    const ai = ctaReview.aiInsights;
+    const aiBlock = ai
+      ? pdfCard(
+          pdfH("✨", "AI Insights", "§10") +
+          `<div style="display:flex;gap:12px">
+            ${(ai.hiddenRisks || []).length ? `<div style="flex:1"><div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#c0392b;margin-bottom:6px">🔍 Hidden Risks</div>${ai.hiddenRisks.map((it) => `<div style="font-size:11px;color:#374151;margin-bottom:4px;padding-left:8px;border-left:2px solid #c0392b">${esc(it)}</div>`).join("")}</div>` : ""}
+            ${(ai.predictions || []).length ? `<div style="flex:1"><div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#7c3aed;margin-bottom:6px">🔮 Predictions</div>${ai.predictions.map((it) => `<div style="font-size:11px;color:#374151;margin-bottom:4px;padding-left:8px;border-left:2px solid #7c3aed">${esc(it)}</div>`).join("")}</div>` : ""}
+            ${(ai.unusualPatterns || []).length ? `<div style="flex:1"><div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#b45309;margin-bottom:6px">⚡ Unusual Patterns</div>${ai.unusualPatterns.map((it) => `<div style="font-size:11px;color:#374151;margin-bottom:4px;padding-left:8px;border-left:2px solid #b45309">${esc(it)}</div>`).join("")}</div>` : ""}
+          </div>`
+        )
+      : "";
+
+    // §12 Architecture Observations (SWOT)
+    const obsBlock = (ctaReview.architectureObservations || []).length
+      ? pdfCard(
+          pdfH("🔭", "Architecture Observations", "§11") +
+          (() => {
+            const grouped = { Strength: [], Weakness: [], Opportunity: [], Threat: [] };
+            (ctaReview.architectureObservations || []).forEach((o) => {
+              if (grouped[o.classification]) grouped[o.classification].push(o.observation);
+            });
+            const clr = { Strength: "#1a7f45", Weakness: "#c0392b", Opportunity: "#0176d3", Threat: "#b45309" };
+            const clrBg = { Strength: "#d1fae5", Weakness: "#fee2e2", Opportunity: "#dbeafe", Threat: "#fef3c7" };
+            const icons = { Strength: "💪", Weakness: "⚠️", Opportunity: "🚀", Threat: "🔴" };
+            const clsLabel = { Strength: "Strengths", Weakness: "Weaknesses", Opportunity: "Opportunities", Threat: "Threats" };
+            return `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">` +
+              ["Strength","Weakness","Opportunity","Threat"].map((cls) =>
+                `<div style="padding:10px;border-radius:6px;background:${clrBg[cls]};border-left:3px solid ${clr[cls]}">
+                  <div style="font-size:9px;font-weight:700;color:${clr[cls]};margin-bottom:6px">${icons[cls]} ${clsLabel[cls]}</div>
+                  ${grouped[cls].map((obs) => `<div style="font-size:10px;color:#374151;margin-bottom:3px">· ${esc(obs)}</div>`).join("") || '<div style="font-size:10px;color:#9ca3af">None identified</div>'}
+                </div>`
+              ).join("") + `</div>`;
+          })()
+        )
+      : "";
+
+    // §13 Recommendations
+    const rec = ctaReview.recommendations;
+    const recBlock = rec
+      ? pdfCard(
+          pdfH("⚡", "Recommendations", "§12") +
+          ((rec.quickWins || []).length
+            ? `<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;margin-bottom:6px">Quick Wins (1-2 sprints)</div>` +
+              (rec.quickWins || []).map((w, i) =>
+                `<div style="display:flex;gap:8px;margin-bottom:6px;padding:6px 10px;background:#f0fdf4;border-radius:6px;border:1px solid #bbf7d0">
+                  <span style="min-width:18px;height:18px;background:#1a7f45;color:#fff;border-radius:50%;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center">${i + 1}</span>
+                  <div><div style="font-size:11px">${esc(w.action)}</div><span style="font-size:9px;font-weight:700;color:${effortColor(w.effort)};background:${effortBg(w.effort)};padding:1px 5px;border-radius:8px">${esc(w.effort)}</span> <span style="font-size:10px;color:#6b7280">${esc(w.impact)}</span></div>
+                </div>`
+              ).join("")
+            : "") +
+          ((rec.strategic || []).length
+            ? `<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;margin:10px 0 6px">Strategic Initiatives</div>` +
+              (rec.strategic || []).map((s, i) =>
+                `<div style="display:flex;gap:8px;margin-bottom:6px;padding:6px 10px;background:#eff6ff;border-radius:6px;border:1px solid #bfdbfe">
+                  <span style="min-width:18px;height:18px;background:#0176d3;color:#fff;border-radius:50%;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center">${i + 1}</span>
+                  <div><div style="font-size:11px;font-weight:600">${esc(s.action)}</div><div style="display:flex;gap:6px;margin-top:2px"><span style="font-size:10px;color:#6b7280">📅 ${esc(s.timeline)}</span> <span style="font-size:9px;font-weight:700;color:${effortColor(s.effort)};background:${effortBg(s.effort)};padding:1px 5px;border-radius:8px">${esc(s.effort)}</span> <span style="font-size:10px;color:#6b7280">${esc(s.impact)}</span></div></div>
+                </div>`
+              ).join("")
+            : "")
+        )
+      : "";
+
+    // §14 Cost of Inaction
+    const coi = ctaReview.costOfInaction;
+    const coiBlock = coi
+      ? pdfCard(
+          pdfH("⏳", "Cost of Inaction", "§13") +
+          `<div style="display:flex;gap:12px;margin-bottom:10px">
+            <div style="flex:1;padding:10px;background:#fff5f5;border-radius:6px">
+              <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#c0392b;margin-bottom:4px">Financial Impact</div>
+              <div style="font-size:11px;color:#374151">${esc(coi.financialImpact)}</div>
+            </div>
+            <div style="flex:1;padding:10px;background:#fffbeb;border-radius:6px">
+              <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#b45309;margin-bottom:4px">Technical Debt Growth</div>
+              <div style="font-size:11px;color:#374151">${esc(coi.technicalDebtGrowth)}</div>
+            </div>
+          </div>` +
+          ((coi.risks || []).length
+            ? `<div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-bottom:4px">Compounding Risks</div>` +
+              coi.risks.map((r) => `<div style="font-size:11px;color:#374151;margin-bottom:3px;display:flex;gap:6px"><span style="color:#c0392b">●</span>${esc(r)}</div>`).join("")
+            : "")
+        )
+      : "";
+
+    // §15 Final Recommendation
+    const fr = ctaReview.finalRecommendation;
+    const finalBlock = fr
+      ? `<div style="background:${cvBg};border:2px solid ${cvc}30;border-radius:10px;padding:16px 20px;margin-bottom:14px">
+          ${pdfH(cvIcon, "Final CTA Recommendation", "§14")}
+          <p style="font-size:12px;font-weight:500;color:#1f2937;line-height:1.7;margin-bottom:12px">${esc(fr.summary)}</p>
+          ${(fr.nextSteps || []).length
+            ? `<div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-bottom:6px">Immediate Next Steps</div>` +
+              fr.nextSteps.map((step, i) =>
+                `<div style="display:flex;gap:8px;margin-bottom:4px"><span style="min-width:16px;height:16px;background:${cvc};color:#fff;border-radius:50%;font-size:8px;font-weight:700;display:flex;align-items:center;justify-content:center">${i + 1}</span><span style="font-size:11px">${esc(step)}</span></div>`
+              ).join("")
+            : ""}
+          ${fr.proposedTimeline ? `<div style="margin-top:8px;padding:4px 8px;background:rgba(0,0,0,.04);border-radius:6px;font-size:8.5px;color:#374151;line-height:1.5"><strong>📅 </strong>${esc(fr.proposedTimeline)}</div>` : ""}
+        </div>`
+      : "";
+
+    const logoBar = iconDataUri
+      ? `<span><img src="${iconDataUri}" style="width:18px;height:18px;object-fit:contain;border-radius:3px;vertical-align:middle;margin-right:4px;opacity:.7" alt="" />OrgPulse · CTA Architecture Review</span>`
+      : "<span>OrgPulse · CTA Architecture Review</span>";
+
+    return '<div class="page" style="position:relative">' +
+      (iconDataUri ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:0;opacity:.04"><img src="${iconDataUri}" style="width:260px;height:260px;object-fit:contain" alt="" /></div>` : "") +
+      (isStandalone ? "" : `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding-bottom:8px;border-bottom:1px solid #e5e7eb;font-size:10px;color:#9ca3af;position:relative;z-index:1">${logoBar}<span>${esc(org)} · ${now}</span></div>`) +
+      `<div style="font-size:19px;font-weight:800;color:#1a1a2e;margin-bottom:4px;position:relative;z-index:1">🧠 CTA Architecture Review</div>` +
+      `<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:20px;padding-bottom:14px;border-bottom:2px solid #e5e7eb;position:relative;z-index:1">Executive Architecture Assessment · Prepared by OrgPulse</div>` +
+      verdictBlock + execBlock +
+      '<div style="page-break-before:always;padding-top:2px">' +
+        maturityBlock + biBlock + opBlock + hsbBlock +
+      '</div>' +
+      '<div style="page-break-before:always;padding-top:2px">' +
+        critIssBlock + riskBlock + bmBlock +
+      '</div>' +
+      '<div style="page-break-before:always;padding-top:2px">' +
+        domainBlock + aiBlock + obsBlock +
+      '</div>' +
+      '<div style="page-break-before:always;padding-top:2px">' +
+        recBlock + coiBlock + finalBlock +
+      '</div>' +
+      '</div>';
   }
 
   function printReportDirectly(aiSummary, iconDataUri) {
@@ -5577,455 +6394,8 @@
         </div>
       </div>`;
 
-    // ── CTA Architecture Review Page (v1.9.2 — 12-section premium report) ──
-    const ctaReview = results.ctaReview;
-    let ctaPage = "";
-    if (ctaReview && ctaReview.verdict) {
-      const cvc =
-        ctaReview.verdict === "Go"
-          ? "#1a7f45"
-          : ctaReview.verdict === "No-Go"
-            ? "#c0392b"
-            : "#b45309";
-      const cvBg =
-        ctaReview.verdict === "Go"
-          ? "#d1fae5"
-          : ctaReview.verdict === "No-Go"
-            ? "#fee2e2"
-            : "#fef3c7";
-      const cvIcon =
-        ctaReview.verdict === "Go"
-          ? "✅"
-          : ctaReview.verdict === "No-Go"
-            ? "🚫"
-            : "⚠️";
-      const cvLabel =
-        ctaReview.verdict === "Go"
-          ? "Architecture Approved"
-          : ctaReview.verdict === "No-Go"
-            ? "Significant Issues Found"
-            : "Conditional Approval";
-
-      // ── Helpers ──
-      const pdfH = (icon, title, badge) =>
-        `<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding-bottom:10px;border-bottom:1.5px solid #e5e7eb">
-          <span style="font-size:20px">${icon}</span>
-          <span style="font-size:14px;font-weight:800;color:#1a1a2e;flex:1">${title}</span>
-          <span style="font-size:9px;color:#6b7280;background:#f3f4f6;padding:2px 8px;border-radius:10px">${badge}</span>
-        </div>`;
-
-      const pdfCard = (content) =>
-        `<div style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px 20px;margin-bottom:14px">${content}</div>`;
-
-      const effortColor = (e) =>
-        e === "Low" ? "#1a7f45" : e === "High" ? "#c0392b" : "#b45309";
-      const effortBg = (e) =>
-        e === "Low" ? "#d1fae5" : e === "High" ? "#fee2e2" : "#fef3c7";
-      const statusColor = (s) =>
-        s === "Pass" ? "#1a7f45" : s === "Fail" ? "#c0392b" : "#b45309";
-      const statusBg = (s) =>
-        s === "Pass" ? "#d1fae5" : s === "Fail" ? "#fee2e2" : "#fef3c7";
-
-      // §1 Verdict + maturity
-      const matLvl = ctaReview.architectureMaturity;
-      const maturityBadgePdf = matLvl
-        ? `<div style="margin-top:8px;font-size:11px;color:#6b7280">Architecture Maturity: <strong style="color:${cvc}">Level ${matLvl.level} — ${esc(matLvl.label)}</strong></div>`
-        : "";
-
-      const verdictBlock = `<div style="background:${cvBg};border:2px solid ${cvc}40;border-radius:10px;padding:16px 20px;margin-bottom:14px;display:flex;align-items:center;gap:14px">
-          <span style="font-size:28px">${cvIcon}</span>
-          <div>
-            <div style="font-size:17px;font-weight:800;color:${cvc}">${esc(ctaReview.verdict)} — ${cvLabel}</div>
-            <div style="font-size:10px;color:#6b7280;margin-top:3px">✨ ${esc(ctaReview.modelUsed || "AI")} · ${ctaReview.generatedAt ? new Date(ctaReview.generatedAt).toLocaleString() : "Generated"}</div>
-            ${maturityBadgePdf}
-          </div>
-        </div>`;
-
-      // §2 Executive Summary
-      const execBlock = pdfCard(
-        `<div style="font-size:9px;color:#0176d3;font-weight:700;text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px">§1 Executive Summary</div>` +
-          `<p style="font-size:12px;color:#1f2937;line-height:1.7;margin:0">${esc(ctaReview.executiveSummary || "")}</p>`,
-      );
-
-      // §3 Architecture Maturity
-      const maturityBlock = matLvl
-        ? pdfCard(
-            pdfH("🏅", "Architecture Maturity", "§2") +
-              `<div style="display:flex;align-items:center;gap:4px;margin-bottom:8px">` +
-              ["Ad Hoc", "Repeatable", "Defined", "Managed", "Optimised"]
-                .map((lbl, i) => {
-                  const active = i + 1 === matLvl.level;
-                  const colors = [
-                    "#c0392b",
-                    "#f97316",
-                    "#b45309",
-                    "#1a7f45",
-                    "#0176d3",
-                  ];
-                  return `<div style="flex:1;text-align:center;padding:4px 2px;border-radius:4px;font-size:9px;font-weight:${active ? 800 : 400};background:${active ? colors[i] : "#f3f4f6"};color:${active ? "#fff" : "#6b7280"}">${i + 1}<br>${lbl}</div>`;
-                })
-                .join(
-                  '<div style="width:4px;height:4px;background:#d1d5db;border-radius:50%;margin-top:10px"></div>',
-                ) +
-              `</div><p style="font-size:11px;color:#374151;line-height:1.6;margin:0">${esc(matLvl.summary)}</p>`,
-          )
-        : "";
-
-      // §4 Business Impact
-      const bi = ctaReview.businessImpactSummary;
-      const biBlock = bi
-        ? pdfCard(
-            pdfH("💼", "Business Impact Summary", "§3") +
-              `<div style="display:flex;gap:10px;margin-bottom:8px">
-          <div style="flex:1;padding:10px;background:#fff5f5;border-radius:6px;border-top:3px solid #c0392b"><div style="font-size:9px;font-weight:700;color:#c0392b;margin-bottom:4px">💰 Revenue Risk</div><div style="font-size:11px;color:#374151">${esc(bi.revenueRisk)}</div></div>
-          <div style="flex:1;padding:10px;background:#fffbeb;border-radius:6px;border-top:3px solid #b45309"><div style="font-size:9px;font-weight:700;color:#b45309;margin-bottom:4px">⚙️ Operational Risk</div><div style="font-size:11px;color:#374151">${esc(bi.operationalRisk)}</div></div>
-          <div style="flex:1;padding:10px;background:#faf5ff;border-radius:6px;border-top:3px solid #7c3aed"><div style="font-size:9px;font-weight:700;color:#7c3aed;margin-bottom:4px">🔏 Compliance Risk</div><div style="font-size:11px;color:#374151">${esc(bi.complianceRisk)}</div></div>
-        </div>`,
-          )
-        : "";
-
-      // §5 Org Profile
-      const op = ctaReview.orgProfile;
-      const opBlock = op
-        ? pdfCard(
-            pdfH("🏢", "Org Profile", "§4") +
-              `<div style="display:flex;flex-wrap:wrap;gap:8px">
-          <div style="flex:1;min-width:120px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280">Complexity</span><br><span style="font-size:12px;font-weight:700">${esc(op.complexity)}</span></div>
-          <div style="flex:1;min-width:120px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280">User Scale</span><br><span style="font-size:12px">${esc(op.userScale)}</span></div>
-          <div style="flex:1;min-width:120px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280">Integrations</span><br><span style="font-size:12px">${esc(op.integrationFootprint)}</span></div>
-          <div style="flex:1;min-width:120px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280">Customisation</span><br><span style="font-size:12px">${esc(op.customizationLevel)}</span></div>
-        </div>`,
-          )
-        : "";
-
-      // §6 Health Score Breakdown
-      const hsbBlock = (ctaReview.healthScoreBreakdown || []).length
-        ? pdfCard(
-            pdfH("📊", "Health Score Breakdown", "§5") +
-              (ctaReview.healthScoreBreakdown || [])
-                .map((s) => {
-                  const pct = Math.min(
-                    100,
-                    Math.round((s.score / (s.maxScore || 100)) * 100),
-                  );
-                  const barC =
-                    pct >= 75 ? "#1a7f45" : pct >= 50 ? "#b45309" : "#c0392b";
-                  const tIcon =
-                    { improving: "↑", stable: "→", declining: "↓" }[s.trend] ||
-                    "→";
-                  return `<div style="margin-bottom:8px">
-            <div style="display:flex;justify-content:space-between;margin-bottom:3px">
-              <span style="font-size:11px;font-weight:600">${esc(s.area)}</span>
-              <span style="font-size:11px;font-weight:700;color:${barC}">${s.score}/100 ${tIcon}</span>
-            </div>
-            <div style="height:6px;background:#f3f4f6;border-radius:3px;overflow:hidden">
-              <div style="height:6px;background:${barC};width:${pct}%;border-radius:3px"></div>
-            </div>
-            <div style="font-size:10px;color:#6b7280;margin-top:2px">${esc(s.keyFinding)}</div>
-          </div>`;
-                })
-                .join(""),
-          )
-        : "";
-
-      // §7 Top Critical Issues (up to 10)
-      const critIssBlock = (ctaReview.topCriticalIssues || []).length
-        ? pdfCard(
-            pdfH("🚨", "Top Critical Issues", "§6") +
-              `<table style="width:100%;border-collapse:collapse">
-          <thead><tr style="border-bottom:1.5px solid #e5e7eb">
-            <th style="text-align:center;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280;width:30px">#</th>
-            <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Issue</th>
-            <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280;width:70px">Severity</th>
-            <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Impact</th>
-            <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Effort</th>
-          </tr></thead>
-          <tbody>${(ctaReview.topCriticalIssues || [])
-            .map((iss, i) => {
-              const sC = iss.severity === "Critical" ? "#c0392b" : "#b45309";
-              const sBg = iss.severity === "Critical" ? "#fee2e2" : "#fef3c7";
-              return `<tr style="background:${i % 2 ? "#f9fafb" : "#fff"}">
-              <td style="padding:6px 8px;text-align:center;font-weight:700;font-size:11px;border-bottom:1px solid #e5e7eb">${iss.rank}</td>
-              <td style="padding:6px 8px;font-weight:600;font-size:11px;border-bottom:1px solid #e5e7eb">${esc(iss.title)}<br><span style="font-size:9px;color:#6b7280;font-weight:400">${esc(iss.domain)}</span></td>
-              <td style="padding:6px 8px;border-bottom:1px solid #e5e7eb"><span style="font-size:9px;font-weight:700;color:${sC};background:${sBg};padding:2px 6px;border-radius:10px">${esc(iss.severity)}</span></td>
-              <td style="padding:6px 8px;font-size:10px;border-bottom:1px solid #e5e7eb">${esc(iss.impact)}</td>
-              <td style="padding:6px 8px;font-size:10px;border-bottom:1px solid #e5e7eb">${esc(iss.effortEstimate)}</td>
-            </tr>`;
-            })
-            .join("")}</tbody>
-        </table>`,
-          )
-        : "";
-
-      // §8 Risk Analysis
-      const ra = ctaReview.riskAnalysis;
-      const riskBlock = ra
-        ? pdfCard(
-            pdfH("🔥", "Risk Analysis", "§7") +
-              `<div style="display:flex;gap:16px">
-          <div style="flex:1">
-            <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-bottom:4px">Probability of Incident</div>
-            <div style="font-size:11px;color:#374151;margin-bottom:8px">${esc(ra.probabilityOfIncident)}</div>
-            <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-bottom:4px">Time to Risk</div>
-            <div style="font-size:12px;font-weight:700;color:#c0392b">${esc(ra.timeToRisk)}</div>
-          </div>
-          <div style="flex:1">
-            <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-bottom:6px">Risk Heatmap</div>
-            ${(ra.riskHeatmap || [])
-              .map((cell) => {
-                const l = { Low: 1, Medium: 2, High: 3 }[cell.likelihood] || 1;
-                const im = { Low: 1, Medium: 2, High: 3 }[cell.impact] || 1;
-                const r = l * im;
-                const rc = r >= 6 ? "#c0392b" : r >= 3 ? "#b45309" : "#1a7f45";
-                const rb = r >= 6 ? "#fee2e2" : r >= 3 ? "#fef3c7" : "#d1fae5";
-                return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;padding:3px 6px;background:${rb};border-radius:4px;border-left:3px solid ${rc}">
-                <span style="font-size:10px;flex:1">${esc(cell.domain)}</span>
-                <span style="font-size:9px;font-weight:700;color:${rc}">L:${esc(cell.likelihood)} I:${esc(cell.impact)}</span>
-              </div>`;
-              })
-              .join("")}
-          </div>
-        </div>`,
-          )
-        : "";
-
-      // §9 Benchmark Comparison
-      const bmBlock = (ctaReview.benchmarkComparison || []).length
-        ? pdfCard(
-            pdfH("📈", "Benchmark Comparison", "§8") +
-              `<table style="width:100%;border-collapse:collapse">
-          <thead><tr style="border-bottom:1.5px solid #e5e7eb">
-            <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Metric</th>
-            <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Your Org</th>
-            <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Avg</th>
-            <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Top 25%</th>
-            <th style="text-align:left;padding:5px 8px;font-size:9px;text-transform:uppercase;color:#6b7280">Status</th>
-          </tr></thead>
-          <tbody>${(ctaReview.benchmarkComparison || [])
-            .map((b, i) => {
-              const stC =
-                b.status === "Above"
-                  ? "#1a7f45"
-                  : b.status === "At"
-                    ? "#b45309"
-                    : "#c0392b";
-              const stBgc =
-                b.status === "Above"
-                  ? "#d1fae5"
-                  : b.status === "At"
-                    ? "#fef3c7"
-                    : "#fee2e2";
-              return `<tr style="background:${i % 2 ? "#f9fafb" : "#fff"}">
-              <td style="padding:5px 8px;font-weight:600;font-size:11px;border-bottom:1px solid #e5e7eb">${esc(b.metric)}</td>
-              <td style="padding:5px 8px;font-size:11px;font-weight:700;border-bottom:1px solid #e5e7eb">${esc(String(b.orgValue))}</td>
-              <td style="padding:5px 8px;font-size:11px;color:#6b7280;border-bottom:1px solid #e5e7eb">${esc(String(b.industryAvg))}</td>
-              <td style="padding:5px 8px;font-size:11px;color:#6b7280;border-bottom:1px solid #e5e7eb">${esc(String(b.topQuartile))}</td>
-              <td style="padding:5px 8px;border-bottom:1px solid #e5e7eb"><span style="font-size:9px;font-weight:700;color:${stC};background:${stBgc};padding:2px 6px;border-radius:10px">${esc(b.status)}</span></td>
-            </tr>`;
-            })
-            .join("")}</tbody>
-        </table>`,
-          )
-        : "";
-
-      // §10 Domain Findings
-      const domainRows = (ctaReview.domainFindings || [])
-        .map((d) => {
-          const stC = statusColor(d.status);
-          const stBgc = statusBg(d.status);
-          return `<tr style="border-bottom:1px solid #e5e7eb">
-          <td style="padding:8px 10px;font-weight:600;font-size:11px">${esc(d.domain)}</td>
-          <td style="padding:8px 10px"><span style="font-size:9px;font-weight:700;color:${stC};background:${stBgc};padding:2px 6px;border-radius:10px">${esc(d.status)}</span></td>
-          <td style="padding:8px 10px;font-size:11px;line-height:1.5">${esc(d.analysis || "")}</td>
-        </tr>`;
-        })
-        .join("");
-
-      const domainBlock = pdfCard(
-        pdfH("🏗️", "Domain Findings", "§9") +
-          `<table style="width:100%;border-collapse:collapse">
-          <thead><tr style="border-bottom:1.5px solid #e5e7eb">
-            <th style="text-align:left;padding:6px 10px;font-size:9px;text-transform:uppercase;color:#6b7280;width:20%">Domain</th>
-            <th style="text-align:left;padding:6px 10px;font-size:9px;text-transform:uppercase;color:#6b7280;width:10%">Status</th>
-            <th style="text-align:left;padding:6px 10px;font-size:9px;text-transform:uppercase;color:#6b7280">Analysis</th>
-          </tr></thead>
-          <tbody>${domainRows}</tbody>
-        </table>`,
-      );
-
-      // §11 AI Insights
-      const ai = ctaReview.aiInsights;
-      const aiBlock = ai
-        ? pdfCard(
-            pdfH("✨", "AI Insights", "§10") +
-              `<div style="display:flex;gap:12px">
-          ${(ai.hiddenRisks || []).length ? `<div style="flex:1"><div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#c0392b;margin-bottom:6px">🔍 Hidden Risks</div>${ai.hiddenRisks.map((it) => `<div style="font-size:11px;color:#374151;margin-bottom:4px;padding-left:8px;border-left:2px solid #c0392b">${esc(it)}</div>`).join("")}</div>` : ""}
-          ${(ai.predictions || []).length ? `<div style="flex:1"><div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#7c3aed;margin-bottom:6px">🔮 Predictions</div>${ai.predictions.map((it) => `<div style="font-size:11px;color:#374151;margin-bottom:4px;padding-left:8px;border-left:2px solid #7c3aed">${esc(it)}</div>`).join("")}</div>` : ""}
-          ${(ai.unusualPatterns || []).length ? `<div style="flex:1"><div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#b45309;margin-bottom:6px">⚡ Unusual Patterns</div>${ai.unusualPatterns.map((it) => `<div style="font-size:11px;color:#374151;margin-bottom:4px;padding-left:8px;border-left:2px solid #b45309">${esc(it)}</div>`).join("")}</div>` : ""}
-        </div>`,
-          )
-        : "";
-
-      // §12 Architecture Observations (SWOT)
-      const obsBlock = (ctaReview.architectureObservations || []).length
-        ? pdfCard(
-            pdfH("🔭", "Architecture Observations", "§11") +
-              (() => {
-                const grouped = {
-                  Strength: [],
-                  Weakness: [],
-                  Opportunity: [],
-                  Threat: [],
-                };
-                (ctaReview.architectureObservations || []).forEach((o) => {
-                  if (grouped[o.classification])
-                    grouped[o.classification].push(o.observation);
-                });
-                const clr = {
-                  Strength: "#1a7f45",
-                  Weakness: "#c0392b",
-                  Opportunity: "#0176d3",
-                  Threat: "#b45309",
-                };
-                const clrBg = {
-                  Strength: "#d1fae5",
-                  Weakness: "#fee2e2",
-                  Opportunity: "#dbeafe",
-                  Threat: "#fef3c7",
-                };
-                const icons = {
-                  Strength: "💪",
-                  Weakness: "⚠️",
-                  Opportunity: "🚀",
-                  Threat: "🔴",
-                };
-                return (
-                  `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">` +
-                  ["Strength", "Weakness", "Opportunity", "Threat"]
-                    .map(
-                      (cls) =>
-                        `<div style="padding:10px;border-radius:6px;background:${clrBg[cls]};border-left:3px solid ${clr[cls]}">
-                <div style="font-size:9px;font-weight:700;color:${clr[cls]};margin-bottom:6px">${icons[cls]} ${cls}s</div>
-                ${grouped[cls].map((obs) => `<div style="font-size:10px;color:#374151;margin-bottom:3px">· ${esc(obs)}</div>`).join("") || '<div style="font-size:10px;color:#9ca3af">None identified</div>'}
-              </div>`,
-                    )
-                    .join("") +
-                  `</div>`
-                );
-              })(),
-          )
-        : "";
-
-      // §13 Recommendations
-      const rec = ctaReview.recommendations;
-      const recBlock = rec
-        ? pdfCard(
-            pdfH("⚡", "Recommendations", "§12") +
-              ((rec.quickWins || []).length
-                ? `<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;margin-bottom:6px">Quick Wins (1-2 sprints)</div>` +
-                  (rec.quickWins || [])
-                    .map(
-                      (w, i) =>
-                        `<div style="display:flex;gap:8px;margin-bottom:6px;padding:6px 10px;background:#f0fdf4;border-radius:6px;border:1px solid #bbf7d0">
-              <span style="min-width:18px;height:18px;background:#1a7f45;color:#fff;border-radius:50%;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center">${i + 1}</span>
-              <div><div style="font-size:11px">${esc(w.action)}</div><span style="font-size:9px;font-weight:700;color:${effortColor(w.effort)};background:${effortBg(w.effort)};padding:1px 5px;border-radius:8px">${esc(w.effort)}</span> <span style="font-size:10px;color:#6b7280">${esc(w.impact)}</span></div>
-            </div>`,
-                    )
-                    .join("")
-                : "") +
-              ((rec.strategic || []).length
-                ? `<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;margin:10px 0 6px">Strategic Initiatives</div>` +
-                  (rec.strategic || [])
-                    .map(
-                      (s, i) =>
-                        `<div style="display:flex;gap:8px;margin-bottom:6px;padding:6px 10px;background:#eff6ff;border-radius:6px;border:1px solid #bfdbfe">
-              <span style="min-width:18px;height:18px;background:#0176d3;color:#fff;border-radius:50%;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center">${i + 1}</span>
-              <div><div style="font-size:11px;font-weight:600">${esc(s.action)}</div><div style="display:flex;gap:6px;margin-top:2px"><span style="font-size:10px;color:#6b7280">📅 ${esc(s.timeline)}</span> <span style="font-size:9px;font-weight:700;color:${effortColor(s.effort)};background:${effortBg(s.effort)};padding:1px 5px;border-radius:8px">${esc(s.effort)}</span> <span style="font-size:10px;color:#6b7280">${esc(s.impact)}</span></div></div>
-            </div>`,
-                    )
-                    .join("")
-                : ""),
-          )
-        : "";
-
-      // §14 Cost of Inaction
-      const coi = ctaReview.costOfInaction;
-      const coiBlock = coi
-        ? pdfCard(
-            pdfH("⏳", "Cost of Inaction", "§13") +
-              `<div style="display:flex;gap:12px;margin-bottom:10px">
-          <div style="flex:1;padding:10px;background:#fff5f5;border-radius:6px">
-            <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#c0392b;margin-bottom:4px">Financial Impact</div>
-            <div style="font-size:11px;color:#374151">${esc(coi.financialImpact)}</div>
-          </div>
-          <div style="flex:1;padding:10px;background:#fffbeb;border-radius:6px">
-            <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#b45309;margin-bottom:4px">Technical Debt Growth</div>
-            <div style="font-size:11px;color:#374151">${esc(coi.technicalDebtGrowth)}</div>
-          </div>
-        </div>` +
-              ((coi.risks || []).length
-                ? `<div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-bottom:4px">Compounding Risks</div>` +
-                  coi.risks
-                    .map(
-                      (r) =>
-                        `<div style="font-size:11px;color:#374151;margin-bottom:3px;display:flex;gap:6px"><span style="color:#c0392b">●</span>${esc(r)}</div>`,
-                    )
-                    .join("")
-                : ""),
-          )
-        : "";
-
-      // §15 Final Recommendation
-      const fr = ctaReview.finalRecommendation;
-      const finalBlock = fr
-        ? `
-        <div style="background:${cvBg};border:2px solid ${cvc}30;border-radius:10px;padding:16px 20px;margin-bottom:14px">
-          ${pdfH(cvIcon, "Final CTA Recommendation", "§14")}
-          <p style="font-size:12px;font-weight:500;color:#1f2937;line-height:1.7;margin-bottom:12px">${esc(fr.summary)}</p>
-          ${
-            (fr.nextSteps || []).length
-              ? `<div style="font-size:9px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-bottom:6px">Immediate Next Steps</div>` +
-                fr.nextSteps
-                  .map(
-                    (step, i) =>
-                      `<div style="display:flex;gap:8px;margin-bottom:4px"><span style="min-width:16px;height:16px;background:${cvc};color:#fff;border-radius:50%;font-size:8px;font-weight:700;display:flex;align-items:center;justify-content:center">${i + 1}</span><span style="font-size:11px">${esc(step)}</span></div>`,
-                  )
-                  .join("")
-              : ""
-          }
-          ${fr.proposedTimeline ? `<div style="margin-top:10px;padding:8px 12px;background:rgba(0,0,0,.04);border-radius:6px;font-size:10px;color:#374151"><strong>📅 </strong>${esc(fr.proposedTimeline)}</div>` : ""}
-        </div>`
-        : "";
-
-      ctaPage =
-        '<div class="page" style="position:relative">' +
-        (iconDataUri
-          ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:0;opacity:.04"><img src="${iconDataUri}" style="width:260px;height:260px;object-fit:contain" alt="" /></div>`
-          : "") +
-        `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding-bottom:8px;border-bottom:1px solid #e5e7eb;font-size:10px;color:#9ca3af;position:relative;z-index:1">${iconDataUri ? `<span><img src="${iconDataUri}" style="width:18px;height:18px;object-fit:contain;border-radius:3px;vertical-align:middle;margin-right:4px;opacity:.7" alt="" />OrgPulse · Salesforce Architecture Health Report</span>` : "<span>OrgPulse · Salesforce Architecture Health Report</span>"}<span>${esc(org)} · ${now}</span></div>` +
-        '<div style="font-size:19px;font-weight:800;color:#1a1a2e;margin-bottom:4px;position:relative;z-index:1">🧠 CTA Architecture Review</div>' +
-        '<div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:20px;padding-bottom:14px;border-bottom:2px solid #e5e7eb;position:relative;z-index:1">AI-Generated Executive Architecture Assessment — v1.9.2</div>' +
-        verdictBlock +
-        execBlock +
-        '<div style="page-break-after:always"></div>' +
-        maturityBlock +
-        biBlock +
-        opBlock +
-        hsbBlock +
-        '<div style="page-break-after:always"></div>' +
-        critIssBlock +
-        riskBlock +
-        bmBlock +
-        '<div style="page-break-after:always"></div>' +
-        domainBlock +
-        aiBlock +
-        obsBlock +
-        '<div style="page-break-after:always"></div>' +
-        recBlock +
-        coiBlock +
-        finalBlock +
-        "</div>";
-    }
+    // ── CTA Architecture Review Page — delegated to shared builder ──────────
+    const ctaPage = buildCtaPageHtml(iconDataUri, org, now);
 
     // ── Assemble full HTML ─────────────────────────────────────────────────
     const reportHtml = `<!DOCTYPE html>
@@ -6075,183 +6445,98 @@ ${nextStepsPage}
   }
 
   // ── Export CTA Review as standalone PDF ───────────────────────────────────
+  // Clones the actual rendered .cta-dash-wrap DOM so the PDF is pixel-identical
+  // to the CTA Review tab — same CSS classes, same layout, same colors.
   function exportCtaPdf(iconDataUri) {
     if (!results || !results.ctaReview || !results.ctaReview.verdict) {
-      alert(
-        "No CTA Review available to export. Please run a CTA Review first.",
-      );
+      alert("No CTA Review available to export. Please run a CTA Review first.");
       return;
     }
 
-    const org =
-      results.summary && results.summary.orgAlias
-        ? results.summary.orgAlias
-        : "Org";
-    const now = new Date().toLocaleDateString("en-GB", {
-      day: "2-digit",
-      month: "short",
-      year: "numeric",
-    });
-    const esc = (s) =>
-      String(s || "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
-
-    // ── Capture the fully-rendered CTA tab DOM ─────────────────────────────
-    const panelEl = document.getElementById("panel-cta");
-    if (!panelEl) {
-      alert(
-        "CTA Review panel not found. Please switch to the CTA Review tab first.",
-      );
+    const dash = document.querySelector("#panel-cta .cta-dash-wrap");
+    if (!dash) {
+      alert("CTA Review content not found. Please run a CTA Review first.");
       return;
     }
-    const clone = panelEl.cloneNode(true);
 
-    // Strip interactive controls (buttons, selects, inputs)
-    clone
-      .querySelectorAll("button, select, input, textarea")
-      .forEach((el) => el.remove());
+    const meta = results.metadata || {};
+    const org = (meta.orgAlias || meta.orgUsername) || "Org";
+    const nowTime = new Date().toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+    function esc(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 
-    // Resolve VS Code CSS variable references to their fallback values so
-    // the standalone HTML renders correctly in a browser.
-    clone.querySelectorAll("[style]").forEach((el) => {
-      el.style.cssText = el.style.cssText
-        .replace(/var\(--vscode-editor-background[^)]*\)/g, "#ffffff")
-        .replace(/var\(--vscode-widget-border[^)]*\)/g, "#e5e7eb")
-        .replace(/var\(--vscode-input-background[^)]*\)/g, "#f9fafb")
-        .replace(/var\(--vscode-input-foreground[^)]*\)/g, "#1a1a2e")
-        .replace(/var\(--vscode-input-border[^)]*\)/g, "#d1d5db")
-        .replace(/var\(--vscode-badge-background[^)]*\)/g, "rgba(0,0,0,.08)")
-        .replace(/var\(--vscode-badge-foreground[^)]*\)/g, "inherit")
-        .replace(/var\(--vscode-[^,)]+,\s*([^)]+)\)/g, "$1")
-        .replace(/var\(--sf-[^,)]+,\s*([^)]+)\)/g, "$1")
-        .replace(/var\(--score-excellent[^)]*\)/g, "#22c55e")
-        .replace(/var\(--score-good[^)]*\)/g, "#84cc16")
-        .replace(/var\(--score-fair[^)]*\)/g, "#f59e0b")
-        .replace(/var\(--score-poor[^)]*\)/g, "#f97316")
-        .replace(/var\(--score-critical[^)]*\)/g, "#ef4444");
+    // Clone the rendered CTA dashboard DOM (same HTML/CSS as the tab)
+    const clone = dash.cloneNode(true);
+
+    // Replace vscode-resource: logo URIs with the base64 data URI so it renders in standalone HTML
+    if (iconDataUri) {
+      clone.querySelectorAll(".cta-dash-logo-img").forEach(function(img) { img.src = iconDataUri; });
+    }
+
+    // Show ALL sub-panels (tab system keeps non-active ones display:none via .hidden)
+    clone.querySelectorAll(".cta-dash-panel").forEach(function(p) {
+      p.classList.remove("hidden");
     });
 
-    const bodyContent = clone.innerHTML;
+    // Remove interactive-only elements that must not appear in PDF
+    clone.querySelectorAll(".cta-dash-scan-btn, .cta-regen-bar, .ctad-risk-filter-btn").forEach(function(el) { el.remove(); });
 
-    const headerLogoHtml = iconDataUri
-      ? `<img src="${iconDataUri}" style="width:18px;height:18px;object-fit:contain;border-radius:3px;vertical-align:middle;margin-right:5px;opacity:.7" alt="" />`
-      : "";
+    // Capture live VS Code CSS variable values so they resolve in standalone HTML
+    const cs = getComputedStyle(document.documentElement);
+    function cv(v, fb) { const val = cs.getPropertyValue(v).trim(); return val || fb; }
+    const varsCss = ":root{" +
+      "--vscode-editor-background:" + cv("--vscode-editor-background", "#ffffff") + ";" +
+      "--vscode-editor-foreground:" + cv("--vscode-editor-foreground", "#1f2937") + ";" +
+      "--vscode-sideBar-background:" + cv("--vscode-sideBar-background", "#f3f4f6") + ";" +
+      "--vscode-editorGroupHeader-tabsBackground:" + cv("--vscode-editorGroupHeader-tabsBackground", "#f3f4f6") + ";" +
+      "--vscode-list-hoverBackground:" + cv("--vscode-list-hoverBackground", "rgba(0,0,0,.04)") + ";" +
+      "--vscode-list-activeSelectionBackground:" + cv("--vscode-list-activeSelectionBackground", "rgba(0,0,0,.07)") + ";" +
+      "--vscode-descriptionForeground:" + cv("--vscode-descriptionForeground", "#6b7280") + ";" +
+      "--vscode-disabledForeground:" + cv("--vscode-disabledForeground", "#9ca3af") + ";" +
+      "--vscode-textLink-foreground:" + cv("--vscode-textLink-foreground", "#0176d3") + ";" +
+      "--vscode-panel-border:" + cv("--vscode-panel-border", "#e5e7eb") + ";" +
+      "--vscode-input-border:" + cv("--vscode-input-border", "#d1d5db") + ";" +
+      "--vscode-input-background:" + cv("--vscode-input-background", "#f9fafb") + ";" +
+      "--vscode-input-foreground:" + cv("--vscode-input-foreground", "#374151") + ";" +
+      "--vscode-button-background:" + cv("--vscode-button-background", "#0176d3") + ";" +
+      "--vscode-button-foreground:" + cv("--vscode-button-foreground", "#ffffff") + ";" +
+      "--vscode-button-secondaryBackground:" + cv("--vscode-button-secondaryBackground", "#f3f4f6") + ";" +
+      "--vscode-button-secondaryForeground:" + cv("--vscode-button-secondaryForeground", "#1f2937") + ";" +
+      "--vscode-badge-background:" + cv("--vscode-badge-background", "#0176d3") + ";" +
+      "--vscode-badge-foreground:" + cv("--vscode-badge-foreground", "#ffffff") + ";" +
+      "--vscode-errorForeground:" + cv("--vscode-errorForeground", "#ef4444") + ";" +
+      "--vscode-editorWarning-foreground:" + cv("--vscode-editorWarning-foreground", "#f59e0b") + ";" +
+      "}";
 
-    const ctaHtml = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>OrgPulse CTA Review — ${esc(org)} — ${now}</title>
-<style>
-  @page { size: A4; margin: 15mm 14mm; }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif;
-    color: #1a1a2e;
-    background: #fff;
-    font-size: 12px;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-  }
-
-  /* ── Print header bar ── */
-  .pdf-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 0 10px;
-    border-bottom: 1.5px solid #e5e7eb;
-    margin-bottom: 18px;
-    font-size: 10px;
-    color: #9ca3af;
-  }
-
-  /* ── CTA layout classes ── */
-  .section-card {
-    background: #f9fafb;
-    border: 1px solid #e5e7eb;
-    border-radius: 12px;
-    padding: 18px 20px;
-  }
-  .cta-section-header { display:flex;align-items:center;gap:10px;margin-bottom:14px; }
-  .cta-section-icon { width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0; }
-  .cta-section-title { font-size:13px;font-weight:700; }
-  .cta-section-badge { font-size:10px;font-weight:700;opacity:.45;background:rgba(0,0,0,.08);padding:2px 7px;border-radius:10px; }
-
-  /* ── Maturity gauge ── */
-  .cta-maturity-gauge { display:flex;align-items:center;gap:0;margin-top:4px; }
-  .cta-maturity-step { flex:1;text-align:center;padding:7px 4px;border-radius:6px;border:1.5px solid #d1d5db; }
-  .cta-maturity-step.past { opacity:.7; }
-  .cta-maturity-step.active { transform:translateY(-2px);box-shadow:0 4px 10px rgba(0,0,0,.12); }
-  .cta-maturity-num { font-size:14px;font-weight:800;line-height:1; }
-  .cta-maturity-lbl { font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-top:3px;opacity:.8; }
-  .cta-maturity-connector { width:6px;height:1.5px;background:#d1d5db;flex-shrink:0; }
-  .cta-maturity-badge { font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;background:rgba(0,0,0,.08); }
-  .cta-maturity-badge.level-1{background:rgba(239,68,68,.15);color:#ef4444;}
-  .cta-maturity-badge.level-2{background:rgba(249,115,22,.15);color:#f97316;}
-  .cta-maturity-badge.level-3{background:rgba(245,158,11,.15);color:#f59e0b;}
-  .cta-maturity-badge.level-4{background:rgba(34,197,94,.15);color:#22c55e;}
-  .cta-maturity-badge.level-5{background:rgba(1,118,211,.15);color:#0176d3;}
-
-  /* ── Impact / Profile cards ── */
-  .cta-impact-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:10px;margin-top:4px; }
-  .cta-impact-card { padding:11px 13px;background:#fff;border:1px solid #e5e7eb;border-top-width:3px;border-radius:8px; }
-  .cta-impact-label { font-size:10px;font-weight:700;opacity:.65;margin-bottom:5px; }
-  .cta-impact-text { font-size:11px;line-height:1.5;opacity:.9; }
-  .cta-profile-item { padding:9px 13px;background:#fff;border:1px solid #e5e7eb;border-radius:8px; }
-  .cta-profile-label { font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;opacity:.5;margin-bottom:4px; }
-  .cta-profile-value { font-size:12px;font-weight:600; }
-
-  /* ── Health score bars ── */
-  .cta-score-list { display:flex;flex-direction:column;gap:9px;margin-top:4px; }
-  .cta-score-row { display:grid;grid-template-columns:130px 1fr 44px 18px 1fr;align-items:center;gap:10px; }
-  .cta-score-label { font-size:11px;font-weight:600; }
-  .cta-score-bar-wrap { height:7px;background:#e5e7eb;border-radius:4px;overflow:hidden; }
-  .cta-score-bar { height:7px;border-radius:4px; }
-  .cta-score-num { font-size:11px;font-weight:700;text-align:right; }
-  .cta-score-trend { font-size:13px;font-weight:700;text-align:center; }
-  .cta-score-finding { font-size:10px;opacity:.65;line-height:1.4; }
-
-  /* ── Heatmap ── */
-  .cta-heatmap-grid { display:flex;flex-direction:column;gap:5px; }
-  .cta-heatmap-cell { padding:5px 10px;border-radius:6px;border:1px solid;display:flex;align-items:center;justify-content:space-between; }
-  .cta-heatmap-domain { font-size:11px;font-weight:600; }
-  .cta-heatmap-vals { font-size:10px;font-weight:700; }
-
-  /* ── Cost of Inaction ── */
-  .cta-inaction-card { background:#fff;border:1.5px solid rgba(239,68,68,.3);border-radius:12px;padding:20px; }
-  .cta-inaction-card .cta-section-title { color:#ef4444; }
-
-  /* ── Print page breaks ── */
-  @media print {
-    body { font-size: 11px; }
-    .section-card { break-inside: avoid; page-break-inside: avoid; }
-  }
-</style>
-</head>
-<body>
-<div class="pdf-header">
-  <span>${headerLogoHtml}OrgPulse · CTA Architecture Review</span>
-  <span>${esc(org)} &nbsp;·&nbsp; ${now}</span>
-</div>
-<div style="padding:0 2px">
-${bodyContent}
-</div>
-<script>window.onload = function() { window.print(); };<\/script>
-</body>
-</html>`;
+    const pageCss = "@page{size:A4;margin:16mm 14mm 14mm;}" +
+      "body{margin:0;padding:0;background:#fff;font-family:-apple-system,'Helvetica Neue',Arial,sans-serif;" +
+      "-webkit-print-color-adjust:exact;print-color-adjust:exact;}" +
+      // Footer on every page
+      ".pdf-foot{position:fixed;bottom:-10mm;left:0;right:0;height:8mm;" +
+      "display:flex;align-items:center;justify-content:space-between;" +
+      "padding-top:3px;border-top:1px solid #e5e7eb;font-size:8px;color:#c0c0c0;}";
 
     const safeOrg = org.replace(/[^a-zA-Z0-9]/g, "_");
     const dateStr = new Date().toISOString().slice(0, 10);
+    const contentHtml = clone.outerHTML;
+
+    // dashboard.css is embedded by the extension at webview load time as window.DASHBOARD_CSS
+    // (avoids any fetch/CSP issues — the CSS string is always available synchronously)
+    const dashCss = (typeof window.DASHBOARD_CSS === "string") ? window.DASHBOARD_CSS : "";
+
+    const ctaHtml = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">" +
+      "<title>OrgPulse CTA Architecture Review — " + esc(org) + " — " + dateStr + "</title>" +
+      "<style>" + varsCss + dashCss + pageCss + "</style></head><body>" +
+      contentHtml +
+      "<div class=\"pdf-foot\">" +
+      "<span>Confidential — For Leadership Review Only</span>" +
+      "<span>Generated by OrgPulse · " + esc(nowTime) + "</span>" +
+      "</div>" +
+      "<script>window.onload=function(){window.print();};<\/script>" +
+      "</body></html>";
+
     vscode.postMessage({
       command: "exportCtaHtml",
-      data: {
-        html: ctaHtml,
-        fileName: `OrgPulse_CTA_Review_${safeOrg}_${dateStr}.html`,
-      },
+      data: { html: ctaHtml, fileName: "OrgPulse_CTA_Review_" + safeOrg + "_" + dateStr + ".html" },
     });
   }
 
@@ -6515,30 +6800,42 @@ ${bodyContent}
       </svg>`;
   }
 
-  /** Simplified dependency graph: nodes as circles, edges as lines */
+  /**
+   * Hub-focused dependency graph. Instead of dumping 40 overlapping nodes on one
+   * ring (unreadable), show only the top ~12 most-connected hubs, lay them out
+   * with generous spacing, draw only the edges between them, and give every node
+   * a legible label on a pill background. The full picture lives in the
+   * "Most Connected Components" table above — this is a supporting visual. (#10)
+   */
   function renderDependencyGraph(graph) {
     if (!graph || !graph.nodes || !graph.nodes.length) {
       return `<div style="text-align:center;padding:40px;color:var(--sf-text-muted)">No dependency data available</div>`;
     }
-    const W = 700;
-    const H = 380;
-    const nodes = graph.nodes.slice(0, 40); // cap for readability
+    const connectivity = (n) => (n.fanIn || 0) + (n.fanOut || 0);
+    const TOP = 12;
+    const nodes = [...graph.nodes]
+      .sort((a, b) => connectivity(b) - connectivity(a))
+      .slice(0, TOP);
+    const idSet = new Set(nodes.map((n) => n.id));
     const edges = (graph.edges || [])
-      .filter(
-        (e) =>
-          nodes.find((n) => n.id === e.from) &&
-          nodes.find((n) => n.id === e.to),
-      )
-      .slice(0, 80);
+      .filter((e) => idSet.has(e.from) && idSet.has(e.to))
+      .slice(0, 60);
 
-    // Place nodes in a simple circular layout
+    const W = 760;
+    const H = 460;
+    const CX = W / 2;
+    const CY = H / 2;
+    const ringR = Math.min(W, H) * 0.34;
+
+    // Most-connected node sits at the centre; the rest ring around it.
     const positions = {};
-    nodes.forEach((node, idx) => {
-      const angle = (idx / nodes.length) * 2 * Math.PI;
-      const r = Math.min(W, H) * 0.36;
+    const ringNodes = nodes.slice(1);
+    if (nodes.length) { positions[nodes[0].id] = [CX, CY]; }
+    ringNodes.forEach((node, idx) => {
+      const angle = (idx / Math.max(ringNodes.length, 1)) * 2 * Math.PI - Math.PI / 2;
       positions[node.id] = [
-        W / 2 + r * Math.cos(angle),
-        H / 2 + r * Math.sin(angle),
+        CX + ringR * Math.cos(angle),
+        CY + ringR * Math.sin(angle),
       ];
     });
 
@@ -6554,27 +6851,45 @@ ${bodyContent}
 
     const edgeSvg = edges
       .map((e) => {
-        const [x1, y1] = positions[e.from] || [W / 2, H / 2];
-        const [x2, y2] = positions[e.to] || [W / 2, H / 2];
-        return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="dep-edge"/>`;
+        const [x1, y1] = positions[e.from] || [CX, CY];
+        const [x2, y2] = positions[e.to] || [CX, CY];
+        return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="dep-edge" stroke-opacity="0.35"/>`;
       })
       .join("");
 
     const nodeSvg = nodes
-      .map((node) => {
-        const [x, y] = positions[node.id] || [W / 2, H / 2];
+      .map((node, idx) => {
+        const [x, y] = positions[node.id] || [CX, CY];
         const col = TYPE_COLORS[node.type] || "var(--chart-1)";
-        const r = 6 + Math.min((node.fanIn || 0) + (node.fanOut || 0), 20);
-        const label = (node.label || node.id).slice(0, 14);
+        const r = 9 + Math.min(connectivity(node), 22);
+        const full = node.label || node.id;
+        const label = full.length > 20 ? full.slice(0, 19) + "…" : full;
+        const isCenter = idx === 0;
+        // Labels: centre node sits above its circle; ring labels alternate
+        // above/below so neighbours don't collide.
+        const below = !isCenter && y >= CY;
+        const labelY = below ? y + r + 16 : y - r - 9;
+        const charW = 6.4;
+        const padX = 6;
+        const boxW = label.length * charW + padX * 2;
+        const boxH = 16;
+        const boxX = x - boxW / 2;
+        const boxY = labelY - 12;
         return `
-        <g class="dep-node" title="${escHtml(node.label || node.id)}">
-          <circle cx="${x}" cy="${y}" r="${r}" fill="${col}" fill-opacity="0.85" stroke="var(--sf-bg-primary)" stroke-width="1.5"/>
-          <text x="${x}" y="${y + r + 10}" text-anchor="middle" font-size="9" fill="var(--sf-text-secondary)">${escHtml(label)}</text>
+        <g class="dep-node">
+          <title>${escHtml(full)} — fan-in ${node.fanIn || 0}, fan-out ${node.fanOut || 0}</title>
+          <circle cx="${x}" cy="${y}" r="${r}" fill="${col}" fill-opacity="0.9" stroke="var(--sf-bg-primary)" stroke-width="2"/>
+          <rect x="${boxX.toFixed(1)}" y="${boxY.toFixed(1)}" width="${boxW.toFixed(1)}" height="${boxH}" rx="4" fill="var(--sf-bg-primary)" fill-opacity="0.82"/>
+          <text x="${x}" y="${labelY.toFixed(1)}" text-anchor="middle" font-size="11" font-weight="${isCenter ? 700 : 600}" fill="var(--sf-text-secondary)">${escHtml(label)}</text>
         </g>`;
       })
       .join("");
 
-    return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:${H}px">${edgeSvg}${nodeSvg}</svg>`;
+    const more = graph.nodes.length > nodes.length
+      ? `<div style="font-size:11px;color:var(--sf-text-muted);text-align:center;margin-top:6px">Showing the ${nodes.length} most-connected components of ${graph.nodes.length}. See the table above for the full ranking. Hover a node for fan-in / fan-out.</div>`
+      : `<div style="font-size:11px;color:var(--sf-text-muted);text-align:center;margin-top:6px">Hover a node for fan-in / fan-out.</div>`;
+
+    return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:${H}px">${edgeSvg}${nodeSvg}</svg>${more}`;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

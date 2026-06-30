@@ -3,7 +3,7 @@
  */
 
 import * as vscode from 'vscode';
-import { Issue, CustomField, FieldDefinitionInfo } from '../types';
+import { Issue, CustomField, FieldDefinitionInfo, MetadataDependency } from '../types';
 import { SalesforceService, getSalesforceService } from '../services/salesforceService';
 import { ruleEngine } from '../rules/engine';
 import { logInfo, logSection, logWarning, logDebug } from '../utils/logger';
@@ -91,28 +91,26 @@ export class DataModelAnalyzer {
 
       result.objectsAnalyzed = objectCounts.length;
 
+      // Step 2b: accurate unused-field detection via the Dependency API
+      // (MetadataComponentDependency). Falls back to workspace-reference
+      // estimation per object when the Dependency API is unavailable/empty.
+      const unusedInfo = await this.computeUnusedFieldsFromDependencies();
+
       for (const obj of objectCounts) {
         result.fieldsAnalyzed += obj.customFields;
 
-        // Step 3: count unused custom fields via workspace references
-        // We can't enumerate individual field names from aggregate results,
-        // so we check the fieldReferences map for any keys matching "objectName.*__c"
-        const objPrefix = obj.objectName.toLowerCase() + '.';
-        let unusedCount = 0;
-        for (const [key] of this.fieldReferences) {
-          if (key.startsWith(objPrefix) && key.endsWith('__c')) {
-            // field IS referenced → not unused
-          }
+        // Step 3: unused custom fields. Prefer accurate Dependency-API data;
+        // otherwise estimate from workspace references (legacy heuristic).
+        let unusedCount: number;
+        if (unusedInfo.available) {
+          unusedCount = unusedInfo.byObject.get(obj.objectName)?.count ?? 0;
+        } else {
+          const objPrefix = obj.objectName.toLowerCase() + '.';
+          const referencedForObj = Array.from(this.fieldReferences.keys()).filter(
+            k => k.startsWith(objPrefix) && k.endsWith('__c')
+          ).length;
+          unusedCount = Math.max(0, obj.customFields - referencedForObj);
         }
-        // Count unreferenced: iterate all keys we know are custom fields for this object
-        // from the workspace references map (reverse: fields in the map are referenced)
-        // We approximate: unusedCount = customFields that have NO workspace reference
-        // Since we don't have individual field names from aggregate, we use the
-        // referenced field count to estimate unreferenced ones
-        const referencedForObj = Array.from(this.fieldReferences.keys()).filter(
-          k => k.startsWith(objPrefix) && k.endsWith('__c')
-        ).length;
-        unusedCount = Math.max(0, obj.customFields - referencedForObj);
 
         // Step 4: build objectFieldStats entry
         result.objectFieldStats.push({
@@ -173,6 +171,27 @@ export class DataModelAnalyzer {
             description: 'Objects approaching the 800-custom-field governor limit risk deployment failures when adding new fields.',
             suggestion: 'Audit unused fields for removal. Move rarely-used fields to a related extension object.',
             object: obj.objectName,
+          });
+        }
+      }
+
+      // Surface accurate unused-field findings (one summary issue per object so
+      // the issue list / score is not flooded with one item per field).
+      if (unusedInfo.available) {
+        result.unusedFields = unusedInfo.total;
+        for (const [objectName, info] of unusedInfo.byObject) {
+          if (info.count === 0) { continue; }
+          const preview = info.names.slice(0, 20).join(', ');
+          const more = info.names.length > 20 ? `, …(+${info.names.length - 20} more)` : '';
+          result.issues.push({
+            id: `dm-unused-fields-${objectName}`,
+            ruleId: 'unused-fields',
+            severity: 'info',
+            category: 'data-model',
+            message: `${objectName}: ${info.count} custom field${info.count === 1 ? '' : 's'} appear unused (no metadata dependencies)`,
+            description: `These custom fields have no references in Apex, flows, layouts, reports, or other metadata according to the Salesforce Dependency API: ${preview}${more}.`,
+            suggestion: 'Confirm the fields are not used by external integrations or hard-coded references, then remove them to reduce data-model bloat.',
+            object: objectName,
           });
         }
       }
@@ -353,6 +372,72 @@ export class DataModelAnalyzer {
       logWarning(`Failed to fetch custom fields: ${getErrorMessage(error)}`);
       return [];
     }
+  }
+
+  /**
+   * Accurate unused custom-field detection using the Salesforce Dependency API
+   * (MetadataComponentDependency). A field is considered "used" when something
+   * references it (it appears as a RefMetadataComponent of type CustomField),
+   * when one of its name variants matches a referenced component, or when it is
+   * referenced in the local workspace. Returns available=false when the
+   * Dependency API yields no data, so the caller falls back to estimation.
+   */
+  private async computeUnusedFieldsFromDependencies(): Promise<{
+    byObject: Map<string, { count: number; names: string[] }>;
+    total: FieldUsageData[];
+    available: boolean;
+  }> {
+    const byObject = new Map<string, { count: number; names: string[] }>();
+    const total: FieldUsageData[] = [];
+
+    let fields: CustomField[];
+    let deps: MetadataDependency[];
+    try {
+      [fields, deps] = await Promise.all([
+        this.salesforceService.getCustomFields(),
+        this.salesforceService.getMetadataComponentDependencies("RefMetadataComponentType = 'CustomField'"),
+      ]);
+    } catch (error) {
+      logWarning(`Dependency-based unused-field detection unavailable: ${getErrorMessage(error)}`);
+      return { byObject, total, available: false };
+    }
+
+    // No dependency rows → can't reliably tell used from unused (the Dependency
+    // API may be disabled); let the caller fall back to estimation.
+    if (fields.length === 0 || deps.length === 0) {
+      return { byObject, total, available: false };
+    }
+
+    const referencedIds = new Set(deps.map(d => d.RefMetadataComponentId));
+    const referencedNames = new Set(
+      deps.map(d => (d.RefMetadataComponentName || '').toLowerCase()).filter(Boolean)
+    );
+
+    for (const field of fields) {
+      const objectName = field.EntityDefinition?.QualifiedApiName || field.TableEnumOrId;
+      const dev = (field.DeveloperName || '').toLowerCase();
+      const full = (field.FullName || '').toLowerCase();
+      const nameCandidates = [dev, dev ? `${dev}__c` : '', full].filter(Boolean);
+
+      const idReferenced = referencedIds.has(field.Id);
+      const nameReferenced = nameCandidates.some(c => referencedNames.has(c));
+      const workspaceKey = `${objectName}.${field.DeveloperName}__c`.toLowerCase();
+      const workspaceReferenced = this.fieldReferences.has(workspaceKey);
+
+      if (idReferenced || nameReferenced || workspaceReferenced) {
+        continue; // field is used
+      }
+
+      const fieldName = field.FullName?.split('.').pop() || `${field.DeveloperName}__c`;
+      total.push({ fieldName, objectName, isReferenced: false, referencedIn: [] });
+      const entry = byObject.get(objectName) || { count: 0, names: [] };
+      entry.count += 1;
+      entry.names.push(fieldName);
+      byObject.set(objectName, entry);
+    }
+
+    logInfo(`Dependency API: ${total.length} unused custom fields across ${byObject.size} objects`);
+    return { byObject, total, available: true };
   }
 
   /**

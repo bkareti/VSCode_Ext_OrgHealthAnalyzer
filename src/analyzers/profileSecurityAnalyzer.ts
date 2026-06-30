@@ -149,6 +149,7 @@ export class ProfileSecurityAnalyzer {
         profilesWithAuthorApex: withAuthorApex.length,
         overprivilegedCount: overprivileged.length,
         profileList: profiles,
+        permissionSetList: permSets,
       };
 
       logInfo(`ProfileSecurityAnalyzer: ${profiles.length} profiles, ${overprivileged.length} overprivileged`);

@@ -104,10 +104,44 @@ export interface AnalysisResult {
   /** Per-object automation counts (triggers, flows, validations) */
   automationSummary?: {
     objectMap: Record<string, { triggers: number; flows: number; validations: number; total: number }>;
+    /** Record-triggered + auto-launched flows (legacy meaning, kept for back-compat) */
     totalFlows: number;
     totalTriggers: number;
     totalValidationRules: number;
+    /** Screen flows (ProcessType = Flow) */
+    totalScreenFlows?: number;
+    /** Scheduled-triggered flows */
+    totalScheduledFlows?: number;
+    /** Platform-event-triggered flows */
+    totalEventFlows?: number;
+    /** Process Builders (ProcessType = Workflow) — deprecated automation */
+    totalProcessBuilders?: number;
+    /** Classic Workflow Rules (WorkflowRule object) */
+    totalWorkflowRules?: number;
     flowInventory: Array<{ name: string; processType: string; objectApiName: string; isActive: boolean }>;
+    /** Classic Workflow Rule inventory */
+    workflowInventory?: Array<{ name: string; objectApiName: string; isActive?: boolean }>;
+  };
+  /** Org-wide test coverage summary (from ApexCodeCoverageAggregate) */
+  testCoverageSummary?: {
+    averageCoverage: number;
+    totalClasses: number;
+    classesBelow75: number;
+    zeroCoverageCount: number;
+  };
+  /** Apex code inventory: component counts + code-size usage */
+  codeInventory?: {
+    apexClasses: number;
+    apexTriggers: number;
+    batchClasses: number;
+    queueableClasses: number;
+    schedulableClasses: number;
+    /** Active scheduled Apex jobs (CronTrigger) */
+    scheduledJobs: number;
+    /** Sum of LengthWithoutComments across classes + trigger body length */
+    apexCodeChars: number;
+    /** Per-namespace Apex code character limit (~6,000,000) */
+    apexCodeCharLimit: number;
   };
   /** CTA-level AI architectural review — populated by synthesizeCtaReview() */
   ctaReview?: CTAReview;
@@ -330,6 +364,17 @@ export interface PermissionSetInfo {
   PermissionsModifyAllData?: boolean;
   PermissionsViewAllData?: boolean;
   ProfileId?: string;
+  /** Populated at runtime — active user count assigned this permission set */
+  _userCount?: number;
+}
+
+export interface PermissionSetGroupInfo {
+  Id: string;
+  DeveloperName: string;
+  MasterLabel: string;
+  Status: string;
+  /** Populated at runtime — active user count assigned this group */
+  _userCount?: number;
 }
 
 export interface NamedCredentialInfo {
@@ -425,6 +470,10 @@ export interface ProfileSecuritySummary {
   profilesWithAuthorApex: number;
   overprivilegedCount: number;   // profiles with 3+ dangerous permissions
   profileList: ProfileInfo[];
+  /** Custom permission sets with dangerous-permission flags + user counts */
+  permissionSetList?: PermissionSetInfo[];
+  /** Permission set groups with status + user counts */
+  permissionSetGroupList?: PermissionSetGroupInfo[];
 }
 
 // ============================================================================
@@ -620,7 +669,9 @@ export type DashboardMessageType =
   | 'exportDataModelCsv'
   | 'exportCtaHtml'
   | 'askArchitect'
-  | 'getModels';
+  | 'getModels'
+  | 'authorizeClaude'
+  | 'disconnectClaude';
 
 export interface DashboardMessage {
   command: DashboardMessageType;
@@ -669,6 +720,19 @@ export interface DependencyGraph {
   maxDepth?: number;
   /** Circular dependency chains found */
   circularDependencies?: string[][];
+}
+
+/**
+ * A single row from the Tooling API `MetadataComponentDependency` object:
+ * "MetadataComponent depends on (references) RefMetadataComponent".
+ */
+export interface MetadataDependency {
+  MetadataComponentId: string;
+  MetadataComponentName: string;
+  MetadataComponentType: string;
+  RefMetadataComponentId: string;
+  RefMetadataComponentName: string;
+  RefMetadataComponentType: string;
 }
 
 // ============================================================================

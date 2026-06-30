@@ -7,3 +7,5 @@ node_modules
 .orgpulse/
 .DS_Store
 .docbuild-venv/
+*.mp4
+*.pdf

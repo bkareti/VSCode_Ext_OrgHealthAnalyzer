@@ -4,6 +4,60 @@ All notable changes to **OrgPulse — Salesforce Architecture Health & Insights*
 
 ---
 
+## [1.14.0] — 2026-06-23 🛠️ Dashboard Fixes, Security Depth & Reliable CTA Review
+
+### Fixes
+
+- **Overview counts fixed** — Apex Classes, Triggers, and Flows no longer show **0**. `createAnalysisResult` was dropping these metadata fields before they reached the dashboard; all canonical counts now flow through.
+- **Code Quality dead space removed** — eliminated the doubled bottom margin that left a large empty gap below the inventory cards.
+- **CTA Review no longer hangs silently** — the loading spinner always resolves: on success it renders the review, otherwise it shows a clear, actionable error (e.g. consent declined, model needs sign-in, or AI disabled). The command handler now wraps the call in try/catch and always posts a terminal message back to the webview.
+
+### Improvements
+
+- **Change model & re-run CTA review** — after a review is generated, a **🔁 Re-run review** toolbar now sits above the report with the model picker, a Claude-authorize control, and an **↻ Regenerate** button. Switching the model (or clicking Regenerate) bypasses the cache and produces a fresh review without re-analysing the org. Reviews are now cached per-model.
+- **Ask the Architect works on Claude** — the chat had no Anthropic path, so with Claude selected it silently failed. Added a full Claude tool-use loop (the same read-only org tools: SOQL, Tooling SOQL, explain-query, limits, licenses), so the agent answers from the analysed dashboard data and fetches more from the org as needed. All Ask-the-Architect failures now surface a clear reason in the chat instead of returning nothing.
+- **CTA review now actually generates on Claude** — fixed the real cause of empty/stub reviews: the Anthropic call capped output at 4096 tokens, truncating the report JSON so it failed to parse and fell back to a stub. Output budget raised to 8192, JSON extraction hardened against any preamble/markdown, and a placeholder bug (`{{SNAPSHO}}`) that dropped the org snapshot from a custom prompt template was fixed (the snapshot is now always included even if the placeholder is missing).
+- **More professional CTA report** — rewrote the built-in CTA prompt to the standard a review-board CTA would actually sign off on: evidence-led (must name the specific class/object/flow/metric), business-quantified (blast radius, governor headroom, $/probability/timeframe), decisive verdict, and genuinely actionable recommendations — no filler, no generic statements, and honest credit where the org is healthy.
+- **Authorize Claude (Anthropic API key)** — new **🔑 Authorize Claude** button in the CTA tab. The standalone Claude VS Code extension doesn't expose its models to VS Code, so OrgPulse now connects directly to the Anthropic API: paste your key once (stored in VS Code Secret Storage — never written to settings or synced), and your Claude models appear in the picker with a **Claude (auto)** option. CTA review and Ask-the-Architect can then run on Claude.
+- **CTA model picker** — only lists language models VS Code can actually use (filters out models reporting no usable context window). Added an in-panel note explaining that GitHub Copilot models work in-place, while a Claude subscription can be connected via **Authorize Claude** (or any OpenAI-compatible endpoint via Settings → `sfHealthAnalyzer.ai.custom`). Model errors now surface a specific, actionable reason.
+- **Security & Access tab** — added **Permission Sets** and **Permission Set Groups** tables with active-user counts (new `PermissionSetAssignment` aggregate query), dangerous-permission flags, and group status; **Users by Profile** now lists all profiles (paginated); new grouped **Security Vulnerabilities** section summarising every security / profile-security / user-governance finding by severity with why-it-matters and remediation.
+- **Performance & Limits instructions** — added plain-language "How to read this" guidance to the **Governor Limits Simulator**, **Apex Classes at Risk**, and **Predicted Governor Limit Usage (Worst-Case Class)** sections, plus a friendly empty-state explaining why the simulator may show few/no classes (only loop-based / high-risk code is simulated).
+- **Dependencies graph redesigned** — replaced the unreadable single-ring layout (overlapping nodes/labels) with a hub-focused view: the most-connected component at the centre, top hubs ringed around it with legible labelled pills and only the edges between them; the full ranking remains in the companion table.
+- **Per-tab pointers** — every tab now shows a short, always-visible "what this tab shows / how to read it" intro (the detailed data-source notes remain in the collapsible *About this tab* panel).
+- **Less repetition** — the Org Info tab no longer restates component counts that belong to other tabs (Apex/Flows on Code Quality, objects/fields on Data Model, permission sets on Security), with a pointer to where each lives.
+
+---
+
+## [1.13.0] — 2026-06-23 🎨 Dashboard Redesign & Consistent Counts
+
+### Improvements & Fixes
+
+- **Consistent counts across tabs** — Apex classes, triggers, flows, LWC, and objects now come from a single canonical source, so the Overview, Code Quality, Automation, and Data Model tabs always agree. (Previously "Objects" counted only objects with automation, and "Flows" excluded screen flows / process builders.)
+- **Overview tab redesign** — Connected Org is now a header band (name, edition, instance, API version, trust status); removed the *Top Critical Issues* section; added a consistent KPI grid (now including **LWC**), an **Apex code-size usage** gauge (vs the ~6 MB limit), and **Data/File storage** bars; added padding to the Data & Security panel.
+- **Code Quality tab (now includes LWC)** — The standalone LWC tab is merged in. New per-component-type inventory (Apex, Triggers, LWC, Flows, **Batch**, **Queueable**, **Schedulable**, **Scheduled Jobs**) plus a dedicated **Test Coverage** section (org-wide average, classes below 75%, zero-coverage, offenders table).
+- **Automation tab rebuilt** — Full inventory: Flows by type (Screen / Record-Triggered / Scheduled / Platform-Event / Auto-Launched), **Process Builders**, classic **Workflow Rules**, Triggers, and Validation Rules, with architecture signals (deprecated automation, multiple-trigger objects, over-automation) and a real per-object automation matrix.
+- **Data Model tab** — Removed the *Standard Fields* column/count; added a clear note that *Unused* fields are derived from the Salesforce Dependency API (reference-based, not last-used date).
+- **Tabs reordered** — Overview → Org Info → Data Model → Code Quality → Automation → Performance & Limits → Security & Access → Dependencies → Stale Metadata → CTA Review.
+
+### New data fetched
+
+- Active scheduled Apex jobs (`CronTrigger`), classic Workflow Rules (`WorkflowRule`), Apex code-size aggregation, and a persisted org-wide test-coverage summary.
+
+---
+
+## [1.12.0] — 2026-06-23 🔬 Salesforce Code Analyzer & Dependency-API Accuracy
+
+### New Features
+
+- **Salesforce Code Analyzer delegation (opt-in)** — Static Apex/LWC analysis can be delegated to **Salesforce Code Analyzer v5** (`sf code-analyzer run`), so the PMD/ESLint/RetireJS/CPD engines own the rule logic instead of OrgPulse's built-in regex rules. Findings map onto the existing issue model and scoring. Enable via `sfHealthAnalyzer.codeAnalyzer.enabled` (with `.ruleSelector` and `.runGraphEngine`). Requires the `code-analyzer` CLI plugin and a Java runtime; **falls back to the built-in rules automatically** when they're unavailable, so existing behaviour never regresses.
+
+### Improvements & Fixes
+
+- **Accurate unused-field detection (Dependency API)** — The Data Model tab now uses the Salesforce **`MetadataComponentDependency`** (Dependency API) to determine which custom fields are genuinely unreferenced (by Id, name, or workspace usage), replacing the previous workspace-only estimate. Unused fields are surfaced as one summary finding per object and reduce the Data Model score when significant. Falls back to the prior estimate when the Dependency API is unavailable.
+- **Richer dependency graph** — The dependency analyzer no longer caps at the first 100 components; it now queries the Dependency API for the full class/trigger set (chunked, up to 2,000 components) for more complete fan-in/fan-out and unused-component detection.
+
+---
+
 ## [1.11.0] — 2026-06-18 🧠 Any AI Model, Local Agents & Dashboard Cleanup
 
 ### New Features

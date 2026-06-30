@@ -33,6 +33,7 @@ import {
   TrustIncident,
   QueryExplainResult,
   OrgLimitInfo,
+  MetadataDependency,
 } from '../types';
 import {
   SalesforceAuthError,
@@ -521,6 +522,76 @@ export class SalesforceService {
   }
 
   /**
+   * Query the Tooling API `MetadataComponentDependency` object (the Dependency
+   * API). Each row means "MetadataComponent references RefMetadataComponent".
+   *
+   * Constraints (Salesforce): only the `=` / `!=` / `AND` / `OR` operators are
+   * allowed in the WHERE clause, and you cannot filter on MetadataComponentName
+   * or RefMetadataComponentName. Results page via toolingQuery (~2000–4000 rows);
+   * very large orgs may truncate. Returns [] if the Dependency API is unavailable.
+   *
+   * @param where Optional WHERE clause body (without the `WHERE` keyword), e.g.
+   *              `RefMetadataComponentType = 'CustomField'`.
+   */
+  async getMetadataComponentDependencies(where?: string): Promise<MetadataDependency[]> {
+    const base =
+      `SELECT MetadataComponentId, MetadataComponentName, MetadataComponentType, ` +
+      `RefMetadataComponentId, RefMetadataComponentName, RefMetadataComponentType ` +
+      `FROM MetadataComponentDependency`;
+    const query = where ? `${base} WHERE ${where}` : base;
+    try {
+      return await this.toolingQuery<MetadataDependency>(query);
+    } catch (err) {
+      logWarning(`MetadataComponentDependency query failed: ${getErrorMessage(err)}`);
+      return [];
+    }
+  }
+
+  /**
+   * Active scheduled Apex jobs (CronTrigger, JobType '7' = Scheduled Apex).
+   * Uses the Data API. Returns [] on failure.
+   */
+  async getScheduledApexJobs(): Promise<Array<{ name: string; state: string; nextFireTime?: string }>> {
+    try {
+      const rows = await this.query<{
+        State?: string;
+        NextFireTime?: string;
+        CronJobDetail?: { Name?: string };
+      }>(
+        `SELECT Id, State, NextFireTime, CronJobDetail.Name, CronJobDetail.JobType ` +
+        `FROM CronTrigger WHERE CronJobDetail.JobType = '7'`
+      );
+      return rows.map(r => ({
+        name: r.CronJobDetail?.Name || 'Scheduled Job',
+        state: r.State || 'UNKNOWN',
+        nextFireTime: r.NextFireTime,
+      }));
+    } catch (err) {
+      logWarning(`getScheduledApexJobs failed: ${getErrorMessage(err)}`);
+      return [];
+    }
+  }
+
+  /**
+   * Classic Workflow Rules (WorkflowRule Tooling object). Active status is not
+   * a bulk-queryable column, so it is omitted. Returns [] on failure.
+   */
+  async getWorkflowRules(): Promise<Array<{ name: string; objectApiName: string }>> {
+    try {
+      const rows = await this.toolingQuery<{ Name?: string; TableEnumOrId?: string }>(
+        `SELECT Id, Name, TableEnumOrId FROM WorkflowRule`
+      );
+      return rows.map(r => ({
+        name: r.Name || 'Workflow Rule',
+        objectApiName: r.TableEnumOrId || '',
+      }));
+    } catch (err) {
+      logWarning(`getWorkflowRules failed: ${getErrorMessage(err)}`);
+      return [];
+    }
+  }
+
+  /**
    * Get Entity Definitions (SObject metadata)
    */
   async getEntityDefinitions(objectNames?: string[]): Promise<EntityDefinition[]> {
@@ -902,6 +973,48 @@ export class SalesforceService {
       logWarning(`Could not fetch Permission Set Groups: ${getErrorMessage(err)}`);
       return [];
     }
+  }
+
+  /**
+   * Count active users assigned to each Permission Set and Permission Set Group.
+   * Assigning a group creates a PermissionSetAssignment row with PermissionSetGroupId
+   * populated, so we count both dimensions. Best-effort: returns empty maps on error.
+   */
+  async getPermissionSetAssignmentCounts(): Promise<{
+    bySet: Map<string, number>;
+    byGroup: Map<string, number>;
+  }> {
+    const bySet = new Map<string, number>();
+    const byGroup = new Map<string, number>();
+    try {
+      const setRows = await this.query<{ PermissionSetId: string; expr0: number }>(
+        `SELECT PermissionSetId, COUNT(AssigneeId) expr0
+         FROM PermissionSetAssignment
+         WHERE Assignee.IsActive = true
+         GROUP BY PermissionSetId
+         LIMIT 2000`
+      );
+      for (const r of setRows) {
+        if (r.PermissionSetId) { bySet.set(r.PermissionSetId, Number(r.expr0)); }
+      }
+    } catch (err) {
+      logWarning(`Could not fetch Permission Set assignment counts: ${getErrorMessage(err)}`);
+    }
+    try {
+      const groupRows = await this.query<{ PermissionSetGroupId: string; expr0: number }>(
+        `SELECT PermissionSetGroupId, COUNT(AssigneeId) expr0
+         FROM PermissionSetAssignment
+         WHERE Assignee.IsActive = true AND PermissionSetGroupId != null
+         GROUP BY PermissionSetGroupId
+         LIMIT 2000`
+      );
+      for (const r of groupRows) {
+        if (r.PermissionSetGroupId) { byGroup.set(r.PermissionSetGroupId, Number(r.expr0)); }
+      }
+    } catch (err) {
+      logWarning(`Could not fetch Permission Set Group assignment counts: ${getErrorMessage(err)}`);
+    }
+    return { bySet, byGroup };
   }
 
   /**
@@ -1451,20 +1564,88 @@ export async function isSfCliInstalled(): Promise<boolean> {
  */
 export async function ensureSfCli(): Promise<boolean> {
   const isInstalled = await isSfCliInstalled();
-  
+
   if (!isInstalled) {
     const action = await vscode.window.showErrorMessage(
       'Salesforce CLI (sf) is not installed. Please install it to use org metadata features.',
       'Install Instructions',
       'Continue Without Org'
     );
-    
+
     if (action === 'Install Instructions') {
       vscode.env.openExternal(vscode.Uri.parse('https://developer.salesforce.com/tools/salesforcecli'));
     }
-    
+
     return false;
   }
-  
+
   return true;
+}
+
+/**
+ * Check if the Salesforce Code Analyzer plugin is installed.
+ *
+ * We inspect the installed plugin list rather than invoking `sf code-analyzer
+ * --version`: on older CLIs an unknown command triggers an interactive
+ * "Did you mean…?" prompt that blocks (or, with stdin closed, can exit 0 and
+ * falsely report success). Listing plugins is prompt-free and unambiguous.
+ */
+export async function isCodeAnalyzerInstalled(): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('sf', ['plugins'], { timeout: 15000 });
+    return /code-analyzer/i.test(stdout);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if a Java runtime is available (required by the PMD and Graph Engine engines).
+ */
+export async function isJavaInstalled(): Promise<boolean> {
+  try {
+    // `java -version` writes to stderr and exits 0 when present.
+    await execFileAsync('java', ['-version']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+let codeAnalyzerHintShown = false;
+
+/**
+ * Verify the Code Analyzer prerequisites (plugin + Java). On the first missing
+ * prerequisite per session, surface a non-blocking hint with install links.
+ * Returns true only when both are present.
+ */
+export async function ensureCodeAnalyzer(): Promise<boolean> {
+  const [hasPlugin, hasJava] = await Promise.all([
+    isCodeAnalyzerInstalled(),
+    isJavaInstalled(),
+  ]);
+
+  if (hasPlugin && hasJava) {
+    return true;
+  }
+
+  if (!codeAnalyzerHintShown) {
+    codeAnalyzerHintShown = true;
+    const missing = !hasPlugin && !hasJava
+      ? 'the Salesforce Code Analyzer plugin and a Java runtime'
+      : !hasPlugin
+        ? 'the Salesforce Code Analyzer plugin'
+        : 'a Java runtime (required by the PMD/Graph Engine engines)';
+    const action = await vscode.window.showWarningMessage(
+      `Salesforce Code Analyzer is enabled but ${missing} ${(!hasPlugin && !hasJava) ? 'are' : 'is'} not available. ` +
+        'Falling back to built-in rules for code analysis.',
+      'Setup Instructions',
+      'Dismiss'
+    );
+    if (action === 'Setup Instructions') {
+      vscode.env.openExternal(vscode.Uri.parse('https://developer.salesforce.com/docs/platform/salesforce-code-analyzer/guide/install.html'));
+    }
+  }
+
+  return false;
 }

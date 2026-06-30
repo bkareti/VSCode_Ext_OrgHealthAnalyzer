@@ -33,7 +33,7 @@ import { getSalesforceService } from './salesforceService';
 export type AIProviderName = 'claude' | 'copilot' | 'custom' | 'none';
 
 /** Which transport a model is reached through. */
-export type AiBackend = 'vscode-lm' | 'custom';
+export type AiBackend = 'vscode-lm' | 'custom' | 'anthropic';
 
 /** A selectable model surfaced to the dashboard model picker. */
 export interface ModelOption {
@@ -59,6 +59,95 @@ export interface AIExplanation {
 
 const CONSENT_KEY = 'sfHealthAnalyzer.ai.consentGranted';
 const CTA_CONSENT_KEY = 'sfHealthAnalyzer.ai.ctaReviewConsent';
+
+// ============================================================================
+// Direct Anthropic Claude backend (API-key based, stored in Secret Storage)
+//
+// The standalone Anthropic "Claude" VS Code extension does NOT register itself
+// as a vscode.lm chat provider, so its subscription models cannot be reached
+// through selectChatModels(). To let users with a Claude/Anthropic key use
+// Claude for CTA review, we call the Anthropic Messages API directly. The key
+// is held in Secret Storage and mirrored into this module-level cache so the
+// stateless backend helpers below can read it.
+// ============================================================================
+
+const ANTHROPIC_SECRET_KEY = 'sfHealthAnalyzer.ai.anthropicApiKey';
+const ANTHROPIC_API_BASE = 'https://api.anthropic.com';
+const ANTHROPIC_VERSION = '2023-06-01';
+
+interface AnthropicModel { id: string; display_name: string; }
+let anthropicKeyCache: string | undefined;
+let anthropicModelsCache: AnthropicModel[] = [];
+
+/** List the Claude models the given key can access (also validates the key). */
+async function listAnthropicModels(key: string): Promise<AnthropicModel[]> {
+  const resp = await fetch(`${ANTHROPIC_API_BASE}/v1/models?limit=100`, {
+    method: 'GET',
+    headers: { 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION },
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`Anthropic API ${resp.status} ${resp.statusText}${body ? ` — ${body.slice(0, 200)}` : ''}`);
+  }
+  const data = (await resp.json()) as { data?: Array<{ id: string; display_name?: string }> };
+  return (data.data || []).map(m => ({ id: m.id, display_name: m.display_name || m.id }));
+}
+
+/** Pick the best Claude model id from the discovered list (Opus → Sonnet → first). */
+function pickBestAnthropicModel(): string {
+  const ids = anthropicModelsCache.map(m => m.id);
+  return (
+    ids.find(i => /opus/i.test(i)) ||
+    ids.find(i => /sonnet/i.test(i)) ||
+    ids[0] ||
+    'claude-3-5-sonnet-latest'
+  );
+}
+
+/**
+ * Single-shot completion against the Anthropic Messages API.
+ *
+ * `maxTokens` defaults to 16 384 — the CTA report is a large JSON document and
+ * anything below ~12 000 risks truncation mid-JSON, which silently degrades to a
+ * stub review. All current Claude models (3.5 Sonnet, Opus 4, etc.) support at
+ * least 16 384 output tokens. The optional `system` instruction is forwarded as a
+ * top-level system prompt (nudges the model to emit raw JSON only for the CTA call).
+ */
+async function callAnthropic(prompt: string, model?: string, system?: string, maxTokens = 16384): Promise<string> {
+  const key = anthropicKeyCache;
+  if (!key) {
+    throw new Error('Claude is not authorized. Click "Authorize Claude" in the CTA tab and paste an Anthropic API key.');
+  }
+  const useModel = model && model !== 'auto' ? model : pickBestAnthropicModel();
+  const body: Record<string, unknown> = {
+    model: useModel,
+    max_tokens: maxTokens,
+    messages: [{ role: 'user', content: prompt }],
+  };
+  if (system) { body.system = system; }
+  const resp = await fetch(`${ANTHROPIC_API_BASE}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': ANTHROPIC_VERSION,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => '');
+    throw new Error(`Anthropic API ${resp.status} ${resp.statusText}${errBody ? ` — ${errBody.slice(0, 300)}` : ''}`);
+  }
+  const data = (await resp.json()) as { content?: Array<{ type: string; text?: string }>; stop_reason?: string };
+  const text = (data.content || [])
+    .filter(c => c.type === 'text' && typeof c.text === 'string')
+    .map(c => c.text)
+    .join('');
+  if (data.stop_reason === 'max_tokens') {
+    logWarning('AI: Anthropic response hit max_tokens — report JSON may be truncated.');
+  }
+  return text;
+}
 
 // In-memory AI response cache keyed by ruleId + message
 const aiCache = new Map<string, AIExplanation>();
@@ -209,6 +298,9 @@ function resolveBackend(selectorId?: string): { backend: AiBackend; customModel?
   if (!sel) {
     sel = (cfg.get<string>('preferredModel') || cfg.get<string>('ctaModel', 'auto') || 'auto').trim();
   }
+  if (sel.startsWith('anthropic:')) {
+    return { backend: 'anthropic', customModel: sel.slice('anthropic:'.length) };
+  }
   if (sel.startsWith('custom:')) {
     return { backend: 'custom', customModel: sel.slice('custom:'.length) || getCustomConfig().model };
   }
@@ -228,12 +320,26 @@ function resolveBackend(selectorId?: string): { backend: AiBackend; customModel?
 async function listModelOptions(): Promise<ModelOption[]> {
   const options: ModelOption[] = [{ id: 'auto', label: 'Auto (best available)', backend: 'vscode-lm' }];
 
+  // Direct Anthropic Claude (API key) — surfaced first when authorized so users
+  // who connected Claude see their subscription models immediately.
+  if (anthropicKeyCache) {
+    options.push({ id: 'anthropic:auto', label: 'Claude (auto — best available)', backend: 'anthropic' });
+    for (const m of anthropicModelsCache) {
+      options.push({ id: `anthropic:${m.id}`, label: `Claude: ${m.display_name}`, backend: 'anthropic' });
+    }
+  }
+
   // VS Code LM providers — dynamic, not restricted to Copilot.
+  // selectChatModels() only returns models from installed/registered providers
+  // that VS Code considers selectable; we further drop any that report a
+  // non-positive context window (a reliable "not actually usable" signal) so the
+  // picker doesn't list models that will fail the moment they're sent a request.
   try {
     if (vscode.lm) {
       const models = await vscode.lm.selectChatModels();
       const seen = new Set<string>();
       for (const m of models) {
+        if (typeof m.maxInputTokens === 'number' && m.maxInputTokens <= 0) { continue; }
         const id = `${m.vendor}/${m.family}`;
         if (seen.has(id)) { continue; }
         seen.add(id);
@@ -284,6 +390,21 @@ function stripFences(raw: string): string {
   const fenceMatch = raw.match(/```(?:json)?\n?([\s\S]*?)```/);
   if (fenceMatch) { return fenceMatch[1].trim(); }
   return raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+}
+
+/**
+ * Pull the JSON object out of a model response that may include a preamble
+ * ("Here is the report:"), trailing prose, or markdown fences. Falls back to the
+ * fence-stripped text when no clean object boundary is found.
+ */
+function extractJsonObject(raw: string): string {
+  const stripped = stripFences(raw);
+  const first = stripped.indexOf('{');
+  const last = stripped.lastIndexOf('}');
+  if (first >= 0 && last > first) {
+    return stripped.slice(first, last + 1).trim();
+  }
+  return stripped;
 }
 
 // ============================================================================
@@ -498,7 +619,11 @@ CTA-Review Issues: ${(result.issues ?? []).filter(i => i.category === 'cta-revie
         const template = markerIdx >= 0 ? raw.slice(markerIdx + '--- PROMPT START ---'.length).trim() : raw.trim();
         if (template) {
           logInfo('AI: using custom CTA prompt from cta-prompt.md');
-          return template.replace('{{SNAPSHOT}}', snapshot);
+          // Always include the org snapshot: if the placeholder is missing or
+          // misspelled, append it rather than silently sending a data-less prompt.
+          return template.includes('{{SNAPSHOT}}')
+            ? template.replace('{{SNAPSHOT}}', snapshot)
+            : `${template}\n\n=== ORG HEALTH SNAPSHOT ===\n${snapshot}`;
         }
       }
     }
@@ -507,11 +632,18 @@ CTA-Review Issues: ${(result.issues ?? []).filter(i => i.category === 'cta-revie
   }
 
   // Default built-in prompt (mirrors cta-prompt.md — keep in sync)
-  return `You are a Salesforce Certified Technical Architect (CTA) and enterprise transformation advisor.
-Produce a premium executive architecture report. Be CONCISE — 1-2 sentences per string field. No filler.
+  return `You are a Salesforce Certified Technical Architect (CTA) — a review-board-certified enterprise architect with 15+ years leading large-scale Salesforce transformations. You are authoring the formal Architecture Health Assessment that will be presented to the client's CIO, VP of Engineering, and Salesforce delivery leadership. Write with the authority, rigor, and business framing of a top-tier consulting deliverable (the standard a partner at a leading Salesforce practice would sign off on).
 
-ARCHITECTURE MATURITY LEVELS: 1=Ad Hoc, 2=Repeatable, 3=Defined, 4=Managed, 5=Optimised.
-BENCHMARK REFERENCE: Code coverage avg 78%/top 92%; Triggers-per-object avg 1.2/top 1.0; Flow:Apex ratio avg 2.5:1/top 4:1; Custom fields/object avg 38/top <25; Profile count avg 22/top <12.
+WRITING STANDARD — this is what separates a real CTA report from a generic scan:
+- EVIDENCE-LED: every assertion cites concrete evidence from the snapshot — name the exact class, trigger, object, flow, profile, or metric. Never write a generic sentence that could apply to any org.
+- QUANTIFIED: translate technical findings into business consequences — governor-limit headroom, blast radius (number of dependents), user/seat impact, deployment/release risk, and a credible $ cost or risk range with a probability and timeframe where the evidence supports one.
+- DECISIVE: lead with what matters most. Commit to a Go / Conditional Go / No-Go verdict and defend it with the strongest two or three findings.
+- ACTIONABLE: recommendations name the specific artifact to change and the outcome it protects. "Improve test coverage" is unacceptable; "Add tests for AccountTriggerHandler (currently 0%) to protect the order-sync path before the next release" is the bar.
+- BOARD-READY: professional, direct, no hype, no filler. Make each string field as long as the insight genuinely requires — executiveSummary 4–6 sentences; each domain analysis 2–4 sentences — but never pad. Precision over verbosity.
+- HONEST: where the org is healthy, say so plainly and credit it; do not manufacture risk. Where data is thin, state the assumption rather than inventing specifics.
+
+ARCHITECTURE MATURITY LEVELS: 1=Ad Hoc, 2=Repeatable, 3=Defined, 4=Managed, 5=Optimised. Anchor the level to specific evidence (e.g. multi-trigger objects + no handler pattern → Repeatable, not Defined).
+BENCHMARK REFERENCE (use to position the org, not as filler): Code coverage avg 78%/top 92%; Triggers-per-object avg 1.2/top 1.0; Flow:Apex ratio avg 2.5:1/top 4:1; Custom fields/object avg 38/top <25; Profile count avg 22/top <12.
 
 CRITICAL DATA RULES — MUST FOLLOW:
 1. orgProfile.userScale MUST be the exact number from "Active Users" in the snapshot (e.g. "42 users"). Do NOT guess or approximate.
@@ -523,7 +655,7 @@ CRITICAL DATA RULES — MUST FOLLOW:
 Return ONLY valid JSON (no markdown fences) with ALL 15 keys:
 {
   "verdict": "Go"|"Conditional Go"|"No-Go",
-  "executiveSummary": "<3-4 sentences for C-suite. Lead with most critical finding. Reference specific class/object names.>",
+  "executiveSummary": "<4-6 sentences for the C-suite. Open with the overall verdict and the single most consequential finding (name the artifact). State the org's maturity in one phrase, the top 2-3 risks with their business impact, and close with the headline recommendation. No jargon a CIO wouldn't use.>",
   "architectureMaturity": { "level": <1-5>, "label": "<Ad Hoc|Repeatable|Defined|Managed|Optimised>", "summary": "<1-2 sentences with 2 specific evidence points from the snapshot.>" },
   "businessImpactSummary": {
     "revenueRisk": "<1 sentence: describe risk of revenue loss from system failures, data loss, integration outages, or downtime — cite specific evidence>",
@@ -603,8 +735,12 @@ ${snapshot}
 // Core AI call helper
 // ============================================================================
 
-async function callModel(prompt: string, modelPreference?: string): Promise<{ text: string; provider: AIProviderName }> {
+async function callModel(prompt: string, modelPreference?: string, system?: string): Promise<{ text: string; provider: AIProviderName }> {
   const { backend, customModel } = resolveBackend(modelPreference);
+  if (backend === 'anthropic') {
+    const text = await callAnthropic(prompt, customModel, system);
+    return { text, provider: 'claude' };
+  }
   if (backend === 'custom') {
     const text = await callCustomChat(prompt, customModel);
     return { text, provider: 'custom' };
@@ -613,10 +749,22 @@ async function callModel(prompt: string, modelPreference?: string): Promise<{ te
   const { model, provider } = await selectBestModel(modelPreference);
 
   const messages = [vscode.LanguageModelChatMessage.User(prompt)];
-  const response = await model.sendRequest(
-    messages,
-    { justification: 'OrgPulse Salesforce Health Analyzer — generating architectural review.' }
-  );
+  let response;
+  try {
+    response = await model.sendRequest(
+      messages,
+      { justification: 'OrgPulse Salesforce Health Analyzer — generating architectural review.' }
+    );
+  } catch (e) {
+    // The model was listed but isn't actually usable — most often it needs a
+    // separate sign-in/subscription (e.g. a provider extension that registers a
+    // model but requires its own auth) or the user denied the LM consent prompt.
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `The selected model (${model.name}) couldn't be used: ${detail}. ` +
+      `Pick a different model, sign in to that provider, or configure a Custom (API key) endpoint in Settings → sfHealthAnalyzer.ai.custom.`
+    );
+  }
 
   let raw = '';
   for await (const chunk of response.text) {
@@ -808,6 +956,67 @@ async function runArchitectTool(name: string, input: Record<string, unknown>): P
   }
 }
 
+/**
+ * Tool-augmented chat loop against the Anthropic Messages API (Claude tool use).
+ * Mirrors runCustomToolLoop but with Anthropic's tool schema / tool_result wire
+ * format, so an authorized Claude key can answer "Ask the Architect" questions
+ * with live read-only org queries.
+ */
+type AnthropicContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id: string; content: string };
+
+async function runAnthropicToolLoop(system: string, question: string, model?: string): Promise<string> {
+  const key = anthropicKeyCache;
+  if (!key) {
+    throw new Error('Claude is not authorized. Click "Authorize Claude" in the CTA tab and paste an Anthropic API key.');
+  }
+  const useModel = model && model !== 'auto' ? model : pickBestAnthropicModel();
+  const tools = ARCHITECT_TOOLS.map(t => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
+
+  const messages: Array<{ role: 'user' | 'assistant'; content: string | AnthropicContentBlock[] }> = [
+    { role: 'user', content: question.trim() },
+  ];
+  let answer = '';
+
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const resp = await fetch(`${ANTHROPIC_API_BASE}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION },
+      body: JSON.stringify({ model: useModel, max_tokens: 4096, system, tools, messages }),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      throw new Error(`Anthropic API ${resp.status} ${resp.statusText}${body ? ` — ${body.slice(0, 300)}` : ''}`);
+    }
+    const data = (await resp.json()) as { content?: AnthropicContentBlock[]; stop_reason?: string };
+    const content = data.content ?? [];
+    answer = content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map(b => b.text)
+      .join('');
+
+    const toolUses = content.filter(
+      (b): b is { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> } => b.type === 'tool_use',
+    );
+    if (data.stop_reason !== 'tool_use' || toolUses.length === 0) {
+      return answer.trim();
+    }
+
+    // Echo the assistant turn (incl. tool_use blocks), then return tool results.
+    messages.push({ role: 'assistant', content });
+    const results: AnthropicContentBlock[] = [];
+    for (const tu of toolUses) {
+      const out = await runArchitectTool(tu.name, tu.input || {});
+      results.push({ type: 'tool_result', tool_use_id: tu.id, content: out });
+    }
+    messages.push({ role: 'user', content: results });
+  }
+
+  return answer.trim() || 'I reached the maximum number of data-gathering steps before completing an answer. Try a more specific question.';
+}
+
 /** Build a grounding system prompt from the latest analysis (if available). */
 function buildArchitectSystemPrompt(result?: AnalysisResult | null): string {
   const lines: string[] = [
@@ -851,6 +1060,70 @@ export class AIService {
     this.context             = context;
     this.consentGranted      = context.globalState.get<boolean>(CONSENT_KEY, false);
     this.ctaConsentGranted   = context.globalState.get<boolean>(CTA_CONSENT_KEY, false);
+    void this.loadAnthropicKey();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Claude (Anthropic API key) authorization
+  // ---------------------------------------------------------------------------
+
+  /** Load any stored Anthropic key from Secret Storage into the module cache. */
+  private async loadAnthropicKey(): Promise<void> {
+    try {
+      const key = await this.context.secrets.get(ANTHROPIC_SECRET_KEY);
+      anthropicKeyCache = key || undefined;
+      if (anthropicKeyCache && !anthropicModelsCache.length) {
+        try { anthropicModelsCache = await listAnthropicModels(anthropicKeyCache); } catch { /* offline / invalid */ }
+      }
+    } catch { /* secrets unavailable */ }
+  }
+
+  /** Whether a Claude (Anthropic) API key is currently connected. */
+  public isClaudeAuthorized(): boolean {
+    return !!anthropicKeyCache;
+  }
+
+  /**
+   * Authorize Claude by validating and storing an Anthropic API key. If no key
+   * is passed, prompts the user for one (stored securely in Secret Storage).
+   * Returns the number of Claude models discovered on success.
+   */
+  public async authorizeClaude(apiKey?: string): Promise<{ ok: boolean; count?: number; error?: string }> {
+    let key = (apiKey || '').trim();
+    if (!key) {
+      key = ((await vscode.window.showInputBox({
+        title: 'Authorize Claude — Anthropic API key',
+        prompt: 'Paste your Anthropic API key (sk-ant-…). Stored securely in VS Code Secret Storage; never written to settings or synced.',
+        placeHolder: 'sk-ant-...',
+        password: true,
+        ignoreFocusOut: true,
+      })) || '').trim();
+    }
+    if (!key) { return { ok: false, error: 'No API key entered.' }; }
+
+    let models: AnthropicModel[];
+    try {
+      models = await listAnthropicModels(key);
+    } catch (e) {
+      return { ok: false, error: `Could not validate the key: ${getErrorMessage(e)}` };
+    }
+    if (!models.length) {
+      return { ok: false, error: 'Key accepted but no Claude models were returned for this account.' };
+    }
+
+    await this.context.secrets.store(ANTHROPIC_SECRET_KEY, key);
+    anthropicKeyCache = key;
+    anthropicModelsCache = models;
+    logInfo(`AI: Claude authorized — ${models.length} model(s) available.`);
+    return { ok: true, count: models.length };
+  }
+
+  /** Remove the stored Anthropic key (disconnect Claude). */
+  public async disconnectClaude(): Promise<void> {
+    try { await this.context.secrets.delete(ANTHROPIC_SECRET_KEY); } catch { /* ignore */ }
+    anthropicKeyCache = undefined;
+    anthropicModelsCache = [];
+    logInfo('AI: Claude disconnected.');
   }
 
   // ---------------------------------------------------------------------------
@@ -867,8 +1140,11 @@ export class AIService {
   // ---------------------------------------------------------------------------
 
   /** Describe where data will be sent, for the consent prompt. */
-  private aiDestination(): string {
-    const { backend } = resolveBackend();
+  private aiDestination(modelPreference?: string): string {
+    const { backend } = resolveBackend(modelPreference);
+    if (backend === 'anthropic') {
+      return 'the Anthropic Claude API (api.anthropic.com) using your connected API key — an external service';
+    }
     if (backend === 'custom') {
       const c = getCustomConfig();
       return isLocalEndpoint(c.baseUrl)
@@ -896,11 +1172,11 @@ export class AIService {
     return false;
   }
 
-  private async ensureCtaConsent(): Promise<boolean> {
+  private async ensureCtaConsent(modelPreference?: string): Promise<boolean> {
     if (this.ctaConsentGranted) { return true; }
 
     const choice = await vscode.window.showInformationMessage(
-      `CTA Architecture Review / Ask the Architect will send your org health snapshot (scores, issue summaries, inventory counts, licence data) and live read-only query results to ${this.aiDestination()}. Proceed?`,
+      `CTA Architecture Review / Ask the Architect will send your org health snapshot (scores, issue summaries, inventory counts, licence data) and live read-only query results to ${this.aiDestination(modelPreference)}. Proceed?`,
       { modal: true },
       'Allow',
       'Deny'
@@ -977,31 +1253,33 @@ export class AIService {
   // CTA Architecture Synthesis
   // ---------------------------------------------------------------------------
 
-  public async synthesizeCtaReview(result: AnalysisResult, modelPreference?: string): Promise<CTAReview | null> {
+  public async synthesizeCtaReview(result: AnalysisResult, modelPreference?: string, force = false): Promise<CTAReview | null> {
     const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
     if (!cfg.get<boolean>('enabled', true)) {
-      vscode.window.showInformationMessage(
-        'AI features are disabled. Enable them in Settings → sfHealthAnalyzer.ai.enabled.'
-      );
-      return null;
+      throw new Error('AI features are disabled. Enable them in Settings → sfHealthAnalyzer.ai.enabled.');
     }
 
-    // CTA review cache keyed by analysis timestamp (or fallback to issues count)
-    const cacheKey = result.timestamp
+    // Cache key includes the chosen model so switching models produces a fresh
+    // review; `force` (Regenerate) bypasses the cache entirely.
+    const baseKey = result.timestamp
       ? result.timestamp.toISOString()
       : String(result.issues?.length ?? 0);
-    const cached = ctaCache.get(cacheKey);
+    const cacheKey = `${baseKey}::${modelPreference || 'auto'}`;
+    const cached = force ? undefined : ctaCache.get(cacheKey);
     if (cached) {
       logInfo('AI: returning cached CTA review');
       return cached;
     }
 
-    const consented = await this.ensureCtaConsent();
-    if (!consented) { return null; }
+    const consented = await this.ensureCtaConsent(modelPreference);
+    if (!consented) {
+      throw new Error('CTA Architecture Review cancelled — you declined to send the org health snapshot to the AI model.');
+    }
 
     try {
-      const { text, provider } = await callModel(buildCtaPrompt(result), modelPreference);
-      const cleaned = stripFences(text);
+      const ctaSystem = 'You are a Salesforce CTA. Respond with ONLY valid JSON — no markdown fences, no preamble, no commentary, nothing before the opening { or after the closing }.';
+      const { text, provider } = await callModel(buildCtaPrompt(result), modelPreference, ctaSystem);
+      const cleaned = extractJsonObject(text);
 
       let parsed: Partial<CTAReview>;
       try {
@@ -1085,8 +1363,9 @@ export class AIService {
     } catch (err) {
       logError('CTA review generation failed', err as Error);
       const msg = err instanceof Error ? err.message : String(err);
-      vscode.window.showWarningMessage(`CTA Architecture Review failed: ${msg}`);
-      return null;
+      // Re-throw so the command handler can surface a terminal error to the
+      // webview (otherwise the loading spinner hangs forever). See #11.
+      throw new Error(msg);
     }
   }
 
@@ -1097,18 +1376,29 @@ export class AIService {
   public async askArchitect(question: string, result?: AnalysisResult | null, modelSelector?: string): Promise<string | null> {
     const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
     if (!cfg.get<boolean>('enabled', true)) {
-      vscode.window.showInformationMessage(
-        'AI features are disabled. Enable them in Settings → sfHealthAnalyzer.ai.enabled.'
-      );
-      return null;
+      throw new Error('AI features are disabled. Enable them in Settings → sfHealthAnalyzer.ai.enabled.');
     }
     if (!question || !question.trim()) { return null; }
 
     // Reuses the CTA consent gate — this can send org data to the model and query live.
-    const consented = await this.ensureCtaConsent();
-    if (!consented) { return null; }
+    const consented = await this.ensureCtaConsent(modelSelector);
+    if (!consented) {
+      throw new Error('Ask the Architect cancelled — you declined to send org data to the AI model.');
+    }
 
     const { backend, customModel } = resolveBackend(modelSelector);
+
+    // ── Direct Anthropic Claude backend (API key + tool use) ─────────────────
+    if (backend === 'anthropic') {
+      try {
+        const answer = await runAnthropicToolLoop(buildArchitectSystemPrompt(result), question.trim(), customModel);
+        logInfo('Ask the Architect answered (backend: anthropic)');
+        return answer.trim();
+      } catch (err) {
+        logError('Ask the Architect (anthropic backend) failed', err as Error);
+        throw new Error(err instanceof Error ? err.message : String(err));
+      }
+    }
 
     // ── Local / custom backend (OpenAI-compatible tool calling) ──────────────
     if (backend === 'custom') {
@@ -1124,9 +1414,7 @@ export class AIService {
         return answer.trim();
       } catch (err) {
         logError('Ask the Architect (custom backend) failed', err as Error);
-        const msg = err instanceof Error ? err.message : String(err);
-        vscode.window.showWarningMessage(`Ask the Architect failed: ${msg}`);
-        return null;
+        throw new Error(err instanceof Error ? err.message : String(err));
       }
     }
 
@@ -1177,8 +1465,9 @@ export class AIService {
     } catch (err) {
       logError('Ask the Architect failed', err as Error);
       const msg = err instanceof Error ? err.message : String(err);
-      vscode.window.showWarningMessage(`Ask the Architect failed: ${msg}`);
-      return null;
+      throw new Error(
+        `${msg}. Tip: connect Claude (🔑 Authorize Claude), sign in to GitHub Copilot, or configure a Custom (API key) endpoint, then pick that model.`,
+      );
     }
   }
 

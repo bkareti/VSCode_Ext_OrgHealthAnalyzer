@@ -90,6 +90,7 @@ export class HealthDashboardPanel {
     } catch {
       this.postMessage({ type: 'availableModels', data: [{ id: 'auto', label: 'Auto (best available)', backend: 'vscode-lm' }] });
     }
+    this.postMessage({ type: 'claudeAuthStatus', authorized: ai.isClaudeAuthorized() });
   }
 
   /** Show the spinner / progress screen. */
@@ -283,12 +284,44 @@ export class HealthDashboardPanel {
         if (this.securityMode === 'safe') {
           break; // CTA review disabled in Safe mode — webview handles UI
         }
-        await vscode.commands.executeCommand('sfHealthAnalyzer.runCtaReview', message.model ?? 'auto');
+        const force = (message as { force?: boolean }).force ?? false;
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runCtaReview', message.model ?? 'auto', force);
         break;
       }
 
       case 'getModels': {
         await this.pushAvailableModels();
+        break;
+      }
+
+      case 'authorizeClaude': {
+        const ai = getAIService();
+        if (!ai) {
+          this.postMessage({ type: 'claudeAuthStatus', authorized: false, error: 'AI service not initialised. Run an analysis first.' });
+          break;
+        }
+        const result = await ai.authorizeClaude();
+        // Refresh the picker (now includes Claude models) then report status.
+        await this.pushAvailableModels();
+        this.postMessage({
+          type: 'claudeAuthStatus',
+          authorized: ai.isClaudeAuthorized(),
+          count: result.count,
+          error: result.ok ? undefined : result.error,
+        });
+        if (result.ok) {
+          void vscode.window.showInformationMessage(`Claude connected — ${result.count} model(s) available for CTA review.`);
+        } else if (result.error && result.error !== 'No API key entered.') {
+          void vscode.window.showWarningMessage(`Could not connect Claude: ${result.error}`);
+        }
+        break;
+      }
+
+      case 'disconnectClaude': {
+        const ai = getAIService();
+        if (ai) { await ai.disconnectClaude(); }
+        await this.pushAvailableModels();
+        this.postMessage({ type: 'claudeAuthStatus', authorized: false });
         break;
       }
 
@@ -413,6 +446,16 @@ export class HealthDashboardPanel {
     const cssUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.css')
     ).with({ query: `v=${assetVersion}` });
+
+    // Read CSS content from disk so it can be embedded in the exported PDF HTML
+    // (webview CSP blocks fetch() to vscode-resource URIs from JS)
+    let dashboardCssText = '';
+    try {
+      const cssBytes = require('fs').readFileSync(
+        vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.css').fsPath, 'utf8'
+      );
+      dashboardCssText = cssBytes;
+    } catch (_) { /* non-fatal: PDF will be unstyled */ }
     const jsUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.js')
     ).with({ query: `v=${assetVersion}` });
@@ -444,7 +487,7 @@ export class HealthDashboardPanel {
     <div class="ddp-body" id="ddp-body"></div>
     <div class="ddp-footer" id="ddp-footer"></div>
   </aside>
-  <script nonce="${nonce}">window.ORGPULSE_ICON_URI = "${iconUri}";</script>
+  <script nonce="${nonce}">window.ORGPULSE_ICON_URI = "${iconUri}"; window.DASHBOARD_CSS = ${JSON.stringify(dashboardCssText)};</script>
   <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
 </html>`;

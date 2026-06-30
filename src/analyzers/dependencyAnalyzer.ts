@@ -23,20 +23,10 @@ import {
   DependencyNode,
   DependencyEdge,
   DependencyNodeType,
+  MetadataDependency,
 } from '../types';
 import { SalesforceService } from '../services/salesforceService';
 import { logInfo, logWarning } from '../utils/logger';
-
-// ─── Tooling API MetadataComponentDependency ────────────────────────────────
-
-interface MetadataDependencyRecord {
-  MetadataComponentId: string;
-  MetadataComponentName: string;
-  MetadataComponentType: string;
-  RefMetadataComponentId: string;
-  RefMetadataComponentName: string;
-  RefMetadataComponentType: string;
-}
 
 // ─── Regex for local static analysis fallback ────────────────────────────────
 const RE_CLASS_INSTANTIATION  = /new\s+([A-Z][A-Za-z0-9_]+)\s*\(/g;
@@ -254,22 +244,30 @@ export class DependencyAnalyzer {
     edges: DependencyEdge[],
   ): Promise<boolean> {
     try {
-      // Chunk IDs to avoid SOQL limits
-      const allIds = [
+      // Component universe (all classes + triggers). Capped to keep the number
+      // of dependency queries bounded on very large orgs.
+      const MAX_COMPONENTS = 2000;
+      const CHUNK = 200;
+      let allIds = [
         ...apexClasses.map(c => c.Id),
         ...apexTriggers.map(t => t.Id),
-      ].slice(0, 100); // limit initial batch
-
+      ];
       if (allIds.length === 0) { return false; }
+      if (allIds.length > MAX_COMPONENTS) {
+        logWarning(`DependencyAnalyzer: ${allIds.length} components exceed cap; analysing first ${MAX_COMPONENTS}`);
+        allIds = allIds.slice(0, MAX_COMPONENTS);
+      }
 
-      const idList = allIds.map(id => `'${id}'`).join(',');
-      const deps = await this.sfService.toolingQuery<MetadataDependencyRecord>(
-        `SELECT MetadataComponentId, MetadataComponentName, MetadataComponentType,
-                RefMetadataComponentId, RefMetadataComponentName, RefMetadataComponentType
-         FROM MetadataComponentDependency
-         WHERE MetadataComponentId IN (${idList})
-         LIMIT 2000`,
-      );
+      // Query the Dependency API in chunks (the previous 100-component cap is
+      // removed; we now cover the full component set up to MAX_COMPONENTS).
+      const deps: MetadataDependency[] = [];
+      for (let i = 0; i < allIds.length; i += CHUNK) {
+        const idList = allIds.slice(i, i + CHUNK).map(id => `'${id}'`).join(',');
+        const chunkDeps = await this.sfService.getMetadataComponentDependencies(
+          `MetadataComponentId IN (${idList})`
+        );
+        deps.push(...chunkDeps);
+      }
 
       if (deps.length === 0) { return false; }
 

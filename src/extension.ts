@@ -11,7 +11,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 
 // Services
-import { getSalesforceService, ensureSfCli } from './services/salesforceService';
+import { getSalesforceService, ensureSfCli, ensureCodeAnalyzer } from './services/salesforceService';
+import { runCodeAnalyzer } from './services/codeAnalyzerService';
 import { initAIService, getAIService } from './services/aiService';
 
 // Analyzers
@@ -56,7 +57,7 @@ import {
   showOutput,
   getOutputChannel,
 } from './utils/logger';
-import { getConfig, onConfigChange } from './utils/config';
+import { getConfig, onConfigChange, getCodeAnalyzerConfig } from './utils/config';
 import { getErrorMessage, isAuthError } from './utils/errors';
 import { initCache, createApexFileWatcher } from './utils/cache';
 
@@ -257,7 +258,7 @@ function registerCommands(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('sfHealthAnalyzer.runCtaReview', async (modelPreference?: string) => {
+    vscode.commands.registerCommand('sfHealthAnalyzer.runCtaReview', async (modelPreference?: string, force?: boolean) => {
       const ai = getAIService();
       if (!ai) {
         vscode.window.showWarningMessage('AI Service not initialised. Run a full analysis first.');
@@ -269,13 +270,22 @@ function registerCommands(context: vscode.ExtensionContext): void {
       }
       const panel = getDashboardPanel(context.extensionUri);
       panel.postMessage({ type: 'ctaReviewLoading' });
-      const review = await ai.synthesizeCtaReview(currentResult, modelPreference);
-      if (review) {
-        currentResult.ctaReview = review;
-        panel.postMessage({ type: 'ctaReview', data: review });
-        // Persist updated result with CTA review to both caches
-        context.globalState.update(RESULT_STORAGE_KEY, currentResult);
-        saveCacheToFile(currentResult);
+      try {
+        const review = await ai.synthesizeCtaReview(currentResult, modelPreference, !!force);
+        if (review) {
+          currentResult.ctaReview = review;
+          panel.postMessage({ type: 'ctaReview', data: review });
+          // Persist updated result with CTA review to both caches
+          context.globalState.update(RESULT_STORAGE_KEY, currentResult);
+          saveCacheToFile(currentResult);
+        } else {
+          // Should not normally happen — synthesize throws on failure now.
+          panel.postMessage({ type: 'ctaReviewError', message: 'No review was generated. Try another model or configure an API key in Settings → sfHealthAnalyzer.ai.' });
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // Always unblock the webview spinner with a terminal error message (#11).
+        panel.postMessage({ type: 'ctaReviewError', message: msg });
       }
     })
   );
@@ -570,7 +580,26 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
 
         logInfo(`Fetched ${analyzedClasses} classes, ${analyzedTriggers} triggers from org`);
 
-        const apexAnalyzer = createApexAnalyzer();
+        // ─── Optional: delegate static Apex/LWC analysis to Salesforce Code
+        // Analyzer. When active, it replaces the built-in Apex + LWC rule passes
+        // to avoid double-counting; on any failure we fall back to the built-ins.
+        let scaActive = false;
+        const scaConfig = getCodeAnalyzerConfig();
+        const scaWorkspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (scaConfig.enabled && scaWorkspacePath && await ensureCodeAnalyzer()) {
+          dashPanel.postMessage({ type: 'analysisProgress', step: 1, label: 'Running Salesforce Code Analyzer…', total: 20 });
+          progress.report({ message: 'Running Salesforce Code Analyzer…' });
+          try {
+            const scaIssues = await runCodeAnalyzer(scaWorkspacePath, scaConfig.ruleSelector, scaConfig.runGraphEngine);
+            issues.push(...scaIssues);
+            scaActive = true;
+            logInfo(`Code Analyzer delegation active: ${scaIssues.length} issues (built-in Apex/LWC rules skipped)`);
+          } catch (e) {
+            failStep('Salesforce Code Analyzer', e);
+          }
+        }
+
+        const apexAnalyzer = !scaActive ? createApexAnalyzer() : null;
         if (apexAnalyzer) {
           // Analyze org source via Tooling API bodies
           const orgApexResult = await apexAnalyzer.analyzeFromOrg(apexClasses, apexTriggers);
@@ -621,18 +650,40 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
             total: (s.triggers || 0) + (s.flows || 0) + (s.validationRules || 0),
           };
         }
+        // Classic Workflow Rules are a separate metadata type (not flows) — fetch
+        // them so the Automation tab can show the full inventory.
+        let workflowRules: Array<{ name: string; objectApiName: string }> = [];
+        try {
+          workflowRules = await sfService.getWorkflowRules();
+        } catch (e) {
+          failStep('Workflow Rules', e);
+        }
+
+        const flowInventory = (automationResult.flowInventory || []).map(f => ({
+          name: f.name,
+          processType: f.processType,
+          objectApiName: f.objectApiName ?? '',
+          isActive: f.isActive,
+        }));
+
         capturedAutomationSummary = {
           objectMap: autoObjectMap,
           totalFlows: automationResult.totalFlows,
           totalTriggers: automationResult.totalTriggers,
           totalValidationRules: automationResult.totalValidationRules,
-          flowInventory: (automationResult.flowInventory || []).map(f => ({
-            name: f.name,
-            processType: f.processType,
-            objectApiName: f.objectApiName ?? '',
-            isActive: f.isActive,
-          })),
+          totalScreenFlows: automationResult.totalScreenFlows,
+          totalScheduledFlows: automationResult.totalScheduledFlows,
+          totalEventFlows: automationResult.totalEventFlows,
+          totalProcessBuilders: automationResult.totalProcessBuilders,
+          totalWorkflowRules: workflowRules.length,
+          flowInventory,
+          workflowInventory: workflowRules.map(w => ({ name: w.name, objectApiName: w.objectApiName })),
         };
+
+        // Canonical flow count = all real flows (every process type EXCEPT
+        // Process Builders, which are counted separately). Overview and the
+        // Automation tab both read this so the numbers always agree.
+        analyzedFlows = flowInventory.filter(f => f.processType !== 'Workflow').length;
 
         if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
 
@@ -656,6 +707,12 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
         const coverageAnalyzer = createTestCoverageAnalyzer(sfService);
         const coverageResult = await coverageAnalyzer.analyze();
         issues.push(...coverageResult.issues);
+        const testCoverageSummary = {
+          averageCoverage: coverageResult.averageCoverage,
+          totalClasses: coverageResult.totalClasses,
+          classesBelow75: coverageResult.classesBelow75,
+          zeroCoverageCount: coverageResult.zeroCoverageCount,
+        };
 
         if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
 
@@ -721,7 +778,12 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
             const lwcAnalyzer = createLwcAnalyzer();
             if (lwcAnalyzer) {
               const lwcResult = await lwcAnalyzer.analyze();
-              issues.push(...lwcResult.issues);
+              // When Code Analyzer is active it covers LWC/Aura (ESLint), so we
+              // keep the component inventory summary but skip the built-in LWC
+              // issues to avoid duplicate findings.
+              if (!scaActive) {
+                issues.push(...lwcResult.issues);
+              }
               lwcSummary = lwcResult.lwcSummary;
               analyzedLwcComponents = lwcSummary?.totalComponents ?? 0;
             }
@@ -786,6 +848,43 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
         dashPanel.postMessage({ type: 'analysisProgress', step: 14, label: 'Calculating health scores…', total: 20 });
         progress.report({ message: 'Calculating health scores…', increment: 5 });
 
+        // Canonical object count: match the Data Model tab (all analysed objects)
+        // so Overview and Data Model never disagree.
+        if (capturedDataModelStats && capturedDataModelStats.length > 0) {
+          analyzedObjects = capturedDataModelStats.length;
+        }
+
+        // Apex code inventory: batch/queueable/schedulable counts (from class
+        // bodies), scheduled jobs (CronTrigger), and total code-size usage.
+        let scheduledJobs: Array<{ name: string; state: string; nextFireTime?: string }> = [];
+        try {
+          scheduledJobs = await sfService.getScheduledApexJobs();
+        } catch (e) {
+          failStep('Scheduled Jobs', e);
+        }
+        const reBatch = /implements\s+[^;{]*Database\.Batchable/i;
+        const reQueueable = /implements\s+[^;{]*Queueable/i;
+        const reSchedulable = /implements\s+[^;{]*Schedulable/i;
+        let batchClasses = 0, queueableClasses = 0, schedulableClasses = 0, apexCodeChars = 0;
+        for (const c of apexClasses) {
+          const body = c.Body || '';
+          if (reBatch.test(body)) { batchClasses++; }
+          if (reQueueable.test(body)) { queueableClasses++; }
+          if (reSchedulable.test(body)) { schedulableClasses++; }
+          apexCodeChars += c.LengthWithoutComments ?? body.length;
+        }
+        for (const t of apexTriggers) { apexCodeChars += (t.Body || '').length; }
+        const codeInventory = {
+          apexClasses: analyzedClasses,
+          apexTriggers: analyzedTriggers,
+          batchClasses,
+          queueableClasses,
+          schedulableClasses,
+          scheduledJobs: scheduledJobs.length,
+          apexCodeChars,
+          apexCodeCharLimit: 6000000,
+        };
+
         currentResult = healthScoreCalculator.createAnalysisResult(
           issues,
           {
@@ -816,6 +915,8 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
         if (capturedAutomationSummary) {
           currentResult.automationSummary = capturedAutomationSummary;
         }
+        currentResult.testCoverageSummary = testCoverageSummary;
+        currentResult.codeInventory = codeInventory;
 
         if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
 
@@ -862,6 +963,21 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
                 p._userCount = countMap.get(p.Id) ?? 0;
               }
             } catch { /* non-critical — column will show "—" */ }
+
+            // Enrich permission sets + groups with active user counts (#4)
+            try {
+              const [psgList, assignCounts] = await Promise.all([
+                sfService.getPermissionSetGroups(),
+                sfService.getPermissionSetAssignmentCounts(),
+              ]);
+              for (const ps of profileSummary.permissionSetList ?? []) {
+                ps._userCount = assignCounts.bySet.get(ps.Id) ?? 0;
+              }
+              profileSummary.permissionSetGroupList = psgList.map(g => ({
+                ...g,
+                _userCount: assignCounts.byGroup.get(g.Id) ?? 0,
+              }));
+            } catch { /* non-critical — tables will show "—" / be empty */ }
 
             currentResult.profileSummary = profileSummary;
           } catch (e) {
