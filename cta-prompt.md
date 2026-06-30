@@ -251,4 +251,4 @@ RULES:
 ---
 
 === ORG HEALTH SNAPSHOT ===
-{{SNAPSHO}}
+{{SNAPSHOT}}

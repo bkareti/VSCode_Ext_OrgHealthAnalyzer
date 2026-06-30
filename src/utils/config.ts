@@ -123,6 +123,26 @@ export function shouldIncludeOrgMetadata(): boolean {
 }
 
 /**
+ * Salesforce Code Analyzer delegation settings. When enabled (and the plugin +
+ * Java are available), the static Apex/LWC code analysis is delegated to
+ * `sf code-analyzer run` instead of the built-in rules.
+ */
+export interface CodeAnalyzerConfig {
+  enabled: boolean;
+  ruleSelector: string;
+  runGraphEngine: boolean;
+}
+
+export function getCodeAnalyzerConfig(): CodeAnalyzerConfig {
+  const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+  return {
+    enabled: config.get<boolean>('codeAnalyzer.enabled', false),
+    ruleSelector: config.get<string>('codeAnalyzer.ruleSelector', 'Recommended'),
+    runGraphEngine: config.get<boolean>('codeAnalyzer.runGraphEngine', false),
+  };
+}
+
+/**
  * Update a configuration value
  */
 export async function updateConfig<T>(

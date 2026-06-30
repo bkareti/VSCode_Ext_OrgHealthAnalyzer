@@ -246,9 +246,7 @@ export class HealthScoreCalculator {
       summary: this.createSummary(issues),
       scores: this.calculate(issues),
       metadata: {
-        workspacePath: metadata.workspacePath,
-        orgId: metadata.orgId,
-        orgAlias: metadata.orgAlias,
+        ...metadata,
         apiVersion: metadata.apiVersion || '63.0',
         analyzedFiles: metadata.analyzedFiles || 0,
         analyzedObjects: metadata.analyzedObjects || 0,
