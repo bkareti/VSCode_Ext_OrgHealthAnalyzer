@@ -2,24 +2,21 @@ import { useState, useMemo } from 'react';
 import { useDashboardStore } from '@/store/dashboardStore';
 import GlassCard from '@/components/common/GlassCard';
 import StatCard from '@/components/common/StatCard';
-import { EmptyState, SeverityPill } from '@/components/common';
+import { EmptyState } from '@/components/common';
 import IssueTable from '@/components/issues/IssueTable';
 import IssueFilters from '@/components/issues/IssueFilters';
 import DonutChart from '@/components/charts/DonutChart';
 import HBarChart from '@/components/charts/HBarChart';
 import SparklineChart from '@/components/charts/SparklineChart';
+import { scoreLabel, scoreText } from '@/constants/scoring';
 
-type SubTab = 'overview' | 'identity' | 'sharing' | 'auth' | 'data-protection' | 'risks' | 'integrations' | 'compliance';
+type SubTab = 'overview' | 'identity' | 'integrations' | 'risks';
 
 const SUB_TABS: { id: SubTab; label: string }[] = [
-  { id: 'overview',         label: 'Overview' },
-  { id: 'identity',         label: 'Identity & Access' },
-  { id: 'sharing',          label: 'Sharing Model' },
-  { id: 'auth',             label: 'Authentication' },
-  { id: 'data-protection',  label: 'Data Protection' },
-  { id: 'risks',            label: 'Security Risks' },
-  { id: 'integrations',     label: 'Integrations' },
-  { id: 'compliance',       label: 'Compliance' },
+  { id: 'overview',     label: 'Overview' },
+  { id: 'identity',     label: 'Identity & Access' },
+  { id: 'integrations', label: 'Integrations' },
+  { id: 'risks',        label: 'Security Risks' },
 ];
 
 const SEC_CATS = ['security', 'profile-security', 'user-governance'];
@@ -30,22 +27,6 @@ function fmt(n: number | null | undefined): string {
 
 function pct(n: number, total: number): string {
   return total > 0 ? `${((n / total) * 100).toFixed(1)}%` : '—';
-}
-
-function scoreGrade(s: number): string {
-  if (s >= 90) return 'Excellent';
-  if (s >= 75) return 'Good';
-  if (s >= 60) return 'Fair';
-  if (s >= 40) return 'Poor';
-  return 'Critical';
-}
-
-function scoreAccent(s: number): string {
-  if (s >= 90) return 'text-score-excellent';
-  if (s >= 75) return 'text-score-good';
-  if (s >= 60) return 'text-score-fair';
-  if (s >= 40) return 'text-score-poor';
-  return 'text-sev-error';
 }
 
 function mapRiskCategory(category: string, message: string): string {
@@ -59,9 +40,7 @@ function mapRiskCategory(category: string, message: string): string {
   return 'Other Risks';
 }
 
-// ────────────────────────────────────────────────────────────────────────────
 // KV row used in summary panels
-// ────────────────────────────────────────────────────────────────────────────
 function KVRow({ label, value, valueClassName }: { label: string; value: string | number; valueClassName?: string }) {
   return (
     <div className="flex items-center justify-between py-1.5 border-b border-sf-border/40 last:border-0">
@@ -76,7 +55,7 @@ export default function SecurityAccess() {
   const results  = useDashboardStore((s) => s.results);
   const allIssues = results?.issues ?? [];
 
-  // ── All derived data (hooks must be before early return) ───────────────────
+  // ── Derived data (hooks before early return) ────────────────────────────────
   const secIssues = useMemo(
     () => allIssues.filter(i => SEC_CATS.includes(i.category)),
     [allIssues]
@@ -87,32 +66,28 @@ export default function SecurityAccess() {
   const lowRiskCount    = useMemo(() => secIssues.filter(i => i.severity === 'info').length,    [secIssues]);
 
   const severityData = useMemo(() => [
-    { name: 'High',   value: highRiskCount },
-    { name: 'Medium', value: mediumRiskCount },
-    { name: 'Low',    value: lowRiskCount },
+    { name: 'Critical', value: highRiskCount },
+    { name: 'Warning',  value: mediumRiskCount },
+    { name: 'Info',     value: lowRiskCount },
   ].filter(d => d.value > 0), [highRiskCount, mediumRiskCount, lowRiskCount]);
 
-  const categoryMap = useMemo(() => {
+  const catBarData = useMemo(() => {
     const map: Record<string, number> = {};
     for (const i of secIssues) {
       const cat = mapRiskCategory(i.category, i.message);
       map[cat] = (map[cat] ?? 0) + 1;
     }
-    return map;
-  }, [secIssues]);
-
-  const catBarData = useMemo(() =>
-    Object.entries(categoryMap)
+    return Object.entries(map)
       .sort(([, a], [, b]) => b - a)
       .slice(0, 6)
-      .map(([name, value]) => ({ name, value })),
-    [categoryMap]
-  );
+      .map(([name, value]) => ({ name, value }));
+  }, [secIssues]);
 
+  // Real trend only — never fabricate points
   const trendData = useMemo(() => {
     const pts = results?.trends ?? [];
-    if (pts.length === 0) return Array.from({ length: 7 }, () => ({ value: results?.scores.security ?? 0 }));
-    return pts.slice(-7).map(t => ({ value: t.security }));
+    if (pts.length < 2) return null;
+    return pts.slice(-10).map(t => ({ value: t.security }));
   }, [results]);
 
   const topProfiles = useMemo(() =>
@@ -129,31 +104,32 @@ export default function SecurityAccess() {
     [results]
   );
 
-  const topRisks = useMemo(() => {
-    const seen = new Set<string>();
-    const out: Array<{ label: string; severity: 'error' | 'warning' | 'info'; count: number }> = [];
-    const sevOrder = { error: 0, warning: 1, info: 2 };
-    const sorted = [...secIssues].sort((a, b) => sevOrder[a.severity] - sevOrder[b.severity]);
-    for (const issue of sorted) {
-      const key = issue.message.split(/[:.!]/)[0].trim().slice(0, 60);
-      if (!seen.has(key)) {
-        seen.add(key);
-        out.push({ label: key, severity: issue.severity as 'error' | 'warning' | 'info', count: 1 });
-      } else {
-        const existing = out.find(r => r.label === key);
-        if (existing) existing.count++;
-      }
-      if (out.length >= 5) break;
-    }
-    return out;
-  }, [secIssues]);
-
   const dangerousProfiles = useMemo(() =>
     (results?.profileSummary?.profileList ?? []).filter(
       p => p.PermissionsModifyAllData || p.PermissionsViewAllData || p.PermissionsAuthorApex
     ),
     [results]
   );
+
+  // Identity charts — from userSummary (previously collected but unrendered)
+  const profileDistData = useMemo(() => {
+    const dist = results?.userSummary?.profileDistribution ?? [];
+    const sorted = [...dist].sort((a, b) => b.count - a.count);
+    const top = sorted.slice(0, 5).map(d => ({ name: d.profileName, value: d.count }));
+    const rest = sorted.slice(5).reduce((s, d) => s + d.count, 0);
+    return rest > 0 ? [...top, { name: 'Other', value: rest }] : top;
+  }, [results]);
+
+  const usersByTypeData = useMemo(() =>
+    Object.entries(results?.userSummary?.usersByType ?? {})
+      .map(([name, value]) => ({ name, value }))
+      .filter(d => d.value > 0)
+      .sort((a, b) => b.value - a.value),
+    [results]
+  );
+
+  // Public Apex entry points (attack/integration surface) — previously unrendered
+  const entryPoints = results?.entryPoints ?? [];
 
   // ── Early return when no data ──────────────────────────────────────────────
   if (!results) {
@@ -173,22 +149,7 @@ export default function SecurityAccess() {
   const integ   = results.orgInfoData?.integrations;
   const secScore = results.scores.security ?? 0;
 
-  const totalUsers  = qf?.users ?? ((user?.totalActiveUsers ?? 0) + (user?.totalInactiveUsers ?? 0));
-  const profilesCount = profile?.totalProfiles ?? qf?.profiles ?? 0;
-  const permSetsCount = qf?.permissionSets ?? profile?.permissionSetList?.length ?? 0;
-  const psgCount      = qf?.permissionSetGroups ?? profile?.permissionSetGroupList?.length ?? 0;
-  const rolesCount    = qf?.roles ?? 0;
-  const connApps      = integ?.connectedApps ?? 0;
-
-  // Compliance donut
-  const compliantVal    = secScore;
-  const warningVal      = Math.max(0, Math.min(8, Math.round((100 - secScore) * 0.6)));
-  const nonCompliantVal = Math.max(0, 100 - compliantVal - warningVal);
-  const complianceData  = [
-    { name: 'Compliant',     value: compliantVal },
-    { name: 'Warning',       value: warningVal },
-    { name: 'Non-Compliant', value: nonCompliantVal },
-  ];
+  const totalUsers = qf?.users ?? ((user?.totalActiveUsers ?? 0) + (user?.totalInactiveUsers ?? 0));
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -196,7 +157,7 @@ export default function SecurityAccess() {
       {/* Header */}
       <div>
         <h1 className="text-base font-semibold text-sf-text mb-1">Security</h1>
-        <p className="text-xs text-sf-muted">Review security posture, access management, authentication, and compliance risks.</p>
+        <p className="text-xs text-sf-muted">Security posture, identity governance, and integration access.</p>
       </div>
 
       {/* Sub-tab bar */}
@@ -216,54 +177,55 @@ export default function SecurityAccess() {
         ))}
       </div>
 
-      {/* ── OVERVIEW TAB ─────────────────────────────────────────────────── */}
+      {/* ── OVERVIEW ─────────────────────────────────────────────────────── */}
       {subTab === 'overview' && (
         <div className="space-y-4">
-          {/* KPI Row */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+          {/* KPI Row — 6 action-oriented KPIs */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
             <StatCard
               icon="🛡️"
               value={secScore}
               label="Security Score"
-              sub={`/100 · ${scoreGrade(secScore)}`}
-              accent={scoreAccent(secScore)}
+              sub={`/100 · ${scoreLabel(secScore)}`}
+              accent={scoreText(secScore)}
             />
             <StatCard
               icon="🔴"
               value={highRiskCount}
-              label="High Risk Issues"
+              label="Critical Risks"
               accent={highRiskCount > 0 ? 'text-sev-error' : 'text-score-good'}
             />
-            <StatCard icon="👥" value={fmt(totalUsers)}    label="Total Users" />
-            <StatCard icon="🪪" value={fmt(profilesCount)} label="Profiles" />
-            <StatCard icon="🔐" value={fmt(permSetsCount)} label="Permission Sets" />
-            <StatCard icon="📦" value={fmt(psgCount)}      label="Perm Set Groups" />
-            <StatCard icon="🌳" value={fmt(rolesCount)}    label="Roles" />
-            <StatCard icon="🔗" value={fmt(connApps)}      label="Connected Apps" />
+            <StatCard
+              icon="⚡"
+              value={fmt(user?.superAdmins)}
+              label="Super Admins"
+              sub="Modify All Data"
+              accent={(user?.superAdmins ?? 0) > 3 ? 'text-sev-error' : 'text-sf-text'}
+            />
+            <StatCard
+              icon="💤"
+              value={fmt(user?.dormantUsers)}
+              label="Dormant Users"
+              sub="No login in 90+ days"
+              accent={(user?.dormantUsers ?? 0) > 0 ? 'text-sev-warning' : 'text-score-good'}
+            />
+            <StatCard
+              icon="🔓"
+              value={fmt(profile?.profilesWithModifyAll)}
+              label="Profiles w/ Modify All"
+              accent={(profile?.profilesWithModifyAll ?? 0) > 3 ? 'text-sev-error' : 'text-sf-text'}
+            />
+            <StatCard icon="🔗" value={fmt(integ?.connectedApps)} label="Connected Apps" />
           </div>
 
           {/* Charts Row */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <GlassCard title="Risk Summary by Severity">
+          <div className={`grid grid-cols-1 sm:grid-cols-2 ${trendData ? 'lg:grid-cols-3' : ''} gap-4`}>
+            <GlassCard title="Risks by Severity">
               {severityData.length > 0 ? (
-                <DonutChart
-                  data={severityData}
-                  height={160}
-                  showLegend
-                />
+                <DonutChart data={severityData} height={160} showLegend />
               ) : (
                 <div className="flex items-center justify-center h-32 text-xs text-sf-muted">No security issues</div>
               )}
-            </GlassCard>
-
-            <GlassCard title="Security Score Trend (Last 7 Days)">
-              <div className="mt-2">
-                <SparklineChart data={trendData} color="#3b82f6" height={120} />
-                <div className="flex justify-between mt-1 text-[10px] text-sf-muted">
-                  <span>7 days ago</span>
-                  <span>Today</span>
-                </div>
-              </div>
             </GlassCard>
 
             <GlassCard title="Top Risk Categories">
@@ -274,30 +236,22 @@ export default function SecurityAccess() {
               )}
             </GlassCard>
 
-            <GlassCard title="Compliance Score">
-              <DonutChart
-                data={complianceData}
-                height={160}
-                showLegend
-              />
-            </GlassCard>
+            {/* Real trend only — hidden entirely until ≥2 scans exist */}
+            {trendData && (
+              <GlassCard title={`Security Score Trend (Last ${trendData.length} Scans)`}>
+                <div className="mt-2">
+                  <SparklineChart data={trendData} color="#3b82f6" height={120} />
+                  <div className="flex justify-between mt-1 text-[10px] text-sf-muted">
+                    <span>Oldest</span>
+                    <span>Latest</span>
+                  </div>
+                </div>
+              </GlassCard>
+            )}
           </div>
 
-          {/* Summary Panels Row 1 */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <GlassCard title="Identity & Access Overview">
-              <div className="space-y-0">
-                <KVRow label="Users"                value={fmt(totalUsers)} />
-                <KVRow label="Active Users"         value={`${fmt(user?.totalActiveUsers)} (${pct(user?.totalActiveUsers ?? 0, totalUsers)})`} />
-                <KVRow label="Inactive Users"       value={`${fmt(user?.totalInactiveUsers)} (${pct(user?.totalInactiveUsers ?? 0, totalUsers)})`} />
-                <KVRow label="Profiles"             value={fmt(profilesCount)} />
-                <KVRow label="Permission Sets"      value={fmt(permSetsCount)} />
-                <KVRow label="Permission Set Groups" value={fmt(psgCount)} />
-                <KVRow label="Public Groups"        value={qf?.publicGroups != null ? fmt(qf.publicGroups) : '—'} />
-                <KVRow label="Queues"               value={qf?.queues != null ? fmt(qf.queues) : '—'} />
-              </div>
-            </GlassCard>
-
+          {/* Summary Panels */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <GlassCard title="Profiles Summary (Top 5 by Users)">
               {topProfiles.length > 0 ? (
                 <div className="overflow-x-auto">
@@ -352,93 +306,49 @@ export default function SecurityAccess() {
               )}
             </GlassCard>
 
-            <GlassCard title="Sharing Model Overview">
+            <GlassCard title="Identity Inventory">
               <div className="space-y-0">
-                <KVRow label="Org-Wide Default"       value="—" />
-                <KVRow label="Role Hierarchy Depth"   value={user?.roleHierarchyDepth != null ? String(user.roleHierarchyDepth) : '—'} />
-                <KVRow label="Sharing Rules"          value="—" />
-                <KVRow label="Manual Sharing Records" value="—" />
-                <KVRow label="Restriction Rules"      value="—" />
-                <KVRow label="Territory Management"   value="—" />
-              </div>
-            </GlassCard>
-          </div>
-
-          {/* Summary Panels Row 2 */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <GlassCard title="Authentication Overview">
-              <div className="space-y-0">
-                <KVRow label="SSO Enabled"          value="—" />
-                <KVRow label="Multi-Factor Auth"    value="—" />
-                <KVRow label="Login IP Ranges"      value="—" />
-                <KVRow label="Auth. Providers"      value={integ?.authProviders != null ? fmt(integ.authProviders) : '—'} />
-                <KVRow label="Session Timeout"      value="—" />
-                <KVRow label="Password Policy"      value="—" />
-              </div>
-            </GlassCard>
-
-            <GlassCard title="Integrations & Access">
-              <div className="space-y-0">
-                <KVRow label="Named Credentials"    value={integ?.namedCredentials != null ? fmt(integ.namedCredentials) : '—'} />
-                <KVRow label="External Credentials" value={integ?.externalCredentials != null ? fmt(integ.externalCredentials) : '—'} />
-                <KVRow label="Connected Apps"       value={integ?.connectedApps != null ? fmt(integ.connectedApps) : '—'} />
-                <KVRow label="OAuth Scopes In Use"  value="—" />
-                <KVRow label="Remote Sites"         value={integ?.remoteSites != null ? fmt(integ.remoteSites) : '—'} />
-                <KVRow label="Certificates"         value={integ?.certificates != null ? fmt(integ.certificates) : '—'} />
-              </div>
-            </GlassCard>
-
-            <GlassCard title="Top Security Risks">
-              {topRisks.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs border-collapse">
-                    <thead>
-                      <tr className="text-[10px] text-sf-muted uppercase">
-                        <th className="text-left py-1.5 font-medium">Risk</th>
-                        <th className="text-center py-1.5 font-medium">Severity</th>
-                        <th className="text-right py-1.5 font-medium">Affected</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {topRisks.map((r, idx) => (
-                        <tr key={idx} className="border-t border-sf-border/40">
-                          <td className="py-1.5 text-sf-text truncate max-w-25" title={r.label}>{r.label}</td>
-                          <td className="py-1.5 text-center"><SeverityPill severity={r.severity} /></td>
-                          <td className="py-1.5 text-right tabular-nums text-sf-muted">{r.count}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="text-xs text-sf-muted text-center py-6">No security risks detected</p>
-              )}
-            </GlassCard>
-
-            <GlassCard title="Data Protection Overview">
-              <div className="space-y-0">
-                <KVRow label="Field-Level Encryption"    value="—" />
-                <KVRow label="Encrypted Fields"          value="—" />
-                <KVRow label="Platform Encryption"       value="—" />
-                <KVRow label="Shield Platform Enc."      value="—" />
-                <KVRow label="Event Monitoring"          value="—" />
-                <KVRow label="Audit Trail"               value="—" />
+                <KVRow label="Users"                 value={fmt(totalUsers)} />
+                <KVRow label="Active Users"          value={`${fmt(user?.totalActiveUsers)} (${pct(user?.totalActiveUsers ?? 0, totalUsers)})`} />
+                <KVRow label="Inactive Users"        value={`${fmt(user?.totalInactiveUsers)} (${pct(user?.totalInactiveUsers ?? 0, totalUsers)})`} />
+                <KVRow label="Profiles"              value={fmt(profile?.totalProfiles ?? qf?.profiles)} />
+                <KVRow label="Permission Sets"       value={fmt(qf?.permissionSets ?? profile?.permissionSetList?.length)} />
+                <KVRow label="Permission Set Groups" value={fmt(qf?.permissionSetGroups ?? profile?.permissionSetGroupList?.length)} />
+                <KVRow label="Roles"                 value={fmt(qf?.roles)} />
+                {user?.roleHierarchyDepth != null && (
+                  <KVRow label="Role Hierarchy Depth" value={String(user.roleHierarchyDepth)} />
+                )}
               </div>
             </GlassCard>
           </div>
         </div>
       )}
 
-      {/* ── IDENTITY & ACCESS TAB ────────────────────────────────────────── */}
+      {/* ── IDENTITY & ACCESS ────────────────────────────────────────────── */}
       {subTab === 'identity' && (
         <div className="space-y-4">
-          {/* User stats */}
           {user && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <StatCard icon="👥" value={fmt(user.totalActiveUsers)}   label="Active Users" />
               <StatCard icon="💤" value={fmt(user.dormantUsers ?? 0)}  label="Dormant Users"   accent={(user.dormantUsers ?? 0) > 0 ? 'text-sev-warning' : 'text-score-good'} />
               <StatCard icon="⚡" value={fmt(user.superAdmins ?? 0)}   label="Super Admins"    accent={(user.superAdmins ?? 0) > 0 ? 'text-sev-error' : 'text-score-good'} />
               <StatCard icon="🔑" value={fmt(user.neverLoggedIn ?? 0)} label="Never Logged In" accent={(user.neverLoggedIn ?? 0) > 0 ? 'text-sev-warning' : 'text-score-good'} />
+            </div>
+          )}
+
+          {/* Identity composition — profileDistribution + usersByType */}
+          {(profileDistData.length > 0 || usersByTypeData.length > 0) && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {profileDistData.length > 0 && (
+                <GlassCard title="Users by Profile">
+                  <DonutChart data={profileDistData} height={200} showLegend />
+                </GlassCard>
+              )}
+              {usersByTypeData.length > 0 && (
+                <GlassCard title="Users by License Type">
+                  <HBarChart data={usersByTypeData} color="#3b82f6" />
+                </GlassCard>
+              )}
             </div>
           )}
 
@@ -502,45 +412,7 @@ export default function SecurityAccess() {
         </div>
       )}
 
-      {/* ── SHARING MODEL TAB ────────────────────────────────────────────── */}
-      {subTab === 'sharing' && (
-        <EmptyState
-          icon="🔒"
-          title="Sharing Model data not yet collected"
-          description="Detailed OWD, sharing rules, and manual sharing analysis will be available in a future analysis."
-          className="mt-8"
-        />
-      )}
-
-      {/* ── AUTHENTICATION TAB ───────────────────────────────────────────── */}
-      {subTab === 'auth' && (
-        <EmptyState
-          icon="🔑"
-          title="Authentication data not yet collected"
-          description="SSO, MFA, login IP ranges, and session policy analysis will be available in a future analysis."
-          className="mt-8"
-        />
-      )}
-
-      {/* ── DATA PROTECTION TAB ──────────────────────────────────────────── */}
-      {subTab === 'data-protection' && (
-        <EmptyState
-          icon="🛡️"
-          title="Data Protection data not yet collected"
-          description="Field encryption, Shield Platform Encryption, and audit trail analysis will be available in a future analysis."
-          className="mt-8"
-        />
-      )}
-
-      {/* ── SECURITY RISKS TAB ───────────────────────────────────────────── */}
-      {subTab === 'risks' && (
-        <GlassCard title={`Security Issues (${secIssues.length})`}>
-          <IssueFilters />
-          <IssueTable issues={secIssues} />
-        </GlassCard>
-      )}
-
-      {/* ── INTEGRATIONS TAB ─────────────────────────────────────────────── */}
+      {/* ── INTEGRATIONS ─────────────────────────────────────────────────── */}
       {subTab === 'integrations' && (
         <div className="space-y-4">
           {integ && (
@@ -553,6 +425,44 @@ export default function SecurityAccess() {
               <StatCard icon="📜" value={fmt(integ.certificates)}        label="Certificates" />
             </div>
           )}
+
+          {/* Public Apex entry points — the org's exposed surface */}
+          {entryPoints.length > 0 && (
+            <GlassCard title={`Public Apex Entry Points (${entryPoints.length})`}>
+              <p className="text-[11px] text-sf-muted mb-2">
+                Apex classes exposed as REST resources or inbound email handlers. Review sharing and input validation on each.
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-sf-border bg-sf-bg-3">
+                      {['Class', 'Type', 'Annotation'].map(h => (
+                        <th key={h} className="px-3 py-2 text-left text-sf-muted font-medium">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {entryPoints.map((ep, i) => (
+                      <tr key={`${ep.name}-${i}`} className="border-b border-sf-border/40 hover:bg-sf-bg-3/40 transition-colors">
+                        <td className="px-3 py-1.5 text-sf-text font-mono text-[11px]">{ep.name}</td>
+                        <td className="px-3 py-1.5">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                            ep.type === 'RestResource'
+                              ? 'bg-sf-accent/10 text-sf-accent'
+                              : 'bg-sev-warning/10 text-sev-warning'
+                          }`}>
+                            {ep.type}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5 text-sf-muted font-mono text-[11px] truncate max-w-80" title={ep.annotation}>{ep.annotation}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </GlassCard>
+          )}
+
           <GlassCard title="Integration Issues">
             <IssueFilters />
             <IssueTable issues={allIssues.filter(i => i.category === 'integration')} />
@@ -560,14 +470,12 @@ export default function SecurityAccess() {
         </div>
       )}
 
-      {/* ── COMPLIANCE TAB ───────────────────────────────────────────────── */}
-      {subTab === 'compliance' && (
-        <EmptyState
-          icon="✅"
-          title="Compliance data not yet collected"
-          description="Detailed compliance reporting across data residency, retention, and regulatory frameworks will be available in a future analysis."
-          className="mt-8"
-        />
+      {/* ── SECURITY RISKS ───────────────────────────────────────────────── */}
+      {subTab === 'risks' && (
+        <GlassCard title={`Security Issues (${secIssues.length})`}>
+          <IssueFilters />
+          <IssueTable issues={secIssues} />
+        </GlassCard>
       )}
     </div>
   );

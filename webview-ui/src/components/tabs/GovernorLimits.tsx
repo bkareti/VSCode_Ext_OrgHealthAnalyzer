@@ -1,63 +1,40 @@
 import { useState, useMemo } from 'react';
 import { useDashboardStore } from '@/store/dashboardStore';
 import GlassCard from '@/components/common/GlassCard';
-import { EmptyState, SeverityPill } from '@/components/common';
-import DonutChart from '@/components/charts/DonutChart';
+import { EmptyState } from '@/components/common';
+import HBarChart from '@/components/charts/HBarChart';
 import GovernorGauge from '@/components/charts/GovernorGauge';
-import type { OrgLimitInfo, GovernorRiskDetail } from '@/types';
+import { usageBand } from '@/constants/scoring';
+import type { OrgLimitInfo } from '@/types';
 
-type SubTab = 'summary' | 'api' | 'storage' | 'apex' | 'async' | 'emails' | 'platform-events' | 'data' | 'forecast';
+type SubTab = 'summary' | 'api' | 'storage' | 'apex' | 'messaging' | 'data';
 
 const SUB_TABS: { id: SubTab; label: string }[] = [
-  { id: 'summary',         label: 'Summary' },
-  { id: 'api',             label: 'API & Integrations' },
-  { id: 'storage',         label: 'Storage' },
-  { id: 'apex',            label: 'Apex Execution' },
-  { id: 'async',           label: 'Async Operations' },
-  { id: 'emails',          label: 'Emails' },
-  { id: 'platform-events', label: 'Platform Events' },
-  { id: 'data',            label: 'Data' },
-  { id: 'forecast',        label: 'Forecast' },
+  { id: 'summary',   label: 'Summary' },
+  { id: 'api',       label: 'API & Integrations' },
+  { id: 'storage',   label: 'Storage' },
+  { id: 'apex',      label: 'Apex & Async' },
+  { id: 'messaging', label: 'Email & Events' },
+  { id: 'data',      label: 'Data' },
 ];
 
 // Keyword filters per sub-tab category
 const CATEGORY_KEYWORDS: Record<string, string[]> = {
-  api:              ['Api', 'Bulk', 'SOSL', 'SOQL', 'Callout'],
-  storage:          ['Storage', 'File'],
-  apex:             ['Apex', 'Batch', 'Future', 'DML', 'CPU', 'Trigger'],
-  async:            ['Async', 'Schedule', 'Queue', 'Workflow', 'TimeBasedWorkflow'],
-  emails:           ['Email', 'Mail'],
-  'platform-events':['PlatformEvent', 'Streaming', 'Generic'],
-  data:             ['Data', 'Record', 'Object'],
+  api:       ['Api', 'Bulk', 'SOSL', 'SOQL', 'Callout'],
+  storage:   ['Storage', 'File'],
+  apex:      ['Apex', 'Batch', 'Future', 'DML', 'CPU', 'Trigger', 'Async', 'Schedule', 'Queue', 'Workflow', 'TimeBasedWorkflow'],
+  messaging: ['Email', 'Mail', 'PlatformEvent', 'Streaming', 'Generic'],
+  data:      ['Data', 'Record', 'Object'],
 };
 
 function findLimit(limits: OrgLimitInfo[], name: string): OrgLimitInfo | undefined {
   return limits.find((l) => l.name === name);
 }
 
-function statusLabel(pct: number): string {
-  return pct >= 90 ? 'Critical' : pct >= 75 ? 'High' : pct >= 50 ? 'Warning' : 'Good';
-}
-
-function statusTextClass(pct: number): string {
-  return pct >= 90
-    ? 'text-sev-error'
-    : pct >= 75
-    ? 'text-score-poor'
-    : pct >= 50
-    ? 'text-score-fair'
-    : 'text-score-good';
-}
-
-function statusBgClass(pct: number): string {
-  return pct >= 90
-    ? 'bg-sev-error/15 text-sev-error'
-    : pct >= 75
-    ? 'bg-score-poor/15 text-score-poor'
-    : pct >= 50
-    ? 'bg-score-fair/15 text-score-fair'
-    : 'bg-score-good/15 text-score-good';
-}
+// Unified capacity bands (see constants/scoring.ts)
+const statusLabel     = (pct: number): string => usageBand(pct).label;
+const statusTextClass = (pct: number): string => usageBand(pct).text;
+const statusBgClass   = (pct: number): string => usageBand(pct).badge;
 
 function fmtNum(n: number): string {
   return n.toLocaleString();
@@ -65,10 +42,6 @@ function fmtNum(n: number): string {
 
 function fmtGB(mb: number): number {
   return Math.round((mb / 1024) * 10) / 10;
-}
-
-function riskClass(risk: 'low' | 'medium' | 'high'): string {
-  return risk === 'high' ? 'text-sev-error' : risk === 'medium' ? 'text-score-fair' : 'text-score-good';
 }
 
 // ── Reusable limit table ─────────────────────────────────────────────────────
@@ -130,63 +103,13 @@ function LimitTable({ limits, showAll = false }: { limits: OrgLimitInfo[]; showA
   );
 }
 
-// ── Apex risks table ─────────────────────────────────────────────────────────
-function ApexRisksTable({ risks }: { risks: GovernorRiskDetail[] }) {
-  if (risks.length === 0) {
-    return <EmptyState title="No Apex governor risk data available. Run analysis with Apex sources." />;
-  }
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-xs">
-        <thead>
-          <tr className="border-b border-sf-border">
-            <th className="text-left py-2 pr-3 text-sf-muted font-medium">Class / Trigger</th>
-            <th className="text-center py-2 px-2 text-sf-muted font-medium">SOQL</th>
-            <th className="text-center py-2 px-2 text-sf-muted font-medium">DML</th>
-            <th className="text-center py-2 px-2 text-sf-muted font-medium">CPU</th>
-            <th className="text-center py-2 px-2 text-sf-muted font-medium">Heap</th>
-            <th className="text-left py-2 pl-2 text-sf-muted font-medium">Patterns</th>
-          </tr>
-        </thead>
-        <tbody>
-          {risks.map((r) => {
-            const extra = r.patterns.length > 2 ? ` +${r.patterns.length - 2}` : '';
-            return (
-              <tr key={r.className} className="border-b border-sf-border/40 hover:bg-sf-bg-2/50 transition-colors">
-                <td className="py-1.5 pr-3 text-sf-text font-medium truncate max-w-40">{r.className}</td>
-                <td className={`py-1.5 px-2 text-center font-semibold ${riskClass(r.prediction.soqlQueries.risk)}`}>
-                  {r.prediction.soqlQueries.risk.toUpperCase()}
-                </td>
-                <td className={`py-1.5 px-2 text-center font-semibold ${riskClass(r.prediction.dmlStatements.risk)}`}>
-                  {r.prediction.dmlStatements.risk.toUpperCase()}
-                </td>
-                <td className={`py-1.5 px-2 text-center font-semibold ${riskClass(r.prediction.cpuTime.risk)}`}>
-                  {r.prediction.cpuTime.risk.toUpperCase()}
-                </td>
-                <td className={`py-1.5 px-2 text-center font-semibold ${riskClass(r.prediction.heapSize.risk)}`}>
-                  {r.prediction.heapSize.risk.toUpperCase()}
-                </td>
-                <td className="py-1.5 pl-2 text-sf-muted truncate max-w-56">
-                  {r.patterns.slice(0, 2).join(', ')}{extra}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-// ── Category sub-tab (filtered limits + optional risks) ───────────────────────
+// ── Category sub-tab (filtered limits) ────────────────────────────────────────
 function CategoryTab({
   limits,
   category,
-  risks,
 }: {
   limits: OrgLimitInfo[];
   category: string;
-  risks?: GovernorRiskDetail[];
 }) {
   const keywords = CATEGORY_KEYWORDS[category] ?? [];
   const filtered = useMemo(
@@ -220,11 +143,6 @@ function CategoryTab({
       <GlassCard title="Limit Details">
         <LimitTable limits={filtered} showAll />
       </GlassCard>
-      {risks && risks.length > 0 && (
-        <GlassCard title="Apex Governor Risk Analysis">
-          <ApexRisksTable risks={risks} />
-        </GlassCard>
-      )}
     </div>
   );
 }
@@ -235,7 +153,6 @@ export default function GovernorLimits() {
   const results = useDashboardStore((s) => s.results);
 
   const limits = useMemo(() => results?.orgLimits ?? [], [results]);
-  const govRisks = useMemo(() => results?.governorRisks ?? [], [results]);
 
   // 8 headline gauges
   const apiCalls    = useMemo(() => findLimit(limits, 'DailyApiRequests'), [limits]);
@@ -247,24 +164,18 @@ export default function GovernorLimits() {
   const platEvents  = useMemo(() => findLimit(limits, 'HourlyPublishedPlatformEvents'), [limits]);
   const streaming   = useMemo(() => findLimit(limits, 'StreamingApiConcurrentClients'), [limits]);
 
-  // Summary donut — overall average usage across all limits
-  const avgUsage = useMemo(() => {
-    if (limits.length === 0) return 0;
-    const avg = limits.reduce((sum, l) => sum + l.usedPct, 0) / limits.length;
-    return Math.round(avg * 10) / 10;
-  }, [limits]);
-
-  const usageDonutData = useMemo(
-    () => [
-      { name: 'Used', value: avgUsage },
-      { name: 'Available', value: Math.max(0, 100 - avgUsage) },
-    ],
-    [avgUsage],
-  );
-
-  // Limit alerts — usedPct >= 50, sorted desc
-  const alertLimits = useMemo(
-    () => [...limits].filter((l) => l.usedPct >= 50).sort((a, b) => b.usedPct - a.usedPct),
+  // Limits at risk — usedPct >= 50, sorted desc, colored by capacity band.
+  // (An "average across all limits" donut was removed: averaging unrelated
+  // percentages is not a meaningful metric.)
+  const limitsAtRisk = useMemo(
+    () => [...limits]
+      .filter((l) => l.usedPct >= 50)
+      .sort((a, b) => b.usedPct - a.usedPct)
+      .map((l) => ({
+        name: l.label ?? l.name,
+        value: Math.round(l.usedPct * 10) / 10,
+        color: usageBand(l.usedPct).hex,
+      })),
     [limits],
   );
 
@@ -277,12 +188,12 @@ export default function GovernorLimits() {
   }
 
   return (
-    <div className="p-4 space-y-4">
+    <div className="p-6 space-y-4">
       {/* Header */}
       <div>
-        <h1 className="text-lg font-semibold text-sf-text">Governor / Daily Limits</h1>
+        <h1 className="text-base font-semibold text-sf-text">Platform Limits</h1>
         <p className="text-xs text-sf-muted mt-0.5">
-          Monitor usage of Salesforce governor limits and system resources
+          Consumption of Salesforce governor limits and system resources. Runtime performance analysis lives in the Performance tab.
         </p>
       </div>
 
@@ -352,143 +263,29 @@ export default function GovernorLimits() {
             />
           </div>
 
-          {/* Row 2 — overview table + trend + donut */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            <GlassCard title="Limits Usage Overview" className="lg:col-span-1">
+          {/* Row 2 — all limits table + limits at risk */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <GlassCard title="Limits Usage Overview">
               <LimitTable limits={limits} />
             </GlassCard>
 
-            <GlassCard title="Limits Usage Trend (Last 7 Days)" className="lg:col-span-1">
-              <EmptyState title="Per-limit trend data will be available in a future analysis" />
-            </GlassCard>
-
-            <GlassCard title="Current Usage vs Limit" className="lg:col-span-1">
-              {limits.length === 0 ? (
-                <EmptyState title="No limit data available" />
+            <GlassCard title={`Limits at Risk (≥50% consumed: ${limitsAtRisk.length})`}>
+              {limitsAtRisk.length === 0 ? (
+                <EmptyState title="No limits are above the 50% watch threshold" />
               ) : (
-                <div className="space-y-3">
-                  <DonutChart
-                    data={usageDonutData}
-                    height={160}
-                    showLegend
-                  />
-                  <div className="text-center">
-                    <p className="text-[11px] text-sf-muted">Average usage across all limits</p>
-                    <p className={`text-sm font-bold ${statusTextClass(avgUsage)}`}>
-                      {avgUsage}% Overall
-                    </p>
-                  </div>
-                </div>
-              )}
-            </GlassCard>
-          </div>
-
-          {/* Row 3 — API consumers + storage by object + limit alerts */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            <GlassCard title="Top API Consumers (Today)">
-              <EmptyState title="API consumer data requires enhanced monitoring. Not available in current analysis." />
-            </GlassCard>
-
-            <GlassCard title="Top Storage by Object Type">
-              <EmptyState title="Object storage breakdown requires enhanced monitoring. Not available in current analysis." />
-            </GlassCard>
-
-            <GlassCard title="Limit Alerts">
-              {alertLimits.length === 0 ? (
-                <EmptyState title="No limits are above 50% threshold" />
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b border-sf-border">
-                        <th className="text-left py-2 pr-2 text-sf-muted font-medium">Limit Area</th>
-                        <th className="text-center py-2 px-2 text-sf-muted font-medium">Severity</th>
-                        <th className="text-right py-2 px-2 text-sf-muted font-medium">Usage</th>
-                        <th className="text-right py-2 pl-2 text-sf-muted font-medium">Threshold</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {alertLimits.slice(0, 8).map((l) => (
-                        <tr
-                          key={l.name}
-                          className="border-b border-sf-border/40 hover:bg-sf-bg-2/50 transition-colors"
-                        >
-                          <td className="py-1.5 pr-2 text-sf-text truncate max-w-36">{l.label}</td>
-                          <td className="py-1.5 px-2 text-center">
-                            <SeverityPill
-                              severity={
-                                l.usedPct >= 90 ? 'error' : l.usedPct >= 75 ? 'warning' : 'info'
-                              }
-                            />
-                          </td>
-                          <td className={`py-1.5 px-2 text-right font-semibold tabular-nums ${statusTextClass(l.usedPct)}`}>
-                            {l.usedPct.toFixed(1)}%
-                          </td>
-                          <td className="py-1.5 pl-2 text-right text-sf-muted">
-                            {l.usedPct >= 90 ? '90%' : l.usedPct >= 75 ? '75%' : '50%'}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {alertLimits.length > 8 && (
-                    <p className="mt-2 text-[11px] text-sf-muted">
-                      +{alertLimits.length - 8} more alerts
-                    </p>
-                  )}
-                </div>
+                <HBarChart data={limitsAtRisk.slice(0, 12)} multiColor color="#eab308" />
               )}
             </GlassCard>
           </div>
         </div>
       )}
 
-      {/* ── API & Integrations ───────────────────────────────────────────────── */}
-      {subTab === 'api' && (
-        <CategoryTab limits={limits} category="api" risks={govRisks} />
-      )}
-
-      {/* ── Storage ─────────────────────────────────────────────────────────── */}
-      {subTab === 'storage' && (
-        <CategoryTab limits={limits} category="storage" />
-      )}
-
-      {/* ── Apex Execution ──────────────────────────────────────────────────── */}
-      {subTab === 'apex' && (
-        <div className="space-y-4">
-          <CategoryTab limits={limits} category="apex" />
-          <GlassCard title="Apex Governor Risk Analysis">
-            <ApexRisksTable risks={govRisks} />
-          </GlassCard>
-        </div>
-      )}
-
-      {/* ── Async Operations ────────────────────────────────────────────────── */}
-      {subTab === 'async' && (
-        <CategoryTab limits={limits} category="async" />
-      )}
-
-      {/* ── Emails ──────────────────────────────────────────────────────────── */}
-      {subTab === 'emails' && (
-        <CategoryTab limits={limits} category="emails" />
-      )}
-
-      {/* ── Platform Events ─────────────────────────────────────────────────── */}
-      {subTab === 'platform-events' && (
-        <CategoryTab limits={limits} category="platform-events" />
-      )}
-
-      {/* ── Data ────────────────────────────────────────────────────────────── */}
-      {subTab === 'data' && (
-        <CategoryTab limits={limits} category="data" />
-      )}
-
-      {/* ── Forecast ────────────────────────────────────────────────────────── */}
-      {subTab === 'forecast' && (
-        <GlassCard title="Limits Forecast">
-          <EmptyState title="Predictive limit forecasting is not yet available. This feature will use historical trends to project future limit consumption." />
-        </GlassCard>
-      )}
+      {/* ── Category sub-tabs ────────────────────────────────────────────────── */}
+      {subTab === 'api'       && <CategoryTab limits={limits} category="api" />}
+      {subTab === 'storage'   && <CategoryTab limits={limits} category="storage" />}
+      {subTab === 'apex'      && <CategoryTab limits={limits} category="apex" />}
+      {subTab === 'messaging' && <CategoryTab limits={limits} category="messaging" />}
+      {subTab === 'data'      && <CategoryTab limits={limits} category="data" />}
 
       <p className="text-[10px] text-sf-muted text-center pb-2">
         All limit usage is based on the current 24-hour period (12:00 AM – 11:59 PM).

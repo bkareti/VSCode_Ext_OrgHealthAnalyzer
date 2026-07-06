@@ -594,6 +594,10 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
         let analyzedFlows = 0;
         let capturedDataModelStats: AnalysisResult['dataModelStats'] = [];
         let capturedDataModelSummary: AnalysisResult['dataModelSummary'] | undefined;
+        let capturedDataModelRecordTypeDetails: AnalysisResult['dataModelRecordTypeDetails'];
+        let capturedDataModelPageLayoutDetails: AnalysisResult['dataModelPageLayoutDetails'];
+        let capturedDataModelValidationRuleDetails: AnalysisResult['dataModelValidationRuleDetails'];
+        let capturedDataModelRecordPageDetails: AnalysisResult['dataModelRecordPageDetails'];
         let capturedAutomationSummary: AnalysisResult['automationSummary'] | undefined;
 
         ruleEngine.reset();
@@ -836,8 +840,12 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
             try {
               const dataModelResult = await dataModelAnalyzer.analyze();
               bag.dataModel = dataModelResult.issues;
-              capturedDataModelStats   = dataModelResult.objectFieldStats || [];
-              capturedDataModelSummary = dataModelResult.dataModelSummary;
+              capturedDataModelStats                  = dataModelResult.objectFieldStats || [];
+              capturedDataModelSummary               = dataModelResult.dataModelSummary;
+              capturedDataModelRecordTypeDetails     = dataModelResult.dataModelRecordTypeDetails;
+              capturedDataModelPageLayoutDetails     = dataModelResult.dataModelPageLayoutDetails;
+              capturedDataModelValidationRuleDetails = dataModelResult.dataModelValidationRuleDetails;
+              capturedDataModelRecordPageDetails     = dataModelResult.dataModelRecordPageDetails;
             } catch (e) { failStep('Data Model', e); }
             tick('Analyzing data model…');
           })(),
@@ -1008,6 +1016,10 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
         if (dependencyGraph)     { currentResult.dependencyGraph     = dependencyGraph; }
         if (capturedDataModelStats && capturedDataModelStats.length > 0) { currentResult.dataModelStats = capturedDataModelStats; }
         if (capturedDataModelSummary) { currentResult.dataModelSummary = capturedDataModelSummary; }
+        if (capturedDataModelRecordTypeDetails?.length)     { currentResult.dataModelRecordTypeDetails     = capturedDataModelRecordTypeDetails; }
+        if (capturedDataModelPageLayoutDetails?.length)     { currentResult.dataModelPageLayoutDetails     = capturedDataModelPageLayoutDetails; }
+        if (capturedDataModelValidationRuleDetails?.length) { currentResult.dataModelValidationRuleDetails = capturedDataModelValidationRuleDetails; }
+        if (capturedDataModelRecordPageDetails?.length)     { currentResult.dataModelRecordPageDetails     = capturedDataModelRecordPageDetails; }
         if (capturedAutomationSummary) { currentResult.automationSummary = capturedAutomationSummary; }
         if (testCoverageSummary) { currentResult.testCoverageSummary = testCoverageSummary; }
         currentResult.codeInventory = codeInventory;

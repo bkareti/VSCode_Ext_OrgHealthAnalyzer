@@ -3,23 +3,8 @@ import GlassCard from '@/components/common/GlassCard';
 import EmptyState from '@/components/common/EmptyState';
 import SparklineChart from '@/components/charts/SparklineChart';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
+import { scoreHex as scoreColor, scoreLabel } from '@/constants/scoring';
 import type { ScanHistoryEntry } from '@/types';
-
-function scoreColor(score: number): string {
-  if (score >= 80) return '#22c55e';
-  if (score >= 65) return '#84cc16';
-  if (score >= 50) return '#eab308';
-  if (score >= 35) return '#f97316';
-  return '#ef4444';
-}
-
-function scoreLabel(score: number): string {
-  if (score >= 80) return 'Excellent';
-  if (score >= 65) return 'Good';
-  if (score >= 50) return 'Fair';
-  if (score >= 35) return 'Poor';
-  return 'Critical';
-}
 
 function formatTs(ts: string): string {
   try {

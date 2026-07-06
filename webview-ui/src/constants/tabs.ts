@@ -25,6 +25,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'orginfo',    label: 'Organization',    icon: '🏢', path: '/orginfo'    },
       { id: 'datamodel',  label: 'Data Model',      icon: '🗄️', path: '/datamodel'  },
+      { id: 'automation', label: 'Automation',      icon: '⚡', path: '/automation' },
       { id: 'code',       label: 'Code Quality',    icon: '💻', path: '/code'       },
       { id: 'secaccess',  label: 'Security',        icon: '🛡️', path: '/secaccess'  },
       { id: 'perflimits', label: 'Performance',     icon: '🚀', path: '/perflimits' },
@@ -32,11 +33,12 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
-    label: 'INTELLIGENCE',
+    label: 'MODERNIZATION',
     items: [
+      { id: 'techdebt',      label: 'Technical Debt',    icon: '🧹', path: '/techdebt'      },
       { id: 'cta',           label: 'OrgPulse Advisory', icon: '✨', path: '/cta'           },
       { id: 'futurereadiness',label: 'Future Readiness', icon: '🔮', path: '/futurereadiness'},
-      { id: 'trendshistory',  label: 'Trends & History',  icon: '📅', path: '/trendshistory', disabled: true },
+      { id: 'trendshistory',  label: 'Trends & History',  icon: '📅', path: '/trendshistory' },
       { id: 'askarchitect',   label: 'Ask Architect',     icon: '💬', path: '/askarchitect'   },
     ],
   },

@@ -13,7 +13,7 @@ import type {
 // ─── Sub-tabs ──────────────────────────────────────────────────────────────────
 const SUBTABS = [
   'Overview', 'Clouds & Licenses', 'Installed Packages',
-  'Applications', 'Environments', 'Integrations', 'Feature Usage',
+  'Applications', 'Environments', 'Integrations',
 ] as const;
 type SubTab = typeof SUBTABS[number];
 
@@ -127,31 +127,37 @@ export default function OrgInfo() {
   const results = useOrgStore((s) => s.results);
   const isDemo  = !results;
 
-  // ── Data extraction (real or demo fallback) ──────────────────────────────────
+  // ── Data extraction ──────────────────────────────────────────────────────────
+  // Demo mode is ALL-OR-NOTHING: demo constants render only when there are no
+  // results at all. Once a real scan exists, missing fields show '—' / null —
+  // never a demo value blended next to real data.
   const od   = results?.orgDetails;
   const ext: Partial<OrgExtendedDetails> = results?.orgInfoData?.extended ?? {};
   const inv  = results?.orgInventory;
 
-  const orgName      = od?.orgName    ?? (od?.username ?? 'Acme Corporation');
-  const orgId        = od?.orgId      ?? '00D5g000008abcEAA';
-  const orgType      = od?.orgType    ?? 'Enterprise';
-  const instanceName = od?.instanceName ?? 'NA135';
-  const apiVersion   = od?.apiVersion   ?? '65.0';
-  const nextRelease  = od?.nextReleaseName ?? "Summer '26";
-  const instanceUrl  = od?.instanceUrl    ?? 'https://login.salesforce.com';
-  const isHyperforce = ext.isHyperforce ?? true;
+  const orgName      = od?.orgName ?? od?.username ?? (isDemo ? 'Acme Corporation' : '—');
+  const orgId        = od?.orgId        ?? (isDemo ? '00D5g000008abcEAA' : '—');
+  const orgType      = od?.orgType      ?? (isDemo ? 'Enterprise' : '—');
+  const instanceName = od?.instanceName ?? (isDemo ? 'NA135' : '');
+  const apiVersion   = od?.apiVersion   ?? (isDemo ? '65.0' : '');
+  const nextRelease  = od?.nextReleaseName ?? (isDemo ? "Summer '26" : null);
+  const instanceUrl  = od?.instanceUrl  ?? (isDemo ? 'https://login.salesforce.com' : null);
+  const isHyperforce = ext.isHyperforce ?? (isDemo ? true : false);
   const isSandbox    = ext.isSandbox    ?? false;
-  const dataCenter   = ext.dataCenter   ?? 'Hyperforce NA';
-  const buildVersion = ext.buildVersion ?? '246.8';
-  const timezone     = ext.timezone     ?? '(GMT-07:00) Pacific Time (US & Canada)';
-  const language     = ext.language     ?? 'English (United States)';
-  const currency     = ext.currency     ?? 'USD - U.S. Dollar';
-  const myDomain     = ext.myDomain     ?? 'acmecorp.my.salesforce.com';
-  const createdDate  = ext.createdDate  ?? '2015-03-12T00:00:00.000Z';
-  const storageUsedMB  = ext.storageUsedMB  ?? 241254;    // ~235.6 GB
-  const storageLimitMB = ext.storageLimitMB ?? 1048576;   // 1 TB
+  const dataCenter   = ext.dataCenter   ?? (isDemo ? 'Hyperforce NA' : null);
+  const buildVersion = ext.buildVersion ?? (isDemo ? '246.8' : null);
+  const timezone     = ext.timezone     ?? (isDemo ? '(GMT-07:00) Pacific Time (US & Canada)' : null);
+  const language     = ext.language     ?? (isDemo ? 'English (United States)' : null);
+  const currency     = ext.currency     ?? (isDemo ? 'USD - U.S. Dollar' : null);
+  const myDomain     = ext.myDomain     ?? (isDemo ? 'acmecorp.my.salesforce.com' : null);
+  const createdDate  = ext.createdDate  ?? (isDemo ? '2015-03-12T00:00:00.000Z' : null);
+  const storageUsedMB  = ext.storageUsedMB  ?? (isDemo ? 241254  : 0);
+  const storageLimitMB = ext.storageLimitMB ?? (isDemo ? 1048576 : 0);
   const storagePct     = storageLimitMB ? Math.round(storageUsedMB / storageLimitMB * 100) : 0;
-  const storageLabel   = `${(storageUsedMB / 1024).toFixed(1)} GB of ${Math.round(storageLimitMB / 1024)} TB (${storagePct}%)`;
+  const storageLabel   = storageLimitMB > 0
+    ? `${(storageUsedMB / 1024).toFixed(1)} GB of ${Math.round(storageLimitMB / 1024)} TB (${storagePct}%)`
+    : null;
+  const trustStatus    = od?.trustStatus;
 
   const clouds    = results?.orgInfoData?.clouds          ?? (isDemo ? DEMO_CLOUDS : []);
   const licenses  = results?.licenseSummary               ?? (isDemo ? DEMO_LICENSES : []);
@@ -202,20 +208,16 @@ export default function OrgInfo() {
   ].filter(d => d.value > 0) : [];
 
   // ── Quick facts items ────────────────────────────────────────────────────────
+  // Build inventory only — identity counts (roles/profiles/perm sets/groups)
+  // are owned by the Security tab; don't repeat them here.
   const qfItems = qf ? [
     { icon: '🗃️', label: 'Custom Objects',    value: qf.customObjects    },
     { icon: '📋', label: 'Standard Objects',  value: stdObjs              },
-    { icon: '👤', label: 'Users',             value: qf.users            },
-    { icon: '📊', label: 'Roles',             value: qf.roles            },
-    { icon: '🪪', label: 'Profiles',          value: qf.profiles         },
-    { icon: '🔑', label: 'Permission Sets',   value: qf.permissionSets   },
-    { icon: '🗂️', label: 'PS Groups',        value: qf.permissionSetGroups },
-    { icon: '👥', label: 'Public Groups',     value: qf.publicGroups     },
-    { icon: '📥', label: 'Queues',            value: qf.queues           },
     { icon: '⚡', label: 'Flows',             value: qf.flows            },
     { icon: '💻', label: 'Apex Classes',      value: qf.apexClasses      },
     { icon: '⚙️', label: 'Triggers',          value: qf.triggers         },
     { icon: '🧩', label: 'LWC Components',   value: qf.lwcComponents    },
+    { icon: '📥', label: 'Queues',            value: qf.queues           },
   ] : [];
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -249,8 +251,29 @@ export default function OrgInfo() {
       {subTab === 'Overview' && (
         <div className="space-y-4">
 
-          {/* KPI Strip — 8 cards */}
-          <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
+          {/* Trust status pill (from Salesforce Trust API — real data only) */}
+          {trustStatus && (
+            <div className="flex items-center gap-2">
+              <span
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border"
+                style={
+                  trustStatus === 'OK'
+                    ? { background: 'rgba(34,197,94,.1)', borderColor: 'rgba(34,197,94,.3)', color: '#22c55e' }
+                    : { background: 'rgba(245,158,11,.1)', borderColor: 'rgba(245,158,11,.3)', color: '#f59e0b' }
+                }
+              >
+                {trustStatus === 'OK' ? '●' : '⚠'} Salesforce Trust: {trustStatus}
+              </span>
+              {(od?.trustIncidents?.length ?? 0) > 0 && (
+                <span className="text-[11px] text-sev-warning">
+                  {od!.trustIncidents.length} active incident{od!.trustIncidents.length === 1 ? '' : 's'} on {instanceName}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* KPI Strip — 6 cards (packages/integrations live in their cards below) */}
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
             <KpiCard icon="👑" iconBg="rgba(245,158,11,.15)" value={editionMain}
               label="Edition" sub={editionSub} />
             <KpiCard icon="🌐" iconBg="rgba(1,118,211,.15)" value={instanceName || '—'}
@@ -265,12 +288,6 @@ export default function OrgInfo() {
             <KpiCard icon="🪪" iconBg="rgba(59,130,246,.15)"
               value={usedLic ? usedLic.toLocaleString() : '—'}
               label="Active Licenses" sub={totalLic ? `of ${totalLic.toLocaleString()}` : null} />
-            <KpiCard icon="📦" iconBg="rgba(139,92,246,.15)"
-              value={pkgList.length > 0 ? pkgList.length : (pkgSum?.total ?? '—')}
-              label="Installed Packages" sub="Total Packages" />
-            <KpiCard icon="🔌" iconBg="rgba(245,158,11,.15)"
-              value={intSum ? intSum.total : '—'}
-              label="Integrations" sub="Total Integrations" />
           </div>
 
           {/* Row 1: Org Details | Clouds Overview | License Summary */}
@@ -581,6 +598,54 @@ export default function OrgInfo() {
               </table>
             </div>
           </GlassCard>
+
+          {/* Feature licenses (merged from former "Feature Usage" sub-tab) */}
+          {featLics.length > 0 && (
+            <GlassCard title={`Feature Licenses (${featLics.length})`}>
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-sf-border">
+                      {['Feature', 'Status', 'Used / Total', 'Utilization'].map(h => (
+                        <th key={h} className="text-left py-2 px-2 text-sf-muted font-medium">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {featLics.map((fl, i) => {
+                      const fPct = fl.totalLicenses > 0 ? Math.round(fl.usedLicenses / fl.totalLicenses * 100) : 0;
+                      const fClr = fPct > 90 ? '#ef4444' : fPct > 70 ? '#f59e0b' : '#22c55e';
+                      return (
+                        <tr key={fl.name} className={`border-b border-sf-border/40 ${i % 2 ? 'bg-sf-bg-3/30' : ''}`}>
+                          <td className="py-2 px-2 text-sf-text font-medium">{fl.name}</td>
+                          <td className="py-2 px-2">
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold"
+                              style={{
+                                background: fl.status === 'Active' ? 'rgba(34,197,94,.15)' : 'rgba(107,114,128,.15)',
+                                color:      fl.status === 'Active' ? '#22c55e' : '#6b7280',
+                              }}>
+                              {fl.status}
+                            </span>
+                          </td>
+                          <td className="py-2 px-2 text-sf-muted tabular-nums">
+                            {fl.usedLicenses} / {fl.totalLicenses}
+                          </td>
+                          <td className="py-2 px-2 min-w-[120px]">
+                            <div className="flex items-center gap-2">
+                              <div className="flex-1 h-1.5 rounded-full bg-sf-border overflow-hidden">
+                                <div className="h-full rounded-full" style={{ width: `${fPct}%`, background: fClr }} />
+                              </div>
+                              <span className="text-[10px] text-sf-muted w-8 text-right">{fPct}%</span>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </GlassCard>
+          )}
         </div>
       )}
 
@@ -726,55 +791,6 @@ export default function OrgInfo() {
         </GlassCard>
       )}
 
-      {/* ════ FEATURE USAGE ══════════════════════════════════════════════════════ */}
-      {subTab === 'Feature Usage' && (
-        <GlassCard title={`Feature Licenses (${featLics.length})`}>
-          {featLics.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-xs">
-                <thead>
-                  <tr className="border-b border-sf-border">
-                    {['Feature', 'Status', 'Used / Total', 'Utilization'].map(h => (
-                      <th key={h} className="text-left py-2 px-2 text-sf-muted font-medium">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {featLics.map((fl, i) => {
-                    const pct = fl.totalLicenses > 0 ? Math.round(fl.usedLicenses / fl.totalLicenses * 100) : 0;
-                    const clr = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#22c55e';
-                    return (
-                      <tr key={fl.name} className={`border-b border-sf-border/40 ${i % 2 ? 'bg-sf-bg-3/30' : ''}`}>
-                        <td className="py-2 px-2 text-sf-text font-medium">{fl.name}</td>
-                        <td className="py-2 px-2">
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold"
-                            style={{
-                              background: fl.status === 'Active' ? 'rgba(34,197,94,.15)' : 'rgba(107,114,128,.15)',
-                              color:      fl.status === 'Active' ? '#22c55e' : '#6b7280',
-                            }}>
-                            {fl.status}
-                          </span>
-                        </td>
-                        <td className="py-2 px-2 text-sf-muted tabular-nums">
-                          {fl.usedLicenses} / {fl.totalLicenses}
-                        </td>
-                        <td className="py-2 px-2 min-w-[120px]">
-                          <div className="flex items-center gap-2">
-                            <div className="flex-1 h-1.5 rounded-full bg-sf-border overflow-hidden">
-                              <div className="h-full rounded-full" style={{ width: `${pct}%`, background: clr }} />
-                            </div>
-                            <span className="text-[10px] text-sf-muted w-8 text-right">{pct}%</span>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : <p className="text-xs text-sf-muted text-center py-8">No feature license data available.</p>}
-        </GlassCard>
-      )}
     </div>
   );
 }

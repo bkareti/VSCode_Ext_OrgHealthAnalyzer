@@ -9,16 +9,16 @@ import IssueFilters from '@/components/issues/IssueFilters';
 import HBarChart from '@/components/charts/HBarChart';
 import DonutChart from '@/components/charts/DonutChart';
 import ScoreRing from '@/components/charts/ScoreRing';
+import { scoreLabel, scoreText } from '@/constants/scoring';
 
-type SubTab = 'summary' | 'apex' | 'triggers' | 'lwc' | 'coverage' | 'technical-debt';
+type SubTab = 'summary' | 'apex' | 'triggers' | 'lwc' | 'coverage';
 
 const SUB_TABS: { id: SubTab; label: string }[] = [
-  { id: 'summary',        label: 'Summary' },
-  { id: 'apex',           label: 'Apex' },
-  { id: 'triggers',       label: 'Triggers' },
-  { id: 'lwc',            label: 'LWC' },
-  { id: 'coverage',       label: 'Coverage' },
-  { id: 'technical-debt', label: 'Technical Debt' },
+  { id: 'summary',  label: 'Summary' },
+  { id: 'apex',     label: 'Apex' },
+  { id: 'triggers', label: 'Triggers' },
+  { id: 'lwc',      label: 'LWC' },
+  { id: 'coverage', label: 'Coverage' },
 ];
 
 const COV_PAGE_SIZE = 25;
@@ -74,7 +74,6 @@ export default function CodeQuality() {
   const apexIssues    = useMemo(() => allIssues.filter(i => i.category === 'code-quality' && !i.file?.endsWith('.trigger')), [allIssues]);
   const trigIssues    = useMemo(() => allIssues.filter(i => i.file?.endsWith('.trigger')), [allIssues]);
   const lwcIssues     = useMemo(() => allIssues.filter(i => i.category === 'lwc-quality'), [allIssues]);
-  const debtIssues    = useMemo(() => allIssues.filter(i => i.category === 'technical-debt'), [allIssues]);
   const testingIssues = useMemo(() => allIssues.filter(i => i.category === 'testing'), [allIssues]);
 
   const handleExportCsv = useCallback(() => {
@@ -121,13 +120,28 @@ export default function CodeQuality() {
   const passing      = Math.max(0, totalClasses - below75);
 
   const qualityScore = Math.round(scores?.codeQuality ?? 0);
-  const scoreLabel   = qualityScore >= 90 ? 'Excellent' : qualityScore >= 75 ? 'Good' : qualityScore >= 50 ? 'Fair' : 'Poor';
-  const scoreAccent  = qualityScore >= 75 ? 'text-score-good' : qualityScore >= 50 ? 'text-sev-warning' : 'text-sev-error';
-  const debtScore    = Math.round(scores?.technicalDebt ?? 0);
 
   const qw  = debt?.quickWins?.length  ?? 0;
   const med = debt?.mediumItems?.length ?? 0;
   const lrg = debt?.largeItems?.length  ?? 0;
+
+  // Apex code size vs per-namespace character limit (~6M) — % is more useful than raw chars
+  const codeSizePct = inv && inv.apexCodeCharLimit > 0
+    ? Math.round((inv.apexCodeChars / inv.apexCodeCharLimit) * 1000) / 10
+    : null;
+
+  // ── Quality Gate (SonarQube-style binary verdicts) ─────────────────────────
+  const deprecatedAutomation =
+    (results.automationSummary?.totalProcessBuilders ?? 0) +
+    (results.automationSummary?.totalWorkflowRules   ?? 0);
+
+  const gateConditions = [
+    { label: 'Test coverage ≥ 75%',        pass: covPct >= 75,             detail: `${covPct.toFixed(1)}%` },
+    { label: 'No critical issues',         pass: errCnt === 0,             detail: String(errCnt) },
+    { label: 'Debt under 200 hrs',         pass: (debt?.totalHours ?? 0) < 200, detail: debt ? `${debt.totalHours} hrs` : 'n/a' },
+    { label: 'No deprecated automation',   pass: deprecatedAutomation === 0, detail: String(deprecatedAutomation) },
+  ];
+  const gatePassed = gateConditions.every(c => c.pass);
 
   // ── Chart data ─────────────────────────────────────────────────────────────
   const severityData = [
@@ -139,12 +153,6 @@ export default function CodeQuality() {
   const catChartData = Object.entries(catCounts)
     .map(([name, value]) => ({ name: name.replace(/-/g, ' '), value }))
     .sort((a, b) => b.value - a.value);
-
-  const debtBreakdownData = [
-    { name: 'Quick Wins (<1 hr)', value: qw  },
-    { name: 'Medium (1–4 hrs)',   value: med },
-    { name: 'Large (>4 hrs)',     value: lrg },
-  ].filter(d => d.value > 0);
 
   const codeInventoryData = [
     { name: 'Apex Classes',    value: inv?.apexClasses        ?? 0 },
@@ -162,6 +170,20 @@ export default function CodeQuality() {
     { name: '<75% Coverage', value: Math.max(0, below75 - zeroCov) },
     { name: '0% Coverage',   value: zeroCov },
   ].filter(d => d.value > 0);
+
+  // Coverage histogram — shape of the problem, from per-class details
+  const covHistogram = (() => {
+    const details = coverage?.classCoverageDetails ?? [];
+    if (details.length === 0) return [];
+    const b: Record<string, number> = { '0–25%': 0, '25–50%': 0, '50–75%': 0, '75–100%': 0 };
+    for (const c of details) {
+      if (c.pct < 25)      b['0–25%']++;
+      else if (c.pct < 50) b['25–50%']++;
+      else if (c.pct < 75) b['50–75%']++;
+      else                 b['75–100%']++;
+    }
+    return Object.entries(b).map(([name, value]) => ({ name, value }));
+  })();
 
   const recentIssues = codeQualityIssues.slice(0, 10);
 
@@ -209,20 +231,48 @@ export default function CodeQuality() {
       {activeTab === 'summary' && (
         <div className="space-y-6">
 
-          {/* Row 1: 8 KPI stat cards */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-3">
-            <StatCard icon="🛡️" value={`${qualityScore}/100`}  label="Code Quality Score"  sub={scoreLabel}    accent={scoreAccent} />
-            <StatCard icon="</>" value={inv ? fmtChars(inv.apexCodeChars ?? 0) + ' chars' : '—'} label="Apex Code Size" />
-            <StatCard icon="🧩" value={totalComponents}         label="Total Components" />
-            <StatCard icon="⏱️" value={debt ? `${debt.totalHours} hrs` : '—'} label="Technical Debt" accent={debt && debt.totalHours > 500 ? 'text-sev-warning' : undefined} />
-            <StatCard icon="🔴" value={errCnt}                  label="Critical Issues"  accent={errCnt  > 0 ? 'text-sev-error'   : 'text-score-good'} />
-            <StatCard icon="🟡" value={warnCnt}                 label="High Issues"      accent={warnCnt > 0 ? 'text-sev-warning' : 'text-score-good'} />
-            <StatCard icon="✅" value={`${covPct.toFixed(1)}%`} label="Test Coverage"    accent={covColor} />
-            <StatCard icon="⚠️" value={codeQualityIssues.length} label="Total Issues" />
+          {/* Quality Gate — binary pass/fail conditions */}
+          <div className={`rounded-xl border p-4 ${gatePassed ? 'border-score-good/30 bg-score-good/5' : 'border-sev-error/30 bg-sev-error/5'}`}>
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${gatePassed ? 'bg-score-good/15 text-score-good' : 'bg-sev-error/15 text-sev-error'}`}>
+                Quality Gate: {gatePassed ? 'PASSED' : 'FAILED'}
+              </span>
+              <div className="flex gap-2 flex-wrap flex-1">
+                {gateConditions.map(c => (
+                  <span
+                    key={c.label}
+                    className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded border ${
+                      c.pass
+                        ? 'border-score-good/25 text-score-good bg-score-good/5'
+                        : 'border-sev-error/25 text-sev-error bg-sev-error/5'
+                    }`}
+                    title={c.detail}
+                  >
+                    {c.pass ? '✓' : '✗'} {c.label} <span className="opacity-70">({c.detail})</span>
+                  </span>
+                ))}
+              </div>
+            </div>
           </div>
 
-          {/* Row 2: 3 charts (removed duplicate coverage card; replaced with Debt at a Glance) */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {/* Row 1: 6 KPI stat cards */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
+            <StatCard icon="🛡️" value={`${qualityScore}/100`}  label="Code Quality Score"  sub={scoreLabel(qualityScore)} accent={scoreText(qualityScore)} />
+            <StatCard icon="🔴" value={errCnt}                  label="Critical Issues"  accent={errCnt  > 0 ? 'text-sev-error'   : 'text-score-good'} />
+            <StatCard icon="🟡" value={warnCnt}                 label="Warnings"         accent={warnCnt > 0 ? 'text-sev-warning' : 'text-score-good'} />
+            <StatCard icon="✅" value={`${covPct.toFixed(1)}%`} label="Test Coverage"    accent={covColor} />
+            <StatCard
+              icon="</>"
+              value={codeSizePct != null ? `${codeSizePct}%` : (inv ? fmtChars(inv.apexCodeChars ?? 0) : '—')}
+              label="Apex Code Size"
+              sub={codeSizePct != null ? `of ${fmtChars(inv!.apexCodeCharLimit)} char limit` : undefined}
+              accent={codeSizePct != null && codeSizePct >= 75 ? 'text-sev-warning' : undefined}
+            />
+            <StatCard icon="🧩" value={totalComponents}         label="Total Components" />
+          </div>
+
+          {/* Row 2: Severity | Category | Top Components | Coverage */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
             {/* Issues by Severity */}
             <GlassCard title="Issues by Severity">
               {severityData.length > 0 ? (
@@ -231,7 +281,7 @@ export default function CodeQuality() {
                   <div className="mt-2 space-y-1">
                     {severityData.map(d => (
                       <div key={d.name} className="flex items-center gap-2 text-xs">
-                        <span className={d.name === 'Error' ? 'text-sev-error' : d.name === 'Warning' ? 'text-sev-warning' : 'text-sf-muted'}>●</span>
+                        <span className={d.name === 'Critical' ? 'text-sev-error' : d.name === 'Warning' ? 'text-sev-warning' : 'text-sf-muted'}>●</span>
                         <span className="text-sf-muted flex-1">{d.name}</span>
                         <span className="text-sf-text font-medium tabular-nums">{d.value}</span>
                         <span className="text-sf-muted tabular-nums w-12 text-right">
@@ -246,35 +296,12 @@ export default function CodeQuality() {
               )}
             </GlassCard>
 
-            {/* Issues by Category */}
+            {/* Issues by Category — the ONE place this dataset renders */}
             <GlassCard title="Issues by Category">
               {catChartData.length > 0
                 ? <HBarChart data={catChartData} color="#3b82f6" />
                 : <p className="text-xs text-sf-muted py-6 text-center">No issues found.</p>}
             </GlassCard>
-
-            {/* Debt at a Glance (replaces duplicate Test Coverage card) */}
-            <GlassCard title="Debt at a Glance">
-              <div className="flex flex-col items-center gap-3">
-                <ScoreRing score={debtScore} size={80} label="Debt Score" />
-                <dl className="w-full space-y-1.5 text-xs">
-                  {[
-                    { label: 'Total Hours',   value: debt?.totalHours   ?? '—', accent: (debt?.totalHours ?? 0) > 200 ? 'text-sev-warning' : 'text-sf-text' },
-                    { label: 'Sprint Cycles', value: debt?.sprintCycles ?? '—', accent: 'text-sf-text' },
-                    { label: 'Quick Wins',    value: qw,                        accent: 'text-score-good' },
-                  ].map(({ label, value, accent }) => (
-                    <div key={label} className="flex justify-between">
-                      <dt className="text-sf-muted">{label}</dt>
-                      <dd className={`font-semibold ${accent}`}>{value}</dd>
-                    </div>
-                  ))}
-                </dl>
-              </div>
-            </GlassCard>
-          </div>
-
-          {/* Row 3: Top 10 Components | Category breakdown | Consolidated Test Coverage */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             {/* Top 10 Components by Issues */}
             <GlassCard title="Top 10 Components by Issues">
               {top10Components.length > 0 ? (
@@ -323,40 +350,7 @@ export default function CodeQuality() {
               )}
             </GlassCard>
 
-            {/* Issues by Category breakdown table + mini donut */}
-            <GlassCard title="Issues by Category Breakdown">
-              {catChartData.length > 0 ? (
-                <div className="space-y-3">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs border-collapse">
-                      <thead>
-                        <tr className="border-b border-sf-border">
-                          <th className="text-left py-1.5 text-sf-muted font-medium">Category</th>
-                          <th className="text-right py-1.5 px-2 text-sf-muted font-medium">Issues</th>
-                          <th className="text-right py-1.5 text-sf-muted font-medium">%</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {catChartData.map(row => (
-                          <tr key={row.name} className="border-b border-sf-border/30">
-                            <td className="py-1.5 text-sf-text capitalize">{row.name}</td>
-                            <td className="py-1.5 px-2 text-right text-sf-text font-medium">{row.value}</td>
-                            <td className="py-1.5 text-right text-sf-muted">
-                              {codeQualityIssues.length > 0 ? `${((row.value / codeQualityIssues.length) * 100).toFixed(1)}%` : '0%'}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <DonutChart data={catChartData} height={110} showLegend={false} />
-                </div>
-              ) : (
-                <p className="text-xs text-sf-muted py-6 text-center">No issues found.</p>
-              )}
-            </GlassCard>
-
-            {/* Consolidated Test Coverage (single card — Row 2 duplicate removed) */}
+            {/* Consolidated Test Coverage (the one coverage card on Summary) */}
             <GlassCard title="Test Coverage Summary">
               <div className="space-y-4">
                 <div className="flex items-center gap-4">
@@ -399,34 +393,26 @@ export default function CodeQuality() {
             </GlassCard>
           </div>
 
-          {/* Row 4: Technical Debt (improved) | Code Inventory (with LWC/Aura/VF) | Recent Issues */}
+          {/* Row 3: Debt pointer | Code Inventory (with LWC/Aura/VF) | Recent Issues */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* Technical Debt — two-panel layout */}
-            <GlassCard title="Technical Debt Summary">
+            {/* Technical Debt — compact pointer; full breakdown lives in the Technical Debt tab */}
+            <GlassCard title="Technical Debt">
               {debt ? (
-                <div className="flex gap-4">
-                  {/* Left: key stats */}
-                  <dl className="space-y-2.5 text-xs flex-1 min-w-0">
-                    {[
-                      { label: 'Total Hours',   value: debt.totalHours,  accent: debt.totalHours > 200 ? 'text-sev-warning' : 'text-sf-text' },
-                      { label: 'Sprint Cycles', value: debt.sprintCycles ?? '—', accent: 'text-sf-text' },
-                      { label: 'Quick Wins',    value: qw,  accent: 'text-score-good' },
-                      { label: 'Medium Items',  value: med, accent: 'text-sev-warning' },
-                      { label: 'Large Items',   value: lrg, accent: 'text-sev-error' },
-                    ].map(({ label, value, accent }) => (
-                      <div key={label}>
-                        <dt className="text-sf-muted">{label}</dt>
-                        <dd className={`text-lg font-bold ${accent}`}>{value}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                  {/* Right: breakdown bar chart */}
-                  {debtBreakdownData.length > 0 && (
-                    <div className="flex-1 min-w-0">
-                      <p className="text-[10px] text-sf-muted mb-1">By Effort Tier</p>
-                      <HBarChart data={debtBreakdownData} color="#f59e0b" />
-                    </div>
-                  )}
+                <div className="flex flex-col gap-3">
+                  <div className="flex items-baseline gap-2">
+                    <span className={`text-3xl font-bold tabular-nums ${debt.totalHours > 200 ? 'text-sev-warning' : 'text-sf-text'}`}>
+                      {debt.totalHours}
+                    </span>
+                    <span className="text-xs text-sf-muted">estimated hours · {debt.sprintCycles ?? '—'} sprint cycles</span>
+                  </div>
+                  <div className="flex gap-2 text-[11px]">
+                    <span className="px-2 py-0.5 rounded bg-score-good/10 text-score-good">{qw} quick wins</span>
+                    <span className="px-2 py-0.5 rounded bg-sev-warning/10 text-sev-warning">{med} medium</span>
+                    <span className="px-2 py-0.5 rounded bg-sev-error/10 text-sev-error">{lrg} large</span>
+                  </div>
+                  <a href="#/techdebt" className="text-[11px] text-sf-accent hover:underline">
+                    Open Debt Payoff Plan →
+                  </a>
                 </div>
               ) : (
                 <p className="text-xs text-sf-muted py-6 text-center">No debt data available.</p>
@@ -530,7 +516,12 @@ export default function CodeQuality() {
             <GlassCard title="Coverage Distribution">
               <div className="flex flex-col items-center gap-4">
                 <ScoreRing score={covPct} size={140} label="Average Coverage" />
-                {coverageBarData.length > 0 && (
+                {covHistogram.length > 0 ? (
+                  <div className="w-full">
+                    <p className="text-[10px] text-sf-muted mb-1">Classes by coverage bucket</p>
+                    <HBarChart data={covHistogram} color="#22c55e" />
+                  </div>
+                ) : coverageBarData.length > 0 && (
                   <div className="w-full">
                     <HBarChart data={coverageBarData} multiColor color="#22c55e" />
                   </div>
@@ -630,37 +621,6 @@ export default function CodeQuality() {
         </div>
       )}
 
-      {/* ══ Technical Debt ════════════════════════════════════════════════════ */}
-      {activeTab === 'technical-debt' && (
-        <div className="space-y-4">
-          {/* How hours are estimated — info banner */}
-          <div className="rounded-lg bg-sf-bg-2 border border-sf-border px-4 py-3 text-xs text-sf-muted space-y-1">
-            <p className="font-medium text-sf-text">How hours are estimated</p>
-            <p>
-              Each issue is categorized by remediation effort: <strong className="text-sf-text">Quick Wins</strong> (&lt;1 hr each),{' '}
-              <strong className="text-sf-text">Medium</strong> (1–4 hrs each), <strong className="text-sf-text">Large</strong> (&gt;4 hrs each).
-              Sprint cycles assume 2-week sprints with 20% of team capacity allocated to tech debt resolution.
-            </p>
-          </div>
-
-          {/* Stat cards */}
-          {debt && (
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-              <StatCard icon="⏱️" value={`${debt.totalHours}`}         label="Total Hours"   sub="estimated"  accent={debt.totalHours > 200 ? 'text-sev-warning' : 'text-score-good'} />
-              <StatCard icon="🔄" value={debt.sprintCycles ?? '—'}     label="Sprint Cycles" />
-              <StatCard icon="⚡" value={qw}                            label="Quick Wins"    accent="text-score-good" />
-              <StatCard icon="🔶" value={med}                           label="Medium Items"  accent="text-sev-warning" />
-              <StatCard icon="🔴" value={lrg}                           label="Large Items"   accent="text-sev-error" />
-              <StatCard icon="📋" value={debtIssues.length}             label="Debt Issues" />
-            </div>
-          )}
-
-          <GlassCard title={`Technical Debt Issues (${debtIssues.length})`}>
-            <IssueFilters />
-            <IssueTable issues={debtIssues} />
-          </GlassCard>
-        </div>
-      )}
     </div>
   );
 }

@@ -1483,28 +1483,35 @@ export class SalesforceService {
   /**
    * Get Lightning/Flexi Pages (non-managed)
    */
-  async getFlexiPages(): Promise<Array<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string }>> {
+  async getFlexiPages(): Promise<Array<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string; EntityDefinitionId?: string }>> {
     try {
-      // Try with NamespacePrefix filter first
-      return await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string }>(
-        `SELECT Id, DeveloperName, MasterLabel, PageType FROM FlexiPage WHERE NamespacePrefix = null LIMIT ${TOOLING_QUERY_LIMIT}`
+      // Try with EntityDefinitionId + NamespacePrefix filter (best data for object association)
+      return await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string; EntityDefinitionId?: string }>(
+        `SELECT Id, DeveloperName, MasterLabel, PageType, EntityDefinitionId FROM FlexiPage WHERE NamespacePrefix = null LIMIT ${TOOLING_QUERY_LIMIT}`
       );
     } catch {
       try {
-        // Fallback 1: query without NamespacePrefix filter
-        return await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string }>(
-          `SELECT Id, DeveloperName, MasterLabel, PageType FROM FlexiPage LIMIT ${TOOLING_QUERY_LIMIT}`
+        // Fallback 1: without NamespacePrefix filter
+        return await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string; EntityDefinitionId?: string }>(
+          `SELECT Id, DeveloperName, MasterLabel, PageType, EntityDefinitionId FROM FlexiPage LIMIT ${TOOLING_QUERY_LIMIT}`
         );
       } catch {
-        // Fallback 2: minimal query — some orgs restrict MasterLabel or PageType
         try {
-          const rows = await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel?: string; PageType?: string }>(
-            `SELECT Id, DeveloperName FROM FlexiPage LIMIT ${TOOLING_QUERY_LIMIT}`
+          // Fallback 2: without EntityDefinitionId (some API versions don't expose it)
+          return await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string }>(
+            `SELECT Id, DeveloperName, MasterLabel, PageType FROM FlexiPage WHERE NamespacePrefix = null LIMIT ${TOOLING_QUERY_LIMIT}`
           );
-          return rows.map(r => ({ Id: r.Id, DeveloperName: r.DeveloperName, MasterLabel: r.MasterLabel || r.DeveloperName, PageType: r.PageType || 'Unknown' }));
-        } catch (err3) {
-          logWarning(`Could not fetch Lightning pages (FlexiPage): ${getErrorMessage(err3)}`);
-          return [];
+        } catch {
+          // Fallback 3: minimal query — some orgs restrict MasterLabel or PageType
+          try {
+            const rows = await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel?: string; PageType?: string }>(
+              `SELECT Id, DeveloperName FROM FlexiPage LIMIT ${TOOLING_QUERY_LIMIT}`
+            );
+            return rows.map(r => ({ Id: r.Id, DeveloperName: r.DeveloperName, MasterLabel: r.MasterLabel || r.DeveloperName, PageType: r.PageType || 'Unknown' }));
+          } catch (err4) {
+            logWarning(`Could not fetch Lightning pages (FlexiPage): ${getErrorMessage(err4)}`);
+            return [];
+          }
         }
       }
     }

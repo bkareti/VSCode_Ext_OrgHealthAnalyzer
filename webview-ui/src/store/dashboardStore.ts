@@ -88,8 +88,8 @@ interface LegacyDashboardState {
 function tabIdFromHash(): TabId {
   const hash = window.location.hash.replace(/^#\//, '');
   const valid: TabId[] = [
-    'overview', 'orginfo', 'datamodel', 'code',
-    'perflimits', 'govlimits', 'secaccess', 'cta', 'askarchitect',
+    'overview', 'orginfo', 'datamodel', 'automation', 'code',
+    'perflimits', 'govlimits', 'secaccess', 'techdebt', 'cta', 'askarchitect',
     'futurereadiness', 'trendshistory', 'reports', 'settings',
   ];
   return valid.includes(hash as TabId) ? (hash as TabId) : 'overview';

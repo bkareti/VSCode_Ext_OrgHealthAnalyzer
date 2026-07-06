@@ -17,6 +17,8 @@ import ErrorBoundary from '@/components/common/ErrorBoundary';
 const Overview        = lazy(() => import('@/components/tabs/Overview'));
 const OrgInfo         = lazy(() => import('@/components/tabs/OrgInfo'));
 const DataModel       = lazy(() => import('@/components/tabs/DataModel'));
+const Automation      = lazy(() => import('@/components/tabs/Automation'));
+const TechnicalDebt   = lazy(() => import('@/components/tabs/TechnicalDebt'));
 const CodeQuality     = lazy(() => import('@/components/tabs/CodeQuality'));
 const PerfLimits      = lazy(() => import('@/components/tabs/PerfLimits'));
 const GovernorLimits  = lazy(() => import('@/components/tabs/GovernorLimits'));
@@ -64,6 +66,8 @@ export default function App() {
                   <Route path="/overview"        element={<Overview />} />
                   <Route path="/orginfo"         element={<OrgInfo />} />
                   <Route path="/datamodel"       element={<DataModel />} />
+                  <Route path="/automation"      element={<Automation />} />
+                  <Route path="/techdebt"        element={<TechnicalDebt />} />
                   <Route path="/code"            element={<CodeQuality />} />
                   <Route path="/perflimits"      element={<PerfLimits />} />
                   <Route path="/govlimits"       element={<GovernorLimits />} />

@@ -8,7 +8,6 @@ import Pagination from '@/components/common/Pagination';
 import DonutChart from '@/components/charts/DonutChart';
 import ColumnChart from '@/components/charts/ColumnChart';
 import HBarChart from '@/components/charts/HBarChart';
-import SparklineChart from '@/components/charts/SparklineChart';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -19,28 +18,18 @@ function fmtNum(n: number): string {
   return n.toLocaleString();
 }
 
-const DONUT_COLORS = ['#3b82f6', '#8b5cf6', '#22c55e', '#f59e0b', '#ec4899', '#14b8a6'];
-
 const SUB_TABS = [
-  { id: 'overview',       label: 'Overview' },
-  { id: 'objects',        label: 'Objects' },
-  { id: 'fields',         label: 'Fields' },
-  { id: 'relationships',  label: 'Relationships' },
-  { id: 'recordtypes',    label: 'Record Types' },
-  { id: 'pagelayouts',    label: 'Page Layouts' },
-  { id: 'validationrules',label: 'Validation Rules' },
-  { id: 'triggers',       label: 'Triggers' },
-  { id: 'flows',          label: 'Flows' },
-  { id: 'custommetadata', label: 'Custom Metadata Type' },
-  { id: 'platformevents', label: 'Platform Events' },
-  { id: 'externalobjects',label: 'External Objects' },
-  { id: 'bigobjects',     label: 'Big Objects' },
-  { id: 'ldvobjects',     label: 'LDV Objects' },
+  { id: 'overview',        label: 'Overview' },
+  { id: 'objects',         label: 'Objects' },
+  { id: 'recordtypes',     label: 'Record Types' },
+  { id: 'pagelayouts',     label: 'Page Layouts' },
+  { id: 'recordpages',     label: 'Record Pages' },
+  { id: 'validationrules', label: 'Validation Rules' },
 ];
 
 const PAGE_SIZE = 10;
 
-// ─── sub-tab object table ────────────────────────────────────────────────────
+// ─── sub-tab object table (used by Objects tab) ──────────────────────────────
 
 type StatRow = NonNullable<AnalysisResult['dataModelStats']>[number];
 
@@ -115,6 +104,272 @@ function ObjectTable({ rows, emptyMsg }: ObjectTableProps) {
   );
 }
 
+// ─── Record Types sub-tab table ──────────────────────────────────────────────
+
+type RecordTypeDetail = NonNullable<AnalysisResult['dataModelRecordTypeDetails']>[number];
+
+function RecordTypesTable({ rows }: { rows: RecordTypeDetail[] }) {
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState('');
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase();
+    return rows.filter(r => !q || r.objectName.toLowerCase().includes(q) || (r.objectLabel ?? '').toLowerCase().includes(q));
+  }, [rows, search]);
+
+  const paged = useMemo(() => {
+    const s = (page - 1) * PAGE_SIZE;
+    return filtered.slice(s, s + PAGE_SIZE);
+  }, [filtered, page]);
+
+  if (rows.length === 0) return <EmptyState icon="🏷️" title="No record types found" description="No active record types were found in this org." className="m-6" />;
+
+  return (
+    <GlassCard>
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-xs font-semibold text-sf-text">{rows.length} objects with record types</span>
+        <input
+          type="text"
+          placeholder="Search objects…"
+          value={search}
+          onChange={e => { setSearch(e.target.value); setPage(1); }}
+          className="text-xs px-2 py-1 rounded border border-sf-border bg-sf-bg-3 text-sf-text placeholder:text-sf-muted outline-none w-40"
+        />
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs border-collapse">
+          <thead>
+            <tr className="border-b border-sf-border bg-sf-bg-3">
+              {['Object', 'API Name', 'Count', 'Record Type Names'].map(h => (
+                <th key={h} className="px-3 py-2 text-left text-sf-muted font-medium whitespace-nowrap">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {paged.length === 0 ? (
+              <tr><td colSpan={4} className="px-3 py-4 text-center text-sf-muted">No results</td></tr>
+            ) : paged.map(obj => {
+              const names = obj.recordTypes.map(rt => rt.name).join(', ');
+              const truncated = names.length > 120 ? names.slice(0, 117) + '…' : names;
+              return (
+                <tr key={obj.objectName} className="border-b border-sf-border/40 hover:bg-sf-bg-3/40 transition-colors">
+                  <td className="px-3 py-1.5 text-sf-text font-medium">{obj.objectLabel ?? obj.objectName}</td>
+                  <td className="px-3 py-1.5 text-sf-muted font-mono text-[11px]">{obj.objectName}</td>
+                  <td className="px-3 py-1.5 tabular-nums font-semibold text-sf-text">{obj.recordTypes.length}</td>
+                  <td className="px-3 py-1.5 text-sf-muted max-w-xs" title={names}>{truncated}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <Pagination page={page} pageSize={PAGE_SIZE} total={filtered.length} onChange={setPage} />
+    </GlassCard>
+  );
+}
+
+// ─── Page Layouts sub-tab table ──────────────────────────────────────────────
+
+type PageLayoutDetail = NonNullable<AnalysisResult['dataModelPageLayoutDetails']>[number];
+
+function PageLayoutsTable({ rows }: { rows: PageLayoutDetail[] }) {
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState('');
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase();
+    return rows.filter(r => !q || r.objectName.toLowerCase().includes(q));
+  }, [rows, search]);
+
+  const paged = useMemo(() => {
+    const s = (page - 1) * PAGE_SIZE;
+    return filtered.slice(s, s + PAGE_SIZE);
+  }, [filtered, page]);
+
+  if (rows.length === 0) return <EmptyState icon="📐" title="No page layouts found" description="No page layouts were found in this org." className="m-6" />;
+
+  return (
+    <GlassCard>
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-xs font-semibold text-sf-text">{rows.length} objects with page layouts</span>
+        <input
+          type="text"
+          placeholder="Search objects…"
+          value={search}
+          onChange={e => { setSearch(e.target.value); setPage(1); }}
+          className="text-xs px-2 py-1 rounded border border-sf-border bg-sf-bg-3 text-sf-text placeholder:text-sf-muted outline-none w-40"
+        />
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs border-collapse">
+          <thead>
+            <tr className="border-b border-sf-border bg-sf-bg-3">
+              {['Object / API Name', 'Layout Count', 'Page Layout Names'].map(h => (
+                <th key={h} className="px-3 py-2 text-left text-sf-muted font-medium whitespace-nowrap">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {paged.length === 0 ? (
+              <tr><td colSpan={3} className="px-3 py-4 text-center text-sf-muted">No results</td></tr>
+            ) : paged.map(obj => {
+              const names = obj.pageLayouts.map(pl => pl.name).join(', ');
+              const truncated = names.length > 120 ? names.slice(0, 117) + '…' : names;
+              return (
+                <tr key={obj.objectName} className="border-b border-sf-border/40 hover:bg-sf-bg-3/40 transition-colors">
+                  <td className="px-3 py-1.5 font-mono text-sf-muted text-[11px]">{obj.objectName}</td>
+                  <td className="px-3 py-1.5 tabular-nums font-semibold text-sf-text">{obj.pageLayouts.length}</td>
+                  <td className="px-3 py-1.5 text-sf-muted max-w-xs" title={names}>{truncated}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <Pagination page={page} pageSize={PAGE_SIZE} total={filtered.length} onChange={setPage} />
+    </GlassCard>
+  );
+}
+
+// ─── Validation Rules sub-tab table ─────────────────────────────────────────
+
+type VRDetail = NonNullable<AnalysisResult['dataModelValidationRuleDetails']>[number];
+
+interface FlatVR { objectName: string; id: string; name: string; active: boolean; errorMessage: string; description?: string }
+
+function ValidationRulesTable({ rows }: { rows: VRDetail[] }) {
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState('');
+
+  const flat = useMemo<FlatVR[]>(() =>
+    rows.flatMap(obj => obj.validationRules.map(vr => ({ objectName: obj.objectName, ...vr }))),
+    [rows],
+  );
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase();
+    return flat.filter(r => !q || r.objectName.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
+  }, [flat, search]);
+
+  const paged = useMemo(() => {
+    const s = (page - 1) * PAGE_SIZE;
+    return filtered.slice(s, s + PAGE_SIZE);
+  }, [filtered, page]);
+
+  if (flat.length === 0) return <EmptyState icon="✅" title="No validation rules found" description="No active validation rules were found in this org." className="m-6" />;
+
+  return (
+    <GlassCard>
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-xs font-semibold text-sf-text">{flat.length} validation rules across {rows.length} objects</span>
+        <input
+          type="text"
+          placeholder="Search object or rule…"
+          value={search}
+          onChange={e => { setSearch(e.target.value); setPage(1); }}
+          className="text-xs px-2 py-1 rounded border border-sf-border bg-sf-bg-3 text-sf-text placeholder:text-sf-muted outline-none w-44"
+        />
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs border-collapse">
+          <thead>
+            <tr className="border-b border-sf-border bg-sf-bg-3">
+              {['Object', 'Rule Name', 'Active', 'Error Message'].map(h => (
+                <th key={h} className="px-3 py-2 text-left text-sf-muted font-medium whitespace-nowrap">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {paged.length === 0 ? (
+              <tr><td colSpan={4} className="px-3 py-4 text-center text-sf-muted">No results</td></tr>
+            ) : paged.map(vr => (
+              <tr key={`${vr.objectName}-${vr.id}`} className="border-b border-sf-border/40 hover:bg-sf-bg-3/40 transition-colors">
+                <td className="px-3 py-1.5 font-mono text-sf-muted text-[11px] whitespace-nowrap">{vr.objectName}</td>
+                <td className="px-3 py-1.5 text-sf-text font-medium">{vr.name}</td>
+                <td className="px-3 py-1.5">
+                  <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${vr.active ? 'bg-green-500/10 text-green-400' : 'bg-sf-muted/10 text-sf-muted'}`}>
+                    {vr.active ? 'Active' : 'Inactive'}
+                  </span>
+                </td>
+                <td className="px-3 py-1.5 text-sf-muted max-w-xs truncate" title={vr.errorMessage}>{vr.errorMessage || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Pagination page={page} pageSize={PAGE_SIZE} total={filtered.length} onChange={setPage} />
+    </GlassCard>
+  );
+}
+
+// ─── Record Pages sub-tab table ──────────────────────────────────────────────
+
+type RPDetail = NonNullable<AnalysisResult['dataModelRecordPageDetails']>[number];
+
+interface FlatRP { objectName: string; objectLabel?: string; id: string; name: string; pageType: string }
+
+function RecordPagesTable({ rows }: { rows: RPDetail[] }) {
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState('');
+
+  const flat = useMemo<FlatRP[]>(() =>
+    rows.flatMap(obj => obj.recordPages.map(rp => ({ objectName: obj.objectName, objectLabel: obj.objectLabel, ...rp }))),
+    [rows],
+  );
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase();
+    return flat.filter(r => !q || r.objectName.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
+  }, [flat, search]);
+
+  const paged = useMemo(() => {
+    const s = (page - 1) * PAGE_SIZE;
+    return filtered.slice(s, s + PAGE_SIZE);
+  }, [filtered, page]);
+
+  if (flat.length === 0) return <EmptyState icon="⚡" title="No Lightning Record Pages found" description="No Lightning Record Pages (FlexiPages) were associated with objects in this org, or object association could not be resolved." className="m-6" />;
+
+  return (
+    <GlassCard>
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-xs font-semibold text-sf-text">{flat.length} record pages across {rows.length} objects</span>
+        <input
+          type="text"
+          placeholder="Search object or page…"
+          value={search}
+          onChange={e => { setSearch(e.target.value); setPage(1); }}
+          className="text-xs px-2 py-1 rounded border border-sf-border bg-sf-bg-3 text-sf-text placeholder:text-sf-muted outline-none w-44"
+        />
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs border-collapse">
+          <thead>
+            <tr className="border-b border-sf-border bg-sf-bg-3">
+              {['Page Name', 'Page Type', 'Object'].map(h => (
+                <th key={h} className="px-3 py-2 text-left text-sf-muted font-medium whitespace-nowrap">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {paged.length === 0 ? (
+              <tr><td colSpan={3} className="px-3 py-4 text-center text-sf-muted">No results</td></tr>
+            ) : paged.map(rp => (
+              <tr key={`${rp.objectName}-${rp.id}`} className="border-b border-sf-border/40 hover:bg-sf-bg-3/40 transition-colors">
+                <td className="px-3 py-1.5 text-sf-text font-medium">{rp.name}</td>
+                <td className="px-3 py-1.5">
+                  <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-sf-accent/10 text-sf-accent">{rp.pageType}</span>
+                </td>
+                <td className="px-3 py-1.5 font-mono text-sf-muted text-[11px]">{rp.objectLabel ?? rp.objectName}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Pagination page={page} pageSize={PAGE_SIZE} total={filtered.length} onChange={setPage} />
+    </GlassCard>
+  );
+}
+
 // ─── main component ──────────────────────────────────────────────────────────
 
 export default function DataModel() {
@@ -122,11 +377,17 @@ export default function DataModel() {
   const [activeTab, setActiveTab] = useState('overview');
   const [tableSearch, setTableSearch] = useState('');
   const [tablePage, setTablePage]     = useState(1);
+  const [topListTab, setTopListTab]   = useState<'rt' | 'pl' | 'rp'>('rt');
 
-  const stats     = results?.dataModelStats     ?? [];
-  const summary   = results?.dataModelSummary;
+  const stats      = results?.dataModelStats     ?? [];
+  const summary    = results?.dataModelSummary;
   const automation = results?.automationSummary;
   const inventory  = results?.orgInventory;
+
+  const rtDetails  = results?.dataModelRecordTypeDetails   ?? [];
+  const plDetails  = results?.dataModelPageLayoutDetails   ?? [];
+  const vrDetails  = results?.dataModelValidationRuleDetails ?? [];
+  const rpDetails  = results?.dataModelRecordPageDetails   ?? [];
 
   // ── aggregations ────────────────────────────────────────────────────────────
 
@@ -187,19 +448,25 @@ export default function DataModel() {
     [stats],
   );
 
-  // Automation overview donut
-  const automationData = useMemo(() => {
-    if (!automation) return [];
-    return [
-      { name: 'Triggers',         value: automation.totalTriggers         ?? 0 },
-      { name: 'Validation Rules', value: automation.totalValidationRules   ?? 0 },
-      { name: 'Flows',            value: automation.totalFlows             ?? 0 },
-      { name: 'Process Builder',  value: automation.totalProcessBuilders   ?? 0 },
-      { name: 'Workflow Rules',   value: automation.totalWorkflowRules     ?? 0 },
-    ].filter(d => d.value > 0);
-  }, [automation]);
+  // Field-limit pressure — top 10 objects nearest the 800-custom-field limit.
+  // The single best scalability signal in the data model.
+  const fieldPressure = useMemo(() =>
+    [...stats]
+      .filter(o => (o.fieldLimitPct ?? 0) > 0)
+      .sort((a, b) => (b.fieldLimitPct ?? 0) - (a.fieldLimitPct ?? 0))
+      .slice(0, 10)
+      .map(o => ({
+        name: o.objectLabel ?? o.objectName,
+        value: Math.round((o.fieldLimitPct ?? 0) * 10) / 10,
+        color: (o.fieldLimitPct ?? 0) >= 90 ? '#ef4444' : (o.fieldLimitPct ?? 0) >= 70 ? '#f97316' : '#3b82f6',
+      })),
+    [stats],
+  );
 
-  const totalAutomations = automationData.reduce((s, d) => s + d.value, 0);
+  const hotFieldObjects = useMemo(
+    () => stats.filter(o => (o.fieldLimitPct ?? 0) >= 70).length,
+    [stats],
+  );
 
   // Field totals
   const fieldTotals = useMemo(() => ({
@@ -217,6 +484,30 @@ export default function DataModel() {
     rollUp:       stats.reduce((s, o) => s + (o.fieldTypes?.['Summary'] ?? 0), 0),
   }), [stats]);
 
+  // Top 10 by record type count
+  const top10RecordTypes = useMemo(() =>
+    [...rtDetails]
+      .sort((a, b) => b.recordTypes.length - a.recordTypes.length)
+      .slice(0, 10),
+    [rtDetails],
+  );
+
+  // Top 10 by page layout count
+  const top10PageLayouts = useMemo(() =>
+    [...plDetails]
+      .sort((a, b) => b.pageLayouts.length - a.pageLayouts.length)
+      .slice(0, 10),
+    [plDetails],
+  );
+
+  // Top 10 by record page count
+  const top10RecordPages = useMemo(() =>
+    [...rpDetails]
+      .sort((a, b) => b.recordPages.length - a.recordPages.length)
+      .slice(0, 10),
+    [rpDetails],
+  );
+
   // Custom Objects Summary table (searchable + paginated)
   const filteredCustomObjs = useMemo(() => {
     const q = tableSearch.toLowerCase();
@@ -229,23 +520,6 @@ export default function DataModel() {
     const s = (tablePage - 1) * PAGE_SIZE;
     return filteredCustomObjs.slice(s, s + PAGE_SIZE);
   }, [filteredCustomObjs, tablePage]);
-
-  // Sub-tab object subsets
-  const tabRows = useMemo((): Record<string, typeof stats> => ({
-    objects:         stats,
-    fields:          stats,
-    relationships:   stats.filter(o => (o.lookupFields ?? 0) + (o.masterDetailFields ?? 0) > 0),
-    recordtypes:     customObjects,
-    pagelayouts:     customObjects,
-    validationrules: stats.filter(o => (o.validationRules ?? 0) > 0),
-    triggers:        stats.filter(o => (o.triggers ?? 0) > 0),
-    flows:           customObjects,
-    custommetadata:  stats.filter(o => o.objectName.endsWith('__mdt')),
-    platformevents:  stats.filter(o => o.objectName.endsWith('__e')),
-    externalobjects: stats.filter(o => o.objectName.endsWith('__x')),
-    bigobjects:      stats.filter(o => o.objectName.endsWith('__b')),
-    ldvobjects:      stats.filter(o => (o.recordCount ?? 0) > 10_000_000),
-  }), [stats, customObjects]);
 
   // ── empty guard ──────────────────────────────────────────────────────────────
 
@@ -294,19 +568,29 @@ export default function DataModel() {
       {activeTab === 'overview' && (
         <div className="space-y-5">
 
-          {/* Row 1 — 8 summary stat cards */}
-          <div className="grid grid-cols-4 xl:grid-cols-8 gap-3">
+          {/* Row 1 — 6 summary stat cards (scalability-first) */}
+          <div className="grid grid-cols-3 xl:grid-cols-6 gap-3">
             <StatCard icon="📦" value={summary?.customObjectCount                                    ?? 0} label="Custom Objects" />
             <StatCard icon="🏛️" value={summary?.standardObjectCount ?? inventory?.standardObjectCount ?? 0} label="Standard Objects" />
-            <StatCard icon="🌐" value={summary?.externalObjectCount                                  ?? 0} label="External Objects" />
-            <StatCard icon="🗄️" value={summary?.bigObjectCount                                       ?? 0} label="Big Objects" />
-            <StatCard icon="⚙️" value={summary?.customSettingCount                                   ?? 0} label="Custom Settings" />
-            <StatCard icon="📡" value={summary?.platformEventCount                                   ?? 0} label="Platform Events" />
-            <StatCard icon="🔧" value={summary?.customMetadataTypeCount                              ?? 0} label="Custom Metadata Types" />
-            <StatCard icon="📊" value={stats.filter(o => (o.recordCount ?? 0) > 10_000_000).length}       label="LDV Objects" />
+            <StatCard icon="📋" value={fieldTotals.total.toLocaleString()} label="Total Fields" />
+            <StatCard icon="🗄️" value={fmtNum(totalRecords)} label="Total Records" />
+            <StatCard
+              icon="📊"
+              value={objectsOver10M}
+              label="LDV Objects"
+              sub=">10M records"
+              accent={objectsOver10M > 0 ? 'text-sev-warning' : 'text-score-good'}
+            />
+            <StatCard
+              icon="🌡️"
+              value={hotFieldObjects}
+              label="Field Limit Pressure"
+              sub="objects ≥70% of limit"
+              accent={hotFieldObjects > 0 ? 'text-sev-warning' : 'text-score-good'}
+            />
           </div>
 
-          {/* Row 2 — Objects by Type | Records Overview | Records Distribution */}
+          {/* Row 2 — Objects by Type | Records | Field Limit Pressure */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
 
             {/* Objects by Type donut */}
@@ -316,42 +600,60 @@ export default function DataModel() {
               ) : (
                 <div className="flex items-center justify-center h-36 text-xs text-sf-muted">No object data</div>
               )}
-            </GlassCard>
-
-            {/* Records Overview grid */}
-            <GlassCard title="Records Overview">
-              <div className="grid grid-cols-2 gap-2 h-full">
+              <div className="grid grid-cols-3 gap-1.5 mt-2 text-center">
                 {[
-                  { label: 'Total Records (All)',               value: fmtNum(totalRecords) },
-                  { label: 'Total Records (Custom Objects)',    value: fmtNum(totalCustomRecords) },
-                  { label: 'Average Records per Object',        value: fmtNum(avgRecords) },
-                  { label: `Largest Object\n${largestObj?.objectName ?? '—'}`, value: largestObj ? fmtNum(largestObj.recordCount ?? 0) : '—' },
-                  { label: 'Objects with > 1M Records',         value: objectsOver1M },
-                  { label: 'Objects with > 10M Records',        value: objectsOver10M },
+                  { label: 'Custom Settings', value: summary?.customSettingCount      ?? 0 },
+                  { label: 'Platform Events', value: summary?.platformEventCount      ?? 0 },
+                  { label: 'CMDT Types',      value: summary?.customMetadataTypeCount ?? 0 },
                 ].map(m => (
-                  <div key={m.label} className="p-3 rounded-lg bg-sf-bg-2 border border-sf-border flex flex-col justify-between">
-                    <div className="text-[10px] text-sf-muted leading-tight whitespace-pre-line">{m.label}</div>
-                    <div className="text-xl font-bold tabular-nums text-sf-text mt-1">{m.value}</div>
+                  <div key={m.label} className="p-1.5 rounded bg-sf-bg-2 border border-sf-border/50">
+                    <div className="text-sm font-bold tabular-nums text-sf-text">{m.value}</div>
+                    <div className="text-[9px] text-sf-muted leading-tight">{m.label}</div>
                   </div>
                 ))}
               </div>
             </GlassCard>
 
-            {/* Records Distribution column chart */}
+            {/* Records — distribution + key stats merged into one card */}
             <GlassCard title="Records Distribution (Custom Objects)">
               {recordBuckets.some(b => b.value > 0) ? (
-                <ColumnChart data={recordBuckets} height={200} color="#3b82f6" />
+                <ColumnChart data={recordBuckets} height={150} color="#3b82f6" />
               ) : (
                 <div className="flex items-center justify-center h-36 text-xs text-sf-muted">No record data</div>
+              )}
+              <div className="mt-3 space-y-1 text-xs border-t border-sf-border/50 pt-2">
+                {[
+                  { label: 'Total (custom objects)', value: fmtNum(totalCustomRecords) },
+                  { label: 'Average per object',     value: fmtNum(avgRecords) },
+                  { label: `Largest: ${largestObj?.objectLabel ?? largestObj?.objectName ?? '—'}`, value: largestObj ? fmtNum(largestObj.recordCount ?? 0) : '—' },
+                  { label: 'Objects > 1M records',   value: String(objectsOver1M) },
+                ].map(m => (
+                  <div key={m.label} className="flex justify-between">
+                    <span className="text-sf-muted truncate pr-2">{m.label}</span>
+                    <span className="text-sf-text font-semibold tabular-nums shrink-0">{m.value}</span>
+                  </div>
+                ))}
+              </div>
+            </GlassCard>
+
+            {/* Field Limit Pressure — top objects vs 800-custom-field limit */}
+            <GlassCard title="Field Limit Pressure (Top 10)">
+              {fieldPressure.length > 0 ? (
+                <>
+                  <p className="text-[10px] text-sf-muted mb-1">% of the 800-custom-field governor limit consumed</p>
+                  <HBarChart data={fieldPressure} multiColor color="#3b82f6" />
+                </>
+              ) : (
+                <div className="flex items-center justify-center h-36 text-xs text-sf-muted">No field limit data</div>
               )}
             </GlassCard>
 
           </div>
 
-          {/* Row 3 — Custom Objects Summary | Largest Objects | Automation Overview */}
-          <div className="grid grid-cols-1 xl:grid-cols-[1fr_260px_260px] gap-4">
+          {/* Row 3 — Custom Objects Summary | Largest Objects */}
+          <div className="grid grid-cols-1 xl:grid-cols-[1fr_300px] gap-4">
 
-            {/* Custom Objects Summary (searchable + paginated table) */}
+            {/* Custom Objects Summary (updated columns: Records, Custom Fields, Triggers, Flows, Val. Rules) */}
             <GlassCard>
               <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
                 <span className="text-xs font-semibold text-sf-text">
@@ -369,7 +671,7 @@ export default function DataModel() {
                 <table className="w-full text-xs border-collapse">
                   <thead>
                     <tr className="border-b border-sf-border bg-sf-bg-3">
-                      {['Object Name', 'API Name', 'Total Records', 'Triggers', 'Val. Rules', 'Fields'].map(h => (
+                      {['Object Name', 'API Name', 'Records', 'Custom Fields', 'Triggers', 'Flows', 'Val. Rules'].map(h => (
                         <th key={h} className="px-2 py-2 text-left text-sf-muted font-medium whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
@@ -377,18 +679,22 @@ export default function DataModel() {
                   <tbody>
                     {pagedCustomObjs.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="px-2 py-4 text-center text-sf-muted">No results</td>
+                        <td colSpan={7} className="px-2 py-4 text-center text-sf-muted">No results</td>
                       </tr>
-                    ) : pagedCustomObjs.map(obj => (
-                      <tr key={obj.objectName} className="border-b border-sf-border/40 hover:bg-sf-bg-3/40 transition-colors">
-                        <td className="px-2 py-1.5 text-sf-text font-medium">{obj.objectLabel ?? obj.objectName}</td>
-                        <td className="px-2 py-1.5 text-sf-muted font-mono text-[11px]">{obj.objectName}</td>
-                        <td className="px-2 py-1.5 text-sf-muted tabular-nums">{obj.recordCount !== undefined ? fmtNum(obj.recordCount) : '—'}</td>
-                        <td className="px-2 py-1.5 text-sf-muted tabular-nums">{obj.triggers ?? '—'}</td>
-                        <td className="px-2 py-1.5 text-sf-muted tabular-nums">{obj.validationRules ?? '—'}</td>
-                        <td className="px-2 py-1.5 text-sf-muted tabular-nums">{obj.totalFields}</td>
-                      </tr>
-                    ))}
+                    ) : pagedCustomObjs.map(obj => {
+                      const flows = automation?.objectMap?.[obj.objectName]?.flows ?? 0;
+                      return (
+                        <tr key={obj.objectName} className="border-b border-sf-border/40 hover:bg-sf-bg-3/40 transition-colors">
+                          <td className="px-2 py-1.5 text-sf-text font-medium">{obj.objectLabel ?? obj.objectName}</td>
+                          <td className="px-2 py-1.5 text-sf-muted font-mono text-[11px]">{obj.objectName}</td>
+                          <td className="px-2 py-1.5 text-sf-muted tabular-nums">{obj.recordCount !== undefined ? fmtNum(obj.recordCount) : '—'}</td>
+                          <td className="px-2 py-1.5 text-sf-muted tabular-nums">{obj.customFields ?? '—'}</td>
+                          <td className="px-2 py-1.5 text-sf-muted tabular-nums">{obj.triggers ?? '—'}</td>
+                          <td className="px-2 py-1.5 text-sf-muted tabular-nums">{flows > 0 ? flows : '—'}</td>
+                          <td className="px-2 py-1.5 text-sf-muted tabular-nums">{obj.validationRules ?? '—'}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -409,35 +715,10 @@ export default function DataModel() {
               )}
             </GlassCard>
 
-            {/* Object Automation Overview */}
-            <GlassCard title="Object Automation Overview">
-              {automationData.length > 0 ? (
-                <div className="space-y-2">
-                  <DonutChart data={automationData} height={180} showLegend={false} />
-                  <div className="text-center text-xs font-bold text-sf-text">{totalAutomations.toLocaleString()} Total Automations</div>
-                  <div className="space-y-1 mt-2">
-                    {automationData.map((d, i) => (
-                      <div key={d.name} className="flex items-center justify-between text-[11px]">
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-2 h-2 rounded-full inline-block" style={{ background: DONUT_COLORS[i % DONUT_COLORS.length] }} />
-                          <span className="text-sf-muted">{d.name}</span>
-                        </div>
-                        <span className="text-sf-text font-medium tabular-nums">
-                          {d.value} ({totalAutomations ? ((d.value / totalAutomations) * 100).toFixed(1) : 0}%)
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center justify-center h-36 text-xs text-sf-muted">No automation data</div>
-              )}
-            </GlassCard>
-
           </div>
 
-          {/* Row 4 — Field Overview | Relationships Overview | Data Growth */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {/* Row 4 — Field Overview | Relationships Overview */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
             {/* Field Overview */}
             <GlassCard title="Field Overview">
@@ -474,24 +755,95 @@ export default function DataModel() {
               </div>
             </GlassCard>
 
-            {/* Data Growth */}
-            <GlassCard title="Data Growth (All Records)">
-              <div className="text-2xl font-bold tabular-nums text-sf-text">{fmtNum(totalRecords)}</div>
-              <div className="text-[10px] text-sf-muted mb-3">Total Records</div>
-              <SparklineChart data={[{ value: totalRecords }]} color="#3b82f6" height={80} />
-              <div className="text-[10px] text-sf-muted mt-2">Historical trend data not yet available</div>
-            </GlassCard>
-
           </div>
+
+          {/* Row 5 — UI configuration density (one card, segmented toggle) */}
+          <GlassCard>
+            <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+              <span className="text-xs font-semibold text-sf-text">UI Configuration Density (Top 10 Objects)</span>
+              <div className="flex gap-1">
+                {([
+                  ['rt', 'Record Types'],
+                  ['pl', 'Page Layouts'],
+                  ['rp', 'Record Pages'],
+                ] as ['rt' | 'pl' | 'rp', string][]).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setTopListTab(id)}
+                    className={`px-2.5 py-1 text-[11px] rounded-full border transition-colors ${
+                      topListTab === id
+                        ? 'border-sf-accent text-sf-accent bg-sf-accent/10'
+                        : 'border-sf-border text-sf-muted hover:text-sf-text'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {(() => {
+              const config = {
+                rt: { rows: top10RecordTypes.map(o => ({ name: o.objectLabel ?? o.objectName, count: o.recordTypes.length })), link: 'recordtypes',     linkLabel: 'View all record types →',  empty: 'No record type data' },
+                pl: { rows: top10PageLayouts.map(o => ({ name: o.objectName,                  count: o.pageLayouts.length  })), link: 'pagelayouts',    linkLabel: 'View all page layouts →',  empty: 'No page layout data' },
+                rp: { rows: top10RecordPages.map(o => ({ name: o.objectLabel ?? o.objectName, count: o.recordPages.length  })), link: 'recordpages',    linkLabel: 'View all record pages →',  empty: 'No record page data' },
+              }[topListTab];
+              return config.rows.length > 0 ? (
+                <div className="space-y-1 mt-1">
+                  {config.rows.map((row, i) => (
+                    <div key={row.name} className="flex items-center justify-between text-xs py-0.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-sf-muted tabular-nums w-4 text-right shrink-0">{i + 1}.</span>
+                        <span className="text-sf-text truncate">{row.name}</span>
+                      </div>
+                      <span className="text-sf-accent font-semibold tabular-nums ml-2 shrink-0">{row.count}</span>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab(config.link)}
+                    className="mt-2 text-[11px] text-sf-accent hover:underline"
+                  >
+                    {config.linkLabel}
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center justify-center h-24 text-xs text-sf-muted">{config.empty}</div>
+              );
+            })()}
+          </GlassCard>
+
         </div>
       )}
 
-      {/* ── NON-OVERVIEW TABS ────────────────────────────────────────────────── */}
-      {activeTab !== 'overview' && (
-        <ObjectTable
-          rows={tabRows[activeTab] ?? stats}
-          emptyMsg={`No ${SUB_TABS.find(t => t.id === activeTab)?.label ?? ''} data`}
-        />
+      {/* ── OBJECTS TAB ──────────────────────────────────────────────────────── */}
+      {activeTab === 'objects' && (
+        <ObjectTable rows={stats} emptyMsg="No objects found" />
+      )}
+
+      {/* ── RECORD TYPES TAB ─────────────────────────────────────────────────── */}
+      {activeTab === 'recordtypes' && (
+        <RecordTypesTable rows={rtDetails} />
+      )}
+
+      {/* ── PAGE LAYOUTS TAB ─────────────────────────────────────────────────── */}
+      {activeTab === 'pagelayouts' && (
+        <PageLayoutsTable rows={plDetails} />
+      )}
+
+      {/* ── RECORD PAGES TAB ─────────────────────────────────────────────────── */}
+      {activeTab === 'recordpages' && (
+        <RecordPagesTable rows={rpDetails} />
+      )}
+
+      {/* ── VALIDATION RULES TAB ─────────────────────────────────────────────── */}
+      {activeTab === 'validationrules' && (
+        vrDetails.length > 0
+          ? <ValidationRulesTable rows={vrDetails} />
+          : <ObjectTable
+              rows={stats.filter(o => (o.validationRules ?? 0) > 0)}
+              emptyMsg="No validation rule data"
+            />
       )}
 
     </div>

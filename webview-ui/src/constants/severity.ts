@@ -12,8 +12,12 @@ export const SEV_COLOR: Record<Severity, string> = {
   info:    'var(--color-sev-info)',
 };
 
+/**
+ * One severity vocabulary everywhere: error → Critical, warning → Warning,
+ * info → Info. Do not invent per-tab labels (High/Medium/Low, Error/…).
+ */
 export const SEV_LABEL: Record<Severity, string> = {
-  error: 'Error',
+  error: 'Critical',
   warning: 'Warning',
   info: 'Info',
 };

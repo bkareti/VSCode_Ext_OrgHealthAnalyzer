@@ -105,6 +105,34 @@ export interface AnalysisResult {
     triggers?: number;
     /** Validation rules on this object (from EntityDefinition aggregate) */
     validationRules?: number;
+    /** Active record types on this object */
+    recordTypeCount?: number;
+    /** Page layouts assigned to this object */
+    pageLayoutCount?: number;
+    /** Lightning Record Pages (FlexiPages) for this object */
+    recordPageCount?: number;
+  }>;
+  /** Per-object record type details for the Record Types sub-tab */
+  dataModelRecordTypeDetails?: Array<{
+    objectName: string;
+    objectLabel?: string;
+    recordTypes: Array<{ id: string; name: string; isActive: boolean }>;
+  }>;
+  /** Per-object page layout details for the Page Layouts sub-tab */
+  dataModelPageLayoutDetails?: Array<{
+    objectName: string;
+    pageLayouts: Array<{ id: string; name: string }>;
+  }>;
+  /** Per-object validation rule details for the Validation Rules sub-tab */
+  dataModelValidationRuleDetails?: Array<{
+    objectName: string;
+    validationRules: Array<{ id: string; name: string; active: boolean; errorMessage: string; description?: string }>;
+  }>;
+  /** Per-object Lightning Record Page details for the Record Pages sub-tab */
+  dataModelRecordPageDetails?: Array<{
+    objectName: string;
+    objectLabel?: string;
+    recordPages: Array<{ id: string; name: string; pageType: string }>;
   }>;
   /** Summary of special org object types (external, big objects, CMTs, custom settings) */
   dataModelSummary?: {
@@ -334,6 +362,8 @@ export interface ValidationRule {
   Description?: string;
   ErrorMessage?: string;
   ErrorDisplayField?: string;
+  /** Populated when the query joins EntityDefinition (Tooling API relationship) */
+  EntityDefinition?: { QualifiedApiName: string };
 }
 
 export interface CustomField {
