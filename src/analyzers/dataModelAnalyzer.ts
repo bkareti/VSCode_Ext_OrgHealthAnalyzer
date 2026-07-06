@@ -47,7 +47,19 @@ interface DataModelAnalysisResult {
     validationRules: number;
     /** Apex triggers on this object (from EntityDefinition aggregate) */
     triggers: number;
+    /** Approximate record count (fetched after main field stats) */
+    recordCount?: number;
   }>;
+  /** Summary counts of special object types (external, big, CMT, custom settings, events) */
+  dataModelSummary?: {
+    customObjectCount?: number;
+    standardObjectCount?: number;
+    externalObjectCount?: number;
+    bigObjectCount?: number;
+    customMetadataTypeCount?: number;
+    customSettingCount?: number;
+    platformEventCount?: number;
+  };
 }
 
 // ============================================================================
@@ -85,11 +97,25 @@ export class DataModelAnalyzer {
       // Step 1: scan workspace for custom field references (Object.Field__c)
       await this.scanWorkspaceForFieldReferences();
 
-      // Step 2: object-first aggregate fetch (all 7 queries run in parallel)
-      const objectCounts = await this.salesforceService.getObjectDataModelCounts();
+      // Step 2: object-first aggregate fetch + type counts in parallel
+      const [objectCounts, typeCounts] = await Promise.all([
+        this.salesforceService.getObjectDataModelCounts(),
+        this.salesforceService.getDataModelTypeCounts().catch(() => null),
+      ]);
       logInfo(`Found ${objectCounts.length} customizable objects via EntityDefinition`);
 
       result.objectsAnalyzed = objectCounts.length;
+      result.dataModelSummary = {
+        customObjectCount: objectCounts.filter(o => o.objectName.endsWith('__c')).length,
+        standardObjectCount: objectCounts.filter(o =>
+          !o.objectName.endsWith('__c') &&
+          !o.objectName.endsWith('__e') &&
+          !o.objectName.endsWith('__b') &&
+          !o.objectName.endsWith('__mdt') &&
+          !o.objectName.endsWith('__ka')
+        ).length,
+        ...(typeCounts ?? {}),
+      };
 
       // Step 2b: accurate unused-field detection via the Dependency API
       // (MetadataComponentDependency). Falls back to workspace-reference
@@ -121,7 +147,10 @@ export class DataModelAnalyzer {
           customFields: obj.customFields,
           unusedFields: unusedCount,
           fieldsWithoutDescription: 0, // not available from aggregate queries
-          fieldTypes: {},               // not available from aggregate queries
+          fieldTypes: {
+            ...(obj.formulaFields   > 0 ? { Formula: obj.formulaFields }       : {}),
+            ...(obj.encryptedFields > 0 ? { EncryptedText: obj.encryptedFields } : {}),
+          },
           relationshipCount: obj.lookupFields + obj.masterDetailFields,
           lookupFields: obj.lookupFields,
           masterDetailFields: obj.masterDetailFields,
@@ -194,6 +223,20 @@ export class DataModelAnalyzer {
             object: objectName,
           });
         }
+      }
+
+      // Fetch record counts in parallel batches of 20 (one COUNT(Id) query per object).
+      // Done after the main loop so it does not block objectFieldStats construction.
+      try {
+        const names = result.objectFieldStats.map(o => o.objectName);
+        const countMap = await this.salesforceService.getObjectRecordCountsBatch(names);
+        for (const stat of result.objectFieldStats) {
+          const c = countMap.get(stat.objectName);
+          if (c !== undefined && c >= 0) { stat.recordCount = c; }
+        }
+        logInfo(`Record counts fetched for ${countMap.size} objects`);
+      } catch (e) {
+        logWarning(`Record count fetch failed, skipping: ${getErrorMessage(e)}`);
       }
 
       // Filter: keep ALL custom objects; standard objects only if they have

@@ -89,6 +89,8 @@
     const a = el.dataset.action;
     if (a === "activate-tab") {
       activateTab(el.dataset.tab);
+    } else if (a === "orginfo-subtab") {
+      activateOrgInfoSubtab(el.dataset.sub);
     } else if (a === "run-analysis") {
       runAnalysis();
     } else if (a === "run-analysis-initial") {
@@ -1354,10 +1356,105 @@
   // ═══════════════════════════════════════════════════════════════════════════
   // ORG INFO TAB
   // ═══════════════════════════════════════════════════════════════════════════
+  // ── SVG Donut chart helper ──────────────────────────────────────────────
+  function renderDonutChart(segments, opts) {
+    opts = opts || {};
+    const W = opts.size || 140;
+    const CX = W / 2, CY = W / 2, R = W / 2 - 14, IR = R * 0.58;
+    const total = segments.reduce(function(s, seg) { return s + (seg.value || 0); }, 0);
+    if (!total) { return '<svg viewBox="0 0 ' + W + ' ' + W + '" style="width:' + W + 'px;height:' + W + 'px"><circle cx="' + CX + '" cy="' + CY + '" r="' + R + '" fill="none" stroke="var(--vscode-widget-border)" stroke-width="' + (R - IR) + '"/><text x="' + CX + '" y="' + (CY + 4) + '" text-anchor="middle" font-size="12" fill="var(--sf-text-secondary)">—</text></svg>'; }
+    var angle = -Math.PI / 2;
+    var paths = segments.map(function(seg, idx) {
+      var frac = (seg.value || 0) / total;
+      var color = seg.color || ('var(--chart-' + ((idx % 7) + 1) + ')');
+      // A single 100% segment can't be drawn as one arc (start == end point),
+      // so render it as a full stroked ring instead.
+      if (frac >= 0.9999) {
+        return '<circle cx="' + CX + '" cy="' + CY + '" r="' + ((R + IR) / 2) + '" fill="none" stroke="' + color + '" stroke-width="' + (R - IR) + '" opacity="0.9"/>';
+      }
+      var sweep = frac * 2 * Math.PI;
+      var x1 = CX + R * Math.cos(angle), y1 = CY + R * Math.sin(angle);
+      var x2 = CX + R * Math.cos(angle + sweep), y2 = CY + R * Math.sin(angle + sweep);
+      var xi1 = CX + IR * Math.cos(angle), yi1 = CY + IR * Math.sin(angle);
+      var xi2 = CX + IR * Math.cos(angle + sweep), yi2 = CY + IR * Math.sin(angle + sweep);
+      var large = sweep > Math.PI ? 1 : 0;
+      var d = 'M' + x1 + ',' + y1 + ' A' + R + ',' + R + ' 0 ' + large + ',1 ' + x2 + ',' + y2 + ' L' + xi2 + ',' + yi2 + ' A' + IR + ',' + IR + ' 0 ' + large + ',0 ' + xi1 + ',' + yi1 + ' Z';
+      angle += sweep;
+      return '<path d="' + d + '" fill="' + color + '" opacity="0.9"/>';
+    }).join('');
+    var pct = opts.centerLabel !== undefined ? opts.centerLabel : Math.round((segments[0] ? segments[0].value / total * 100 : 0)) + '%';
+    var center = '<text x="' + CX + '" y="' + (CY + 4) + '" text-anchor="middle" font-size="13" font-weight="700" fill="var(--sf-text-primary)">' + escHtml(String(pct)) + '</text>';
+    return '<svg viewBox="0 0 ' + W + ' ' + W + '" xmlns="http://www.w3.org/2000/svg" style="width:' + W + 'px;height:' + W + 'px;flex-shrink:0">' + paths + center + '</svg>';
+  }
+
+  function renderDonutWithLegend(segments, opts) {
+    opts = opts || {};
+    var total = segments.reduce(function(s, seg) { return s + (seg.value || 0); }, 0);
+    var legend = segments.map(function(seg, i) {
+      var pct = total > 0 ? Math.round((seg.value / total) * 100) : 0;
+      var color = seg.color || ('var(--chart-' + ((i % 7) + 1) + ')');
+      return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+        '<div style="width:10px;height:10px;border-radius:50%;background:' + color + ';flex-shrink:0"></div>' +
+        '<span style="font-size:12px;flex:1">' + escHtml(seg.label) + '</span>' +
+        '<span style="font-size:12px;font-weight:700">' + seg.value + '</span>' +
+        '<span style="font-size:11px;opacity:.5;margin-left:2px">(' + pct + '%)</span>' +
+        '</div>';
+    }).join('');
+    return '<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">' +
+      renderDonutChart(segments, opts) +
+      '<div style="flex:1;min-width:120px">' + legend + '</div>' +
+      '</div>';
+  }
+
+  /** Vertical column (bar) chart — value above each column, wrapped label beneath. */
+  function renderColumnChart(items, opts) {
+    items = (items || []).filter(function(i){ return i; });
+    if (!items.length) { return '<p style="opacity:.5;font-size:12px;margin:8px 0">No data available.</p>'; }
+    opts = opts || {};
+    const COLORS = ['var(--chart-1)','var(--chart-2)','var(--chart-3)','var(--chart-4)','var(--chart-5)','var(--chart-6)','var(--chart-7)'];
+    const colW = opts.colWidth || 56;
+    const gap = opts.gap || 14;
+    const plotH = opts.plotHeight || 150;
+    const labelH = 34;
+    const topPad = 18;
+    const W = items.length * colW + (items.length - 1) * gap + 8;
+    const H = topPad + plotH + labelH;
+    const maxVal = Math.max.apply(null, items.map(function(i){ return i.value || 0; }).concat([1]));
+    const baseY = topPad + plotH;
+    const cols = items.map(function(item, idx){
+      const val = item.value || 0;
+      const h = Math.max((val / maxVal) * plotH, val > 0 ? 3 : 0);
+      const x = 4 + idx * (colW + gap);
+      const y = baseY - h;
+      const color = item.color || COLORS[idx % COLORS.length];
+      const words = String(item.label).split(' ');
+      const lines = words.length > 1
+        ? [words.slice(0, Math.ceil(words.length/2)).join(' '), words.slice(Math.ceil(words.length/2)).join(' ')]
+        : [String(item.label)];
+      const labelSvg = lines.map(function(ln, li){
+        return '<text x="' + (x + colW/2) + '" y="' + (baseY + 14 + li*11) + '" text-anchor="middle" font-size="10" fill="var(--sf-text-secondary)">' + escHtml(ln) + '</text>';
+      }).join('');
+      return '<text x="' + (x + colW/2) + '" y="' + (y - 5) + '" text-anchor="middle" font-size="12" font-weight="700" fill="var(--sf-text-primary)">' + val + '</text>' +
+        '<rect x="' + x + '" y="' + y + '" width="' + colW + '" height="' + h + '" rx="4" fill="' + color + '" class="chart-bar" style="animation-delay:' + (idx*0.04) + 's"/>' +
+        labelSvg;
+    }).join('');
+    const axis = '<line x1="0" y1="' + baseY + '" x2="' + W + '" y2="' + baseY + '" stroke="var(--sf-border)" stroke-width="1"/>';
+    return '<svg viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;overflow:visible">' + axis + cols + '</svg>';
+  }
+
+  /** Classify a package row into Managed / Unlocked / Local (mirrors service classifyPackages). */
+  function packageType(pkg) {
+    const ns = pkg && pkg.SubscriberPackage && pkg.SubscriberPackage.NamespacePrefix;
+    if (ns && String(ns).trim()) { return 'Managed'; }
+    if (pkg && pkg.SubscriberPackageVersion) { return 'Unlocked'; }
+    return 'Local';
+  }
+
   function renderOrgInfo() {
     const od = results && results.orgDetails;
     const inv = results && results.orgInventory;
     const licenses = (results && results.licenseSummary) || [];
+    const oid = (results && results.orgInfoData) || {};
 
     if (!od) {
       return `<div style="padding:48px 32px;text-align:center;opacity:.6">
@@ -1367,269 +1464,566 @@
       </div>`;
     }
 
+    const ext    = oid.extended    || {};
+    const clouds = oid.clouds      || [];
+    const envSum = oid.environments || null;
+    const intSum = oid.integrations || null;
+    const appSum = oid.appsByType  || null;
+    const pkgSum = oid.packagesByType || null;
+    const qf     = oid.quickFacts  || null;
+
     const TRUST_CFG = {
-      OK: { color: "#22c55e", bg: "rgba(34,197,94,.1)", icon: "✅" },
-      Informational: {
-        color: "#3b82f6",
-        bg: "rgba(59,130,246,.1)",
-        icon: "ℹ️",
-      },
-      "Minor Incident": {
-        color: "#f59e0b",
-        bg: "rgba(245,158,11,.1)",
-        icon: "⚠️",
-      },
-      "Major Incident": {
-        color: "#ef4444",
-        bg: "rgba(239,68,68,.1)",
-        icon: "🚨",
-      },
-      Maintenance: { color: "#8b5cf6", bg: "rgba(139,92,246,.1)", icon: "🔧" },
-      Unknown: { color: "#6b7280", bg: "rgba(107,114,128,.1)", icon: "❓" },
+      OK:             { color: "#22c55e", bg: "rgba(34,197,94,.1)",   icon: "✅" },
+      Informational:  { color: "#3b82f6", bg: "rgba(59,130,246,.1)",  icon: "ℹ️" },
+      "Minor Incident":{ color: "#f59e0b", bg: "rgba(245,158,11,.1)", icon: "⚠️" },
+      "Major Incident":{ color: "#ef4444", bg: "rgba(239,68,68,.1)",  icon: "🚨" },
+      Maintenance:    { color: "#8b5cf6", bg: "rgba(139,92,246,.1)",  icon: "🔧" },
+      Unknown:        { color: "#6b7280", bg: "rgba(107,114,128,.1)", icon: "❓" },
     };
     const tc = TRUST_CFG[od.trustStatus || "Unknown"] || TRUST_CFG["Unknown"];
+    const activeIncidents = (od.trustIncidents || []).filter(i => i.status !== "Resolved");
 
-    const activeIncidents = (od.trustIncidents || []).filter(
-      (i) => i.status !== "Resolved",
-    );
-    const resolvedIncidents = (od.trustIncidents || []).filter(
-      (i) => i.status === "Resolved",
-    );
-
-    const consoleApps = (od.apps || []).filter(
-      (a) =>
-        a.type === "ServiceDesk" ||
-        a.type === "Console" ||
-        (a.type || "").toLowerCase().includes("console"),
-    );
-    const standardApps = (od.apps || []).filter(
-      (a) => !consoleApps.includes(a),
-    );
-
-    function kpiCard(icon, value, label, color) {
-      return `<div class="stat-card"><span class="stat-icon">${icon}</span><div><div class="stat-value" style="color:${color || "inherit"}">${escHtml(String(value))}</div><div class="stat-label">${escHtml(label)}</div></div></div>`;
+    // subtitle is trusted HTML — caller is responsible for escaping data within it
+    function kpiCard(icon, value, label, color, subtitle, iconBg) {
+      const safeVal = escHtml(String(value !== undefined && value !== null ? value : '—'));
+      const bg = iconBg || 'rgba(1,118,211,.12)';
+      return `<div class="stat-card" style="flex-direction:column;text-align:center;padding:14px 10px;min-width:90px">
+        <div style="width:34px;height:34px;border-radius:8px;background:${bg};display:inline-flex;align-items:center;justify-content:center;font-size:17px;margin:0 auto 6px">${icon}</div>
+        <div class="stat-value" style="font-size:18px">${safeVal}</div>
+        ${subtitle ? `<div style="font-size:10px;opacity:.55;margin-top:1px;line-height:1.3">${subtitle}</div>` : ''}
+        <div class="stat-label" style="font-size:10px;margin-top:2px">${escHtml(label)}</div>
+      </div>`;
     }
 
-    const featLicRows = (od.featureLicenses || [])
-      .map((fl, i) => {
-        const pct =
-          fl.totalLicenses > 0
-            ? Math.round((fl.usedLicenses / fl.totalLicenses) * 100)
-            : 0;
-        const barColor =
-          pct > 90 ? "#ef4444" : pct > 70 ? "#f59e0b" : "#22c55e";
-        return `<tr style="background:${i % 2 ? "var(--vscode-editor-background)" : "transparent"}">
-        <td style="padding:8px 12px;font-size:13px;font-weight:600">${escHtml(fl.name)}</td>
-        <td style="padding:8px 12px;font-size:12px;text-align:center">
-          <span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:12px;background:${fl.status === "Active" ? "rgba(34,197,94,.15)" : "rgba(107,114,128,.15)"};color:${fl.status === "Active" ? "#22c55e" : "#6b7280"}">${escHtml(fl.status)}</span>
-        </td>
-        <td style="padding:8px 12px;font-size:13px;text-align:center">${fl.usedLicenses} / ${fl.totalLicenses}</td>
-        <td style="padding:8px 12px;min-width:120px">
-          <div style="height:6px;border-radius:3px;background:var(--vscode-widget-border);overflow:hidden">
-            <div style="height:6px;border-radius:3px;background:${barColor};width:${pct}%"></div>
+    function dtRow(label, value) {
+      if (!value && value !== 0) { return ''; }
+      return `<tr><td style="padding:5px 0;font-size:12px;opacity:.6;width:45%;vertical-align:top">${escHtml(label)}</td>` +
+             `<td style="padding:5px 0;font-size:12px;font-weight:500;padding-left:8px">${value}</td></tr>`;
+    }
+
+    function listRow(label, value) {
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--vscode-widget-border,rgba(255,255,255,.1))">` +
+        `<span style="font-size:12px">${escHtml(label)}</span>` +
+        `<span style="font-size:12px;font-weight:700">${value !== undefined ? value : '—'}</span></div>`;
+    }
+
+    // ── Top 8-metric strip ────────────────────────────────────────────────
+    const totalUsedLicenses = licenses.reduce((s, l) => s + l.usedLicenses, 0);
+    // License allocation totals (moved up so topStrip can reference totalLic)
+    const allocatedLics = licenses.filter(l => l.totalLicenses > 0);
+    const totalLic = allocatedLics.reduce((s, l) => s + l.totalLicenses, 0);
+    const usedLic  = allocatedLics.reduce((s, l) => s + l.usedLicenses, 0);
+    const licUtilPct = totalLic > 0 ? Math.round(usedLic / totalLic * 100) : 0;
+    const pkgCount = inv ? (inv.installedPackages || []).length : (oid.activeLicenses || 0);
+
+    // Derive edition main/sub from orgType (e.g. "Enterprise Edition" → "Enterprise" + "Edition")
+    const orgTypeWords = (od.orgType || '').split(' ');
+    const editionMain = orgTypeWords[0] || od.orgType || '—';
+    const editionSub  = orgTypeWords.length > 1 ? escHtml(orgTypeWords.slice(1).join(' ')) : null;
+
+    // Derive region label heuristically from instance name prefix
+    const instPfx = (od.instanceName || '').replace(/\d+$/, '').toUpperCase();
+    const regionMap = { NA: 'North America', EU: 'Europe', AP: 'Asia Pacific', CS: 'CS Sandbox', IN: 'India', AU: 'Australia', USA: 'North America' };
+    const regionLabel = regionMap[instPfx] || null;
+    const instanceSub = regionLabel
+      ? `${escHtml(regionLabel)}<sup title="Derived from instance name prefix" style="font-size:8px;opacity:.4;margin-left:2px;cursor:help">◎</sup>`
+      : null;
+
+    const orgTypeMain = ext.isSandbox != null ? (ext.isSandbox ? 'Sandbox' : 'Production') : '—';
+    const orgTypeSub  = ext.isHyperforce ? 'Hyperforce' : null;
+
+    const topStrip = `<div class="stat-cards mb-24" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px">
+      ${kpiCard('👑', editionMain, 'Edition',           '', editionSub,                                  'rgba(245,158,11,.12)')}
+      ${kpiCard('🌐', od.instanceName || '—', 'Instance', '', instanceSub,                              'rgba(1,118,211,.12)')}
+      ${kpiCard('☁️', orgTypeMain,  'Org Type',          '', orgTypeSub,                                 'rgba(20,184,166,.12)')}
+      ${kpiCard('📡', od.apiVersion || '—', 'API Version', '', od.nextReleaseName ? escHtml(od.nextReleaseName) : null, 'rgba(139,92,246,.12)')}
+      ${kpiCard('👤', qf ? qf.users : (oid.activeUsers || '—'), 'Users', '', 'Active Users',            'rgba(34,197,94,.12)')}
+      ${kpiCard('🪪', usedLic ? usedLic.toLocaleString() : (totalUsedLicenses || '—'), 'Active Licenses', '', totalLic ? 'of ' + totalLic.toLocaleString() : null, 'rgba(59,130,246,.12)')}
+      ${kpiCard('📦', inv ? (inv.installedPackages || []).length : '—', 'Installed Packages', '', 'Total Packages', 'rgba(139,92,246,.12)')}
+      ${kpiCard('🔌', intSum ? intSum.total : '—', 'Integrations', '', 'Total Integrations',             'rgba(245,158,11,.12)')}
+    </div>`;
+
+    // ── Row 1 Col 1: Organization Details ────────────────────────────────
+    const storageUsedGB  = ext.storageUsedMB  ? (ext.storageUsedMB  / 1024).toFixed(1) : null;
+    const storageLimitGB = ext.storageLimitMB ? (ext.storageLimitMB / 1024).toFixed(0) : null;
+    const storagePct     = (ext.storageUsedMB && ext.storageLimitMB) ? Math.round(ext.storageUsedMB / ext.storageLimitMB * 100) : 0;
+    const storageBar = storageUsedGB ? `${storageUsedGB} GB of ${storageLimitGB} GB
+      <div style="height:5px;border-radius:3px;background:var(--vscode-widget-border);overflow:hidden;margin-top:4px">
+        <div style="height:5px;background:${storagePct>80?'#ef4444':storagePct>60?'#f59e0b':'#22c55e'};width:${storagePct}%"></div>
+      </div><span style="font-size:10px;opacity:.5">${storagePct}%</span>` : null;
+
+    const lastScan = (results && results.timestamp) ? new Date(results.timestamp) : null;
+    const lastScanLabel = lastScan && !isNaN(lastScan.getTime()) ? lastScan.toLocaleString() : null;
+
+    const pageViews = (ext.monthlyPageViewsUsed != null && ext.monthlyPageViewsEntitlement != null)
+      ? `${ext.monthlyPageViewsUsed.toLocaleString()} / ${ext.monthlyPageViewsEntitlement.toLocaleString()}`
+      : null;
+    const orgDetailsLeft = `<table style="width:100%;border-collapse:collapse">
+        ${dtRow('Org Name', escHtml(od.orgName || od.username))}
+        ${dtRow('Organization ID', `<code style="font-size:10px;opacity:.8">${escHtml(od.orgId)}</code>`)}
+        ${dtRow('Primary Contact', ext.primaryContact ? escHtml(ext.primaryContact) : null)}
+        ${dtRow('Division', ext.division ? escHtml(ext.division) : null)}
+        ${dtRow('Address', ext.address ? escHtml(ext.address) : null)}
+        ${dtRow('Phone', ext.phone ? escHtml(ext.phone) : null)}
+        ${dtRow('Fax', ext.fax ? escHtml(ext.fax) : null)}
+        ${dtRow('Created Date', ext.createdDate ? new Date(ext.createdDate).toLocaleDateString() : null)}
+        ${dtRow('My Domain', ext.myDomain ? escHtml(ext.myDomain) : null)}
+        ${dtRow('Login URL', od.instanceUrl ? `<a href="${escHtml(od.instanceUrl)}" style="color:var(--sf-blue,#0176d3);text-decoration:none;font-size:11px">${escHtml(od.instanceUrl)}</a>` : null)}
+      </table>`;
+    const orgDetailsRight = `<table style="width:100%;border-collapse:collapse">
+        ${dtRow('📅 Current Release', od.nextReleaseName ? escHtml(od.nextReleaseName) : null)}
+        ${dtRow('🌐 Instance', escHtml(od.instanceName))}
+        ${dtRow('📡 API Version', escHtml(od.apiVersion))}
+        ${dtRow('🔨 Salesforce CD', ext.buildVersion ? escHtml(ext.buildVersion) : null)}
+        ${dtRow('🏷️ Org Namespace', ext.namespacePrefix ? escHtml(ext.namespacePrefix) : null)}
+        ${dtRow('🕐 Time Zone', ext.timezone ? escHtml(ext.timezone) : null)}
+        ${dtRow('💬 Language', ext.defaultLocale ? escHtml(ext.defaultLocale) : (ext.language ? escHtml(ext.language) : null))}
+        ${dtRow('💱 Currency', ext.currency ? escHtml(ext.currency) : null)}
+        ${dtRow('📆 Fiscal Year Start', ext.fiscalYearStartMonth ? escHtml(ext.fiscalYearStartMonth) : null)}
+        ${dtRow('📄 Monthly Page Views', pageViews ? escHtml(pageViews) : null)}
+        ${dtRow('☁️ Hyperforce', ext.isHyperforce != null ? (ext.isHyperforce ? '✅ Yes' : 'No') : null)}
+        ${dtRow('🏢 Data Center', ext.dataCenter ? escHtml(ext.dataCenter) : null)}
+        ${dtRow('💾 Storage Used', storageBar)}
+        ${dtRow('🔍 Last Scan', lastScanLabel ? escHtml(lastScanLabel) : null)}
+        ${dtRow('🛡️ Trust Status', `<span style="color:${tc.color};font-weight:600">${tc.icon} ${escHtml(od.trustStatus || 'Unknown')}</span>`)}
+      </table>`;
+
+    const orgDetailsCard = `<div class="info-card" style="height:100%">
+      <div class="section-header-row">
+        <div class="section-header-icon icon-blue">🏢</div>
+        <span style="font-size:14px;font-weight:700">Organization Details</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 24px">
+        <div>${orgDetailsLeft}</div>
+        <div>${orgDetailsRight}</div>
+      </div>
+    </div>`;
+
+    // ── Row 1 Col 2: Clouds Overview ─────────────────────────────────────
+    const cloudsEnabled = clouds.filter(c => c.enabled).length;
+    const cloudsDisabled = clouds.length - cloudsEnabled;
+    const cloudGrid = clouds.length > 0
+      ? clouds.map(c => {
+          const en = c.enabled;
+          return `<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;
+            background:${en ? 'rgba(34,197,94,.07)' : 'rgba(239,68,68,.05)'};
+            border:1px solid ${en ? 'rgba(34,197,94,.25)' : 'rgba(239,68,68,.18)'}">
+            <span style="font-size:12px;flex:1;font-weight:${en?'500':'400'}">${escHtml(c.name)}</span>
+            <span style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;
+              background:${en ? 'rgba(34,197,94,.15)' : 'rgba(239,68,68,.12)'};
+              color:${en ? '#22c55e' : '#ef4444'}">${en ? 'Enabled' : 'Disabled'}</span>
+          </div>`;
+        }).join('')
+      : `<p style="opacity:.5;font-size:12px;margin:8px 0">Requires feature licenses in org.</p>`;
+
+    const cloudsCard = `<div class="info-card" style="height:100%">
+      <div class="section-header-row">
+        <div class="section-header-icon" style="background:rgba(1,118,211,.12)">☁️</div>
+        <span style="font-size:14px;font-weight:700">Clouds Overview</span>
+        ${clouds.length ? `<span style="margin-left:auto;font-size:11px;opacity:.5">Total: ${clouds.length}</span>` : ''}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px">${cloudGrid}</div>
+      ${clouds.length ? `<div style="display:flex;gap:16px;justify-content:center;margin-top:10px;font-size:11px">
+        <span style="color:#22c55e;font-weight:600">● Enabled (${cloudsEnabled})</span>
+        <span style="color:#ef4444;font-weight:600">● Disabled (${cloudsDisabled})</span>
+      </div>` : ''}
+    </div>`;
+
+    // ── Row 1 Col 3: License Summary ─────────────────────────────────────
+    const licDonutSegs = licenses.slice(0, 6).map((l, i) => ({
+      label: l.name, value: l.usedLicenses,
+      color: `var(--chart-${(i % 7) + 1})`,
+    }));
+    // (allocatedLics / totalLic / usedLic / licUtilPct computed earlier before topStrip)
+    const licPctLabel = usedLic.toLocaleString();
+    const licRows = licenses.slice(0, 10).map((l, i) => {
+      const pct = l.totalLicenses > 0 ? Math.round(l.usedLicenses / l.totalLicenses * 100) : 0;
+      const barColor = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#22c55e';
+      return `<tr style="background:${i%2?'var(--vscode-editor-background)':'transparent'}">
+        <td style="padding:5px 6px;font-size:11px">${escHtml(l.name)}</td>
+        <td style="padding:5px 6px;font-size:11px;text-align:center">${l.usedLicenses}</td>
+        <td style="padding:5px 6px;font-size:11px;text-align:center">${l.totalLicenses - l.usedLicenses}</td>
+        <td style="padding:5px 6px;min-width:70px">
+          <div style="height:4px;border-radius:2px;background:var(--vscode-widget-border);overflow:hidden">
+            <div style="height:4px;background:${barColor};width:${pct}%"></div>
           </div>
-          <div style="font-size:10px;opacity:.5;margin-top:2px;text-align:right">${pct}%</div>
         </td>
       </tr>`;
-      })
-      .join("");
+    }).join('');
 
-    const userLicRows = licenses
-      .map((l, i) => {
-        const pct =
-          l.totalLicenses > 0
-            ? Math.round((l.usedLicenses / l.totalLicenses) * 100)
-            : 0;
-        const barColor =
-          pct > 90 ? "#ef4444" : pct > 70 ? "#f59e0b" : "#22c55e";
-        return `<tr style="background:${i % 2 ? "var(--vscode-editor-background)" : "transparent"}">
-        <td style="padding:8px 12px;font-size:13px;font-weight:600">${escHtml(l.name)}</td>
-        <td style="padding:8px 12px;font-size:13px;text-align:center">${l.usedLicenses} / ${l.totalLicenses}</td>
-        <td style="padding:8px 12px;min-width:120px">
-          <div style="height:6px;border-radius:3px;background:var(--vscode-widget-border);overflow:hidden">
-            <div style="height:6px;border-radius:3px;background:${barColor};width:${pct}%"></div>
-          </div>
-          <div style="font-size:10px;opacity:.5;margin-top:2px;text-align:right">${pct}%</div>
-        </td>
-      </tr>`;
-      })
-      .join("");
+    const licenseCard = `<div class="info-card" style="height:100%">
+      <div class="section-header-row">
+        <div class="section-header-icon icon-amber">🪪</div>
+        <span style="font-size:14px;font-weight:700">License Summary</span>
+        ${licenses.length ? `<a class="orginfo-viewall" data-action="orginfo-subtab" data-sub="clouds" style="margin-left:auto">All Licenses →</a>` : ''}
+      </div>
+      ${licDonutSegs.length > 0
+        ? `<div style="margin-bottom:6px">${renderDonutWithLegend(licDonutSegs, { size: 120, centerLabel: licPctLabel })}</div>
+           <div style="text-align:center;margin-bottom:14px">
+             <div style="font-size:13px;font-weight:700">${usedLic.toLocaleString()} <span style="opacity:.5;font-weight:400">of</span> ${totalLic.toLocaleString()}</div>
+             <div style="font-size:11px;color:${licUtilPct > 90 ? '#ef4444' : licUtilPct > 70 ? '#f59e0b' : '#22c55e'};font-weight:600;margin-top:2px">${licUtilPct}% Utilization</div>
+           </div>`
+        : ''}
+      ${licRows ? `<table style="width:100%;border-collapse:collapse">
+        <thead><tr style="border-bottom:1px solid var(--vscode-widget-border)">
+          <th style="text-align:left;padding:4px 6px;font-size:10px;opacity:.6">Type</th>
+          <th style="text-align:center;padding:4px 6px;font-size:10px;opacity:.6">Assigned</th>
+          <th style="text-align:center;padding:4px 6px;font-size:10px;opacity:.6">Available</th>
+          <th style="padding:4px 6px;font-size:10px;opacity:.6">Utilization</th>
+        </tr></thead>
+        <tbody>${licRows}</tbody>
+      </table>` : '<p style="opacity:.5;font-size:12px">No license data.</p>'}
+    </div>`;
 
-    const incidentRows = activeIncidents
-      .map(
-        (inc, i) =>
-          `<div style="border-radius:10px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.06);padding:14px 16px;margin-bottom:10px">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-          <span style="font-size:13px;font-weight:700;color:#ef4444">🚨 ${escHtml(inc.severity || "Incident")}</span>
-          <span style="font-size:11px;opacity:.5">${inc.createdAt ? new Date(inc.createdAt).toLocaleString() : ""}</span>
-        </div>
-        <p style="margin:0 0 6px;font-size:13px;opacity:.9">${escHtml(inc.message || "")}</p>
-        ${
-          inc.affectedComponents && inc.affectedComponents.length
-            ? `<div style="font-size:11px;opacity:.6">Affected: ${inc.affectedComponents
-                .slice(0, 5)
-                .map((c) => escHtml(c))
-                .join(", ")}</div>`
-            : ""
-        }
-      </div>`,
-      )
-      .join("");
+    // ── Row 2 Sec 1: Installed Packages by Type ───────────────────────────
+    const pkgSegs = pkgSum ? [
+      { label: 'Managed',  value: pkgSum.managed,  color: 'var(--chart-1)' },
+      { label: 'Unlocked', value: pkgSum.unlocked, color: 'var(--chart-2)' },
+      { label: 'Local',    value: pkgSum.local,    color: 'var(--chart-3)' },
+    ].filter(s => s.value > 0) : [];
+    const totalPkgs = inv ? (inv.installedPackages || []).length : 0;
 
-    return `
-      <div style="padding:28px 24px;max-width:1100px;margin:0 auto">
+    const packagesCard = `<div class="info-card" style="height:100%">
+      <div class="section-header-row">
+        <div class="section-header-icon icon-purple">📦</div>
+        <span style="font-size:14px;font-weight:700">Packages by Type</span>
+        ${totalPkgs ? `<span style="margin-left:auto;font-size:11px;opacity:.5">Total: ${totalPkgs}</span>` : ''}
+      </div>
+      ${pkgSegs.length > 0
+        ? renderDonutWithLegend(pkgSegs, { size: 110, centerLabel: totalPkgs })
+        : `<p style="opacity:.5;font-size:12px;margin:8px 0">${totalPkgs === 0 ? 'No installed packages.' : 'Re-run analysis for type breakdown.'}</p>`}
+      ${totalPkgs ? `<div style="margin-top:10px;text-align:center"><a class="orginfo-viewall" data-action="orginfo-subtab" data-sub="packages">View all packages →</a></div>` : ''}
+    </div>`;
 
-        <!-- Org Identity Card -->
-        <div style="background:var(--vscode-editor-background);border:1px solid var(--vscode-widget-border);border-radius:14px;padding:24px 28px;margin-bottom:24px;display:flex;align-items:flex-start;gap:20px;flex-wrap:wrap">
-          <div style="width:56px;height:56px;border-radius:14px;background:rgba(1,118,211,.12);display:flex;align-items:center;justify-content:center;font-size:28px;flex-shrink:0">🏢</div>
-          <div style="flex:1;min-width:220px">
-            <div style="font-size:20px;font-weight:800;margin-bottom:4px">${escHtml(od.orgName || od.username)}</div>
-            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-              ${od.orgType ? `<span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;background:rgba(1,118,211,.15);color:var(--sf-blue,#0176d3)">${escHtml(od.orgType)}</span>` : ""}
-              ${od.instanceName ? `<span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;background:rgba(99,102,241,.12);color:#6366f1">Instance: ${escHtml(od.instanceName)}</span>` : ""}
-              <span style="font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(107,114,128,.12);opacity:.8">API v${escHtml(od.apiVersion)}</span>
-            </div>
-            <div style="margin-top:8px;font-size:12px;opacity:.6">${escHtml(od.username)}${od.alias ? ` &nbsp;·&nbsp; <em>${escHtml(od.alias)}</em>` : ""}</div>
-            <div style="margin-top:4px;font-size:12px;opacity:.55">🔗 <a href="${escHtml(od.instanceUrl)}" style="color:inherit;text-decoration:underline">${escHtml(od.instanceUrl)}</a></div>
-          </div>
-          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
-            <div style="padding:10px 16px;border-radius:10px;background:${tc.bg};border:1px solid ${tc.color}40;text-align:center">
-              <div style="font-size:20px">${tc.icon}</div>
-              <div style="font-size:12px;font-weight:700;color:${tc.color};margin-top:4px">${escHtml(od.trustStatus || "Unknown")}</div>
-              <div style="font-size:10px;opacity:.6">Trust Status</div>
-            </div>
-            ${
-              od.nextReleaseName
-                ? `<div style="padding:8px 14px;border-radius:10px;background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.3);text-align:center;max-width:180px">
-              <div style="font-size:11px;font-weight:700;color:#8b5cf6">📅 Next Release</div>
-              <div style="font-size:12px;font-weight:600;margin-top:4px">${escHtml(od.nextReleaseName)}</div>
-              ${od.nextReleaseDate ? `<div style="font-size:10px;opacity:.6;margin-top:2px">${new Date(od.nextReleaseDate).toLocaleDateString()}</div>` : ""}
-            </div>`
-                : ""
-            }
-          </div>
-        </div>
+    // ── Row 2 Sec 2: Applications Summary ────────────────────────────────
+    const appBarItems = appSum ? [
+      { label: 'Lightning Apps',    value: appSum.lightningApps,    color: 'var(--chart-1)' },
+      { label: 'Experience Sites',  value: appSum.experienceSites,  color: 'var(--chart-2)' },
+      { label: 'Console Apps',      value: appSum.consoleApps,      color: 'var(--chart-3)' },
+      { label: 'Connected Apps',    value: appSum.connectedApps,    color: 'var(--chart-4)' },
+      { label: 'Mobile Apps',       value: appSum.mobileApps,       color: 'var(--chart-5)' },
+      { label: 'OmniStudio Apps',   value: appSum.omniStudioApps,   color: 'var(--chart-6)' },
+    ].filter(b => b.value > 0) : (od.apps && od.apps.length ? [
+      { label: 'Console Apps',  value: od.consoleAppCount || 0,  color: 'var(--chart-1)' },
+      { label: 'Standard Apps', value: od.standardAppCount || 0, color: 'var(--chart-2)' },
+    ] : []);
+    const totalApps = appSum ? appSum.total : od.apps ? od.apps.length : 0;
 
-        <!-- Org Stats Row (environment-specific only — inventory counts live on their own tabs) -->
-        <div class="stat-cards mb-24" style="flex-wrap:wrap">
-          ${kpiCard("🖥️", od.consoleAppCount || 0, "Console Apps", od.consoleAppCount > 0 ? "var(--sf-blue,#0176d3)" : "")}
-          ${kpiCard("📱", od.standardAppCount || 0, "Standard Apps", "")}
-          ${kpiCard("👥", licenses.length > 0 ? licenses.reduce((s, l) => s + l.usedLicenses, 0) : 0, "Active Users (lic)", "")}
-        </div>
-        <div style="font-size:11.5px;color:var(--sf-text-muted);margin:-12px 0 20px">Looking for component counts? Apex / Triggers / Flows / LWC are on the <strong>Code Quality</strong> tab, objects &amp; custom fields on <strong>Data Model</strong>, and permission sets on <strong>Security &amp; Access</strong>.</div>
+    const appsCard = `<div class="info-card" style="height:100%">
+      <div class="section-header-row">
+        <div class="section-header-icon icon-blue">📱</div>
+        <span style="font-size:14px;font-weight:700">Applications</span>
+        ${totalApps ? `<span style="margin-left:auto;font-size:11px;opacity:.5">Total: ${totalApps}</span>` : ''}
+      </div>
+      ${appBarItems.length > 0
+        ? `<div style="display:flex;justify-content:center;overflow-x:auto">${renderColumnChart(appBarItems, { colWidth: 30, gap: 10, plotHeight: 70 })}</div>`
+        : '<p style="opacity:.5;font-size:12px;margin:8px 0">No app data available.</p>'}
+      ${(od.apps && od.apps.length) ? `<div style="margin-top:8px;text-align:center"><a class="orginfo-viewall" data-action="orginfo-subtab" data-sub="applications">View all applications →</a></div>` : ''}
+    </div>`;
 
-        <!-- Apps Breakdown -->
-        ${
-          od.apps && od.apps.length
-            ? `
-        <div class="info-card">
-          <div class="section-header-row">
-            <div class="section-header-icon icon-purple">📱</div>
-            <span style="font-size:15px;font-weight:700">Apps (${od.apps.length} total · ${od.consoleAppCount} Console · ${od.standardAppCount} Standard)</span>
-          </div>
-          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">
-            ${od.apps
-              .slice(0, 40)
-              .map((a) => {
-                const isConsole =
-                  a.type === "ServiceDesk" ||
-                  a.type === "Console" ||
-                  (a.type || "").toLowerCase().includes("console");
-                return `<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:${isConsole ? "rgba(99,102,241,.08)" : "var(--vscode-sideBar-background,rgba(0,0,0,.04))"};border:1px solid ${isConsole ? "rgba(99,102,241,.2)" : "var(--vscode-widget-border)"}">
-                <span style="font-size:14px">${isConsole ? "🖥️" : "📱"}</span>
-                <span style="font-size:12px;font-weight:${isConsole ? "600" : "400"}">${escHtml(a.label)}</span>
-              </div>`;
-              })
-              .join("")}
-            ${od.apps.length > 40 ? `<div style="padding:8px 12px;font-size:12px;opacity:.5">…and ${od.apps.length - 40} more</div>` : ""}
-          </div>
-        </div>`
-            : ""
-        }
+    // ── Row 2 Sec 3: Environments Summary ────────────────────────────────
+    const envItems = envSum ? [
+      { label: 'Production',          value: envSum.production },
+      { label: 'Full Sandboxes',      value: envSum.fullSandboxes },
+      { label: 'Partial Sandboxes',   value: envSum.partialSandboxes },
+      { label: 'Developer Sandboxes', value: envSum.developerSandboxes },
+      { label: 'Scratch Orgs',        value: envSum.scratchOrgs },
+    ].filter(e => e.value > 0) : [];
 
-        <!-- Trust Center Incidents -->
-        ${
-          activeIncidents.length
-            ? `
-        <div class="info-card info-card--error mb-24">
+    const envsCard = `<div class="info-card" style="height:100%">
+      <div class="section-header-row">
+        <div class="section-header-icon" style="background:rgba(20,184,166,.12)">🌍</div>
+        <span style="font-size:14px;font-weight:700">Environments</span>
+        ${envSum ? `<span style="margin-left:auto;font-size:11px;opacity:.5">Total: ${envSum.total}</span>` : ''}
+      </div>
+      ${envItems.length > 0
+        ? envItems.map(e => listRow(e.label, e.value)).join('') +
+          `<div style="display:flex;justify-content:space-between;padding:8px 0;font-weight:700;font-size:13px">
+            <span>Total</span><span style="color:var(--sf-blue,#0176d3)">${envSum.total}</span></div>`
+        : '<p style="opacity:.5;font-size:12px;margin:8px 0">Sandbox data not available for this org.</p>'}
+    </div>`;
+
+    // ── Row 2 Sec 4: Integrations Overview ───────────────────────────────
+    const intItems = intSum ? [
+      { icon: '🔑', bg: 'rgba(20,184,166,.15)',  label: 'Named Credentials',    value: intSum.namedCredentials },
+      { icon: '🔗', bg: 'rgba(59,130,246,.15)',  label: 'Connected Apps',       value: intSum.connectedApps },
+      { icon: '🌐', bg: 'rgba(139,92,246,.15)',  label: 'External Credentials', value: intSum.externalCredentials },
+      { icon: '📡', bg: 'rgba(245,158,11,.15)',  label: 'Remote Sites',         value: intSum.remoteSites },
+      { icon: '🛡️', bg: 'rgba(34,197,94,.15)',  label: 'Auth. Providers',      value: intSum.authProviders },
+      { icon: '📜', bg: 'rgba(249,115,22,.15)',  label: 'Certificates',         value: intSum.certificates },
+    ] : [];
+
+    function intIconRow(icon, iconBg, label, value) {
+      return `<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--vscode-widget-border,rgba(255,255,255,.1))">
+        <div style="width:26px;height:26px;border-radius:6px;background:${iconBg};display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0">${icon}</div>
+        <span style="font-size:12px;flex:1">${escHtml(label)}</span>
+        <span style="font-size:12px;font-weight:700">${value !== undefined ? value : '—'}</span>
+      </div>`;
+    }
+
+    const intCard = `<div class="info-card" style="height:100%">
+      <div class="section-header-row">
+        <div class="section-header-icon icon-amber">🔌</div>
+        <span style="font-size:14px;font-weight:700">Integrations Overview</span>
+        ${intSum ? `<span style="margin-left:auto;font-size:11px;opacity:.5">Total: ${intSum.total}</span>` : ''}
+      </div>
+      ${intItems.length > 0
+        ? intItems.map(e => intIconRow(e.icon, e.bg, e.label, e.value)).join('') +
+          `<div style="display:flex;justify-content:space-between;padding:8px 0;font-weight:700;font-size:13px">
+            <span>Total</span><span style="color:var(--sf-blue,#0176d3)">${intSum.total}</span></div>`
+        : '<p style="opacity:.5;font-size:12px;margin:8px 0">Integration data not available.</p>'}
+    </div>`;
+
+    // ── Quick Facts strip ─────────────────────────────────────────────────
+    // A null/undefined value means the connected org didn't return the metric → N/A.
+    const qfItems = qf ? [
+      { icon: '🗃️', label: 'Custom Objects',       value: qf.customObjects },
+      { icon: '📋', label: 'Standard Objects',     value: inv ? inv.standardObjectCount : null },
+      { icon: '👤', label: 'Users',                value: qf.users },
+      { icon: '📊', label: 'Roles',                value: qf.roles },
+      { icon: '🪪', label: 'Profiles',             value: qf.profiles },
+      { icon: '🔑', label: 'Permission Sets',      value: qf.permissionSets },
+      { icon: '🗂️', label: 'PS Groups',           value: qf.permissionSetGroups },
+      { icon: '👥', label: 'Public Groups',        value: qf.publicGroups },
+      { icon: '📥', label: 'Queues',               value: qf.queues },
+      { icon: '⚡', label: 'Flows',                value: qf.flows },
+      { icon: '💻', label: 'Apex Classes',         value: qf.apexClasses },
+      { icon: '⚙️', label: 'Triggers',             value: qf.triggers },
+      { icon: '🧩', label: 'LWC Components',      value: qf.lwcComponents },
+    ] : [];
+    const qfUnavailable = qfItems.filter(f => f.value === null || f.value === undefined).map(f => f.label);
+
+    const quickFactsHtml = qfItems.length > 0 ? `
+    <div class="info-card mb-0" style="overflow-x:auto">
+      <div class="section-header-row" style="margin-bottom:12px">
+        <div class="section-header-icon" style="background:rgba(20,184,166,.12)">📌</div>
+        <span style="font-size:14px;font-weight:700">Quick Facts</span>
+      </div>
+      <div class="orginfo-qf-strip">
+        ${qfItems.map((f, idx) => {
+          const isNA = f.value === null || f.value === undefined;
+          const divider = idx < qfItems.length - 1
+            ? '<div class="orginfo-qf-divider"></div>'
+            : '';
+          return `<div class="orginfo-qf-item">
+            <div class="orginfo-qf-icon">${f.icon}</div>
+            <div class="orginfo-qf-value${isNA ? ' orginfo-qf-na' : ''}">${isNA ? 'N/A' : Number(f.value).toLocaleString()}</div>
+            <div class="orginfo-qf-label">${escHtml(f.label)}</div>
+          </div>${divider}`;
+        }).join('')}
+      </div>
+      ${qfUnavailable.length ? `<div style="margin-top:8px;font-size:11px;opacity:.5">ℹ️ Not available: ${escHtml(qfUnavailable.join(', '))}</div>` : ''}
+    </div>` : '';
+
+    // ── Trust Incidents ───────────────────────────────────────────────────
+    const trustBanner = activeIncidents.length
+      ? `<div class="info-card info-card--error">
           <div class="section-header-row">
             <div class="section-header-icon" style="background:rgba(239,68,68,.15)">🚨</div>
-            <span style="font-size:15px;font-weight:700;color:var(--score-critical)">Active Trust Incidents (${activeIncidents.length})</span>
+            <span style="font-size:14px;font-weight:700;color:var(--score-critical)">Active Trust Incidents (${activeIncidents.length})</span>
           </div>
-          ${incidentRows}
-        </div>`
-            : `
-        <div style="background:var(--vscode-editor-background);border:1px solid rgba(34,197,94,.25);border-radius:12px;padding:16px 24px;margin-bottom:24px;display:flex;align-items:center;gap:12px">
-          <span style="font-size:20px">✅</span>
-          <span style="font-size:13px;font-weight:600;color:#22c55e">No active Trust Center incidents for instance ${escHtml(od.instanceName || "")}</span>
-          <a href="https://status.salesforce.com" target="_blank" style="margin-left:auto;font-size:11px;opacity:.6;text-decoration:underline">status.salesforce.com</a>
-        </div>`
-        }
-
-        <!-- User Licenses -->
-        ${
-          userLicRows
-            ? `
-        <div class="info-card">
-          <div class="section-header-row">
-            <div class="section-header-icon icon-blue">🪪</div>
-            <span style="font-size:15px;font-weight:700">User Licenses</span>
-          </div>
-          <table style="width:100%;border-collapse:collapse">
-            <thead><tr style="border-bottom:2px solid var(--vscode-widget-border)">
-              <th style="text-align:left;padding:6px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">License Type</th>
-              <th style="text-align:center;padding:6px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Used / Total</th>
-              <th style="padding:6px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;opacity:.6;min-width:140px">Utilisation</th>
-            </tr></thead>
-            <tbody>${userLicRows}</tbody>
-          </table>
-        </div>`
-            : ""
-        }
-
-        <!-- Feature Licenses -->
-        ${
-          featLicRows
-            ? `
-        <div class="info-card">
-          <div class="section-header-row">
-            <div class="section-header-icon icon-amber">⭐</div>
-            <span style="font-size:15px;font-weight:700">Feature Licenses</span>
-          </div>
-          <table style="width:100%;border-collapse:collapse">
-            <thead><tr style="border-bottom:2px solid var(--vscode-widget-border)">
-              <th style="text-align:left;padding:6px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Feature</th>
-              <th style="text-align:center;padding:6px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Status</th>
-              <th style="text-align:center;padding:6px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;opacity:.6">Used / Total</th>
-              <th style="padding:6px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;opacity:.6;min-width:140px">Utilisation</th>
-            </tr></thead>
-            <tbody>${featLicRows}</tbody>
-          </table>
-        </div>`
-            : ""
-        }
-
-        <!-- Release Info -->
-        ${
-          od.nextReleaseName
-            ? `
-        <div class="info-card info-card--purple">
-          <div class="section-header-row">
-            <div class="section-header-icon icon-purple">📅</div>
-            <span style="font-size:15px;font-weight:700">Upcoming Maintenance / Release</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-            <div>
-              <div style="font-size:13px;font-weight:600">${escHtml(od.nextReleaseName)}</div>
-              ${od.nextReleaseDate ? `<div style="font-size:12px;opacity:.65;margin-top:3px">📆 ${new Date(od.nextReleaseDate).toLocaleString()}</div>` : ""}
+          ${activeIncidents.map(inc => `<div style="border-radius:8px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.06);padding:12px 14px;margin-bottom:8px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+              <span style="font-size:12px;font-weight:700;color:#ef4444">🚨 ${escHtml(inc.severity || 'Incident')}</span>
+              <span style="font-size:11px;opacity:.5">${inc.createdAt ? new Date(inc.createdAt).toLocaleString() : ''}</span>
             </div>
-            <a href="https://status.salesforce.com" target="_blank" style="margin-left:auto;font-size:11px;opacity:.5;text-decoration:underline">More at status.salesforce.com</a>
-          </div>
+            <p style="margin:0;font-size:12px;opacity:.9">${escHtml(inc.message || '')}</p>
+          </div>`).join('')}
         </div>`
-            : ""
-        }
+      : `<div style="background:var(--vscode-editor-background);border:1px solid rgba(34,197,94,.25);border-radius:12px;padding:12px 20px;display:flex;align-items:center;gap:10px">
+          <span style="font-size:16px">✅</span>
+          <span style="font-size:12px;font-weight:600;color:#22c55e">No active Trust Center incidents for ${escHtml(od.instanceName || 'this instance')}</span>
+          <a href="https://status.salesforce.com" target="_blank" style="margin-left:auto;font-size:11px;opacity:.5;text-decoration:underline">status.salesforce.com</a>
+        </div>`;
 
+    // ── Feature Licenses table (retained) ────────────────────────────────
+    const featLicRows = (od.featureLicenses || []).map((fl, i) => {
+      const pct = fl.totalLicenses > 0 ? Math.round(fl.usedLicenses / fl.totalLicenses * 100) : 0;
+      const barColor = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#22c55e';
+      return `<tr style="background:${i%2?'var(--vscode-editor-background)':'transparent'}">
+        <td style="padding:6px 10px;font-size:12px;font-weight:600">${escHtml(fl.name)}</td>
+        <td style="padding:6px 10px;font-size:11px;text-align:center">
+          <span style="padding:1px 7px;border-radius:10px;background:${fl.status==='Active'?'rgba(34,197,94,.15)':'rgba(107,114,128,.15)'};
+            color:${fl.status==='Active'?'#22c55e':'#6b7280'};font-size:10px;font-weight:700">${escHtml(fl.status)}</span>
+        </td>
+        <td style="padding:6px 10px;font-size:12px;text-align:center">${fl.usedLicenses} / ${fl.totalLicenses}</td>
+        <td style="padding:6px 10px;min-width:100px">
+          <div style="height:5px;border-radius:2px;background:var(--vscode-widget-border);overflow:hidden">
+            <div style="height:5px;background:${barColor};width:${pct}%"></div>
+          </div>
+          <div style="font-size:10px;opacity:.5;text-align:right;margin-top:1px">${pct}%</div>
+        </td>
+      </tr>`;
+    }).join('');
+
+    const featLicCard = featLicRows ? `
+    <div class="info-card">
+      <div class="section-header-row">
+        <div class="section-header-icon icon-amber">⭐</div>
+        <span style="font-size:14px;font-weight:700">Feature Licenses</span>
+      </div>
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr style="border-bottom:1px solid var(--vscode-widget-border)">
+          <th style="text-align:left;padding:4px 10px;font-size:10px;opacity:.6;text-transform:uppercase">Feature</th>
+          <th style="text-align:center;padding:4px 10px;font-size:10px;opacity:.6;text-transform:uppercase">Status</th>
+          <th style="text-align:center;padding:4px 10px;font-size:10px;opacity:.6;text-transform:uppercase">Used / Total</th>
+          <th style="padding:4px 10px;font-size:10px;opacity:.6;text-transform:uppercase">Utilization</th>
+        </tr></thead>
+        <tbody>${featLicRows}</tbody>
+      </table>
+    </div>` : '';
+
+    // ─── Detail sub-panels ───────────────────────────────────────────────
+    function sectionHeader(icon, iconBg, title, badge) {
+      return `<div class="section-header-row">
+        <div class="section-header-icon" style="background:${iconBg}">${icon}</div>
+        <span style="font-size:15px;font-weight:700">${escHtml(title)}</span>
+        ${badge != null ? `<span style="margin-left:auto;font-size:12px;opacity:.6">${escHtml(String(badge))}</span>` : ''}
       </div>`;
+    }
+
+    // Installed Packages detail
+    const pkgList = (inv && inv.installedPackages) || [];
+    const pkgTableRows = pkgList.map(p => {
+      const name = (p.SubscriberPackage && p.SubscriberPackage.Name) || (p.SubscriberPackageVersion && p.SubscriberPackageVersion.Name) || '—';
+      const ns = (p.SubscriberPackage && p.SubscriberPackage.NamespacePrefix) || '—';
+      const v = p.SubscriberPackageVersion
+        ? `v${p.SubscriberPackageVersion.MajorVersion}.${p.SubscriberPackageVersion.MinorVersion}.${p.SubscriberPackageVersion.PatchVersion}`
+        : '—';
+      const type = packageType(p);
+      const typeColor = type === 'Managed' ? '#3b82f6' : type === 'Unlocked' ? '#22c55e' : '#f59e0b';
+      return [
+        escHtml(name),
+        `<span style="color:${typeColor};font-weight:600">${type}</span>`,
+        escHtml(v),
+        escHtml(ns),
+      ];
+    });
+    const packagesPanel = `<div class="info-card">
+      ${sectionHeader('📦', 'rgba(139,92,246,.12)', 'Installed Packages', `Total: ${pkgList.length}`)}
+      ${pkgSegs.length > 0 ? `<div style="margin:8px 0 16px">${renderDonutWithLegend(pkgSegs, { size: 110, centerLabel: totalPkgs })}</div>` : ''}
+      ${pkgTableRows.length > 0
+        ? renderPaginatedDataTable('oi-packages', ['Name', 'Type', 'Version', 'Namespace'], pkgTableRows, { emptyMsg: 'No installed packages.' })
+        : '<p style="opacity:.5;font-size:13px;margin:8px 0">No installed packages found in this org.</p>'}
+    </div>`;
+
+    // Applications detail
+    const appList = (od.apps || []);
+    const appTableRows = appList.map(ap => [
+      escHtml(ap.label || '—'),
+      escHtml(ap.type || 'Standard'),
+      ap.isActive ? '<span style="color:#22c55e;font-weight:600">Yes</span>' : '<span style="opacity:.6">No</span>',
+    ]);
+    const applicationsPanel = `<div class="info-card">
+      ${sectionHeader('📱', 'rgba(1,118,211,.12)', 'Applications', `Total: ${appList.length}`)}
+      ${appBarItems.length > 0 ? `<div style="overflow-x:auto;margin:8px 0 16px">${renderColumnChart(appBarItems, { plotHeight: 160 })}</div>` : ''}
+      ${appTableRows.length > 0
+        ? renderPaginatedDataTable('oi-apps', ['Application', 'Type', 'Active'], appTableRows, { emptyMsg: 'No applications.' })
+        : '<p style="opacity:.5;font-size:13px;margin:8px 0">No application data available.</p>'}
+    </div>`;
+
+    // Clouds & Licenses detail
+    const fullLicRows = licenses.map(l => {
+      const pct = l.totalLicenses > 0 ? Math.round(l.usedLicenses / l.totalLicenses * 100) : 0;
+      const barColor = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#22c55e';
+      return [
+        escHtml(l.name),
+        String(l.usedLicenses),
+        String(Math.max(l.totalLicenses - l.usedLicenses, 0)),
+        String(l.totalLicenses),
+        `<div style="display:flex;align-items:center;gap:6px;min-width:90px">
+          <div style="flex:1;height:5px;border-radius:3px;background:var(--vscode-widget-border);overflow:hidden">
+            <div style="height:5px;background:${barColor};width:${pct}%"></div></div>
+          <span style="font-size:10px;opacity:.7;min-width:30px">${pct}%</span></div>`,
+      ];
+    });
+    const cloudsPanel = `<div class="info-card" style="margin-bottom:14px">
+        ${sectionHeader('☁️', 'rgba(1,118,211,.12)', 'Clouds Overview', clouds.length ? `Enabled ${cloudsEnabled} · Disabled ${cloudsDisabled}` : null)}
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:6px">${cloudGrid}</div>
+      </div>
+      <div class="info-card">
+        ${sectionHeader('🪪', 'rgba(245,158,11,.12)', 'License Summary', `Total: ${licenses.length}`)}
+        ${fullLicRows.length > 0
+          ? renderPaginatedDataTable('oi-licenses', ['License Type', 'Assigned', 'Available', 'Total', 'Utilization'], fullLicRows, { emptyMsg: 'No license data.' })
+          : '<p style="opacity:.5;font-size:13px;margin:8px 0">No license data available.</p>'}
+      </div>`;
+
+    // Environments detail
+    const environmentsPanel = `<div class="info-card">
+      ${sectionHeader('🌍', 'rgba(20,184,166,.12)', 'Environments', envSum ? `Total: ${envSum.total}` : null)}
+      ${envSum ? [
+        ['Production', envSum.production],
+        ['Full Sandboxes', envSum.fullSandboxes],
+        ['Partial Sandboxes', envSum.partialSandboxes],
+        ['Developer Sandboxes', envSum.developerSandboxes],
+        ['Scratch Orgs', envSum.scratchOrgs],
+      ].map(e => listRow(e[0], e[1])).join('') +
+        `<div style="display:flex;justify-content:space-between;padding:10px 0;font-weight:700;font-size:14px">
+          <span>Total Environments</span><span style="color:var(--sf-blue,#0176d3)">${envSum.total}</span></div>`
+        : '<p style="opacity:.5;font-size:13px;margin:8px 0">Sandbox data not available for this org (requires production access to SandboxInfo).</p>'}
+    </div>`;
+
+    // Integrations detail
+    const integrationsPanel = `<div class="info-card">
+      ${sectionHeader('🔌', 'rgba(245,158,11,.12)', 'Integrations', intSum ? `Total: ${intSum.total}` : null)}
+      ${intSum ? intItems.map(e => listRow(e.label, e.value)).join('') +
+        `<div style="display:flex;justify-content:space-between;padding:10px 0;font-weight:700;font-size:14px">
+          <span>Total Integrations</span><span style="color:var(--sf-blue,#0176d3)">${intSum.total}</span></div>`
+        : '<p style="opacity:.5;font-size:13px;margin:8px 0">Integration data not available.</p>'}
+    </div>`;
+
+    // Feature Usage detail
+    const featuresPanel = featLicCard || `<div class="info-card">
+      ${sectionHeader('⭐', 'rgba(245,158,11,.12)', 'Feature Usage', null)}
+      <p style="opacity:.5;font-size:13px;margin:8px 0">No feature license data available for this org edition.</p>
+    </div>`;
+
+    // ─── Sub-tab shell ───────────────────────────────────────────────────
+    const SUBTABS = [
+      { id: 'overview',     label: 'Overview' },
+      { id: 'clouds',       label: 'Clouds & Licenses' },
+      { id: 'packages',     label: 'Installed Packages' },
+      { id: 'applications', label: 'Applications' },
+      { id: 'environments', label: 'Environments' },
+      { id: 'integrations', label: 'Integrations' },
+      { id: 'features',     label: 'Feature Usage' },
+    ];
+    const active = orgInfoSubtab || 'overview';
+    const subNav = `<div class="orginfo-subnav">${SUBTABS.map(t =>
+      `<button class="orginfo-subtab-btn${t.id === active ? ' active' : ''}" data-action="orginfo-subtab" data-sub="${t.id}">${escHtml(t.label)}</button>`
+    ).join('')}</div>`;
+
+    const overviewPanel = `
+      ${topStrip}
+      <div class="orginfo-grid" style="display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,1fr);gap:14px;margin-bottom:14px;align-items:stretch">
+        ${orgDetailsCard}
+        ${cloudsCard}
+        ${licenseCard}
+      </div>
+      <div class="orginfo-grid" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:14px;align-items:stretch">
+        ${packagesCard}
+        ${appsCard}
+        ${envsCard}
+        ${intCard}
+      </div>
+      ${quickFactsHtml}
+      <div style="margin-top:14px">${trustBanner}</div>`;
+
+    function subPanel(id, html) {
+      return `<div class="orginfo-subpanel${id === active ? ' active' : ''}" id="oisub-${id}">${html}</div>`;
+    }
+
+    return `
+    <div style="padding:24px 20px;max-width:1400px;margin:0 auto">
+      ${subNav}
+      ${subPanel('overview', overviewPanel)}
+      ${subPanel('clouds', cloudsPanel)}
+      ${subPanel('packages', packagesPanel)}
+      ${subPanel('applications', applicationsPanel)}
+      ${subPanel('environments', environmentsPanel)}
+      ${subPanel('integrations', integrationsPanel)}
+      ${subPanel('features', featuresPanel)}
+    </div>`;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -4624,6 +5018,19 @@
     });
     document.querySelectorAll(".tab-panel").forEach((p) => {
       p.classList.toggle("active", p.id === `panel-${tabId}`);
+    });
+  }
+
+  // Active sub-tab within the Org Info panel (survives full-panel re-renders).
+  let orgInfoSubtab = "overview";
+  function activateOrgInfoSubtab(sub) {
+    if (!sub) { return; }
+    orgInfoSubtab = sub;
+    document.querySelectorAll(".orginfo-subtab-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.sub === sub);
+    });
+    document.querySelectorAll(".orginfo-subpanel").forEach((p) => {
+      p.classList.toggle("active", p.id === `oisub-${sub}`);
     });
   }
 

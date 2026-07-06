@@ -1,15 +1,15 @@
 /**
- * Health Dashboard — Webview panel (Phase 3)
+ * Health Dashboard — Webview panel
  *
  * The TypeScript layer is a thin shell:
  *   - Creates / reveals the WebviewPanel
- *   - Injects CSP-compliant nonces and media-file URIs
+ *   - Serves the Vite React build from webview-ui/dist/
+ *   - Injects CSP nonce and icon URI into the built index.html
  *   - Proxies messages between the extension and the webview
- *   - All UI logic lives in media/dashboard.js + media/dashboard.css
  */
 
 import * as vscode from 'vscode';
-import { AnalysisResult, Issue, DashboardMessage } from '../types';
+import { AnalysisResult, Issue, DashboardMessage, ScanHistoryEntry } from '../types';
 import { reportGenerator } from '../reports/reportGenerator';
 import { getAIService, AIExplanation } from '../services/aiService';
 
@@ -25,6 +25,7 @@ export class HealthDashboardPanel {
   private readonly extensionUri: vscode.Uri;
   private disposables: vscode.Disposable[] = [];
   private currentResult: AnalysisResult | null = null;
+  private orgHistory: Record<string, ScanHistoryEntry[]> | null = null;
   private securityMode: 'safe' | 'standard' | 'advanced' | null = null;
 
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
@@ -62,6 +63,7 @@ export class HealthDashboardPanel {
         localResourceRoots: [
           vscode.Uri.joinPath(extensionUri, 'media'),
           vscode.Uri.joinPath(extensionUri, 'dist'),
+          vscode.Uri.joinPath(extensionUri, 'webview-ui', 'dist'),
         ],
       }
     );
@@ -75,6 +77,12 @@ export class HealthDashboardPanel {
     this.currentResult = result;
     this.postMessage({ type: 'analysisResults', data: result });
     void this.pushAvailableModels();
+  }
+
+  /** Push per-org scan history to the webview. */
+  public updateOrgHistory(orgHistory: Record<string, ScanHistoryEntry[]>): void {
+    this.orgHistory = orgHistory;
+    this.postMessage({ type: 'orgHistory', data: orgHistory });
   }
 
   /** Enumerate the user's available AI models and send them to the webview. */
@@ -117,6 +125,12 @@ export class HealthDashboardPanel {
 
   private async handleMessage(message: DashboardMessage): Promise<void> {
     switch (message.command) {
+      case 'ready':
+        if (this.currentResult) { this.updateResults(this.currentResult); }
+        if (this.orgHistory)    { this.updateOrgHistory(this.orgHistory); }
+        void this.pushAvailableModels();
+        break;
+
       case 'setSecurityMode': {
         const mode = (message.data as { mode: string })?.mode;
         if (mode === 'safe' || mode === 'standard' || mode === 'advanced') {
@@ -261,6 +275,24 @@ export class HealthDashboardPanel {
         break;
       }
 
+      case 'exportCodeQualityCsv': {
+        const { csv: cqCsv, fileName: cqFileName } = message.data as { csv: string; fileName: string };
+        const cqDefaultUri = vscode.Uri.joinPath(
+          vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(require('os').homedir()),
+          cqFileName || 'code-quality-issues.csv'
+        );
+        const cqUri = await vscode.window.showSaveDialog({
+          defaultUri: cqDefaultUri,
+          filters: { 'CSV Files': ['csv'] },
+          title: 'Export Code Quality Issues',
+        });
+        if (cqUri) {
+          await vscode.workspace.fs.writeFile(cqUri, Buffer.from(cqCsv, 'utf8'));
+          vscode.window.showInformationMessage(`Code quality issues exported to ${cqUri.fsPath}`);
+        }
+        break;
+      }
+
       case 'exportCtaHtml': {
         const { html, fileName } = message.data as { html: string; fileName: string };
         const defaultUri = vscode.Uri.joinPath(
@@ -286,6 +318,15 @@ export class HealthDashboardPanel {
         }
         const force = (message as { force?: boolean }).force ?? false;
         await vscode.commands.executeCommand('sfHealthAnalyzer.runCtaReview', message.model ?? 'auto', force);
+        break;
+      }
+
+      case 'runFutureReadiness': {
+        if (this.securityMode === 'safe') {
+          break; // AI narrative disabled in Safe mode — deterministic scores still render
+        }
+        const force = (message as { force?: boolean }).force ?? false;
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runFutureReadiness', message.model ?? 'auto', force);
         break;
       }
 
@@ -441,56 +482,54 @@ export class HealthDashboardPanel {
   private buildHtml(): string {
     const webview = this.panel.webview;
     const nonce   = this.getNonce();
-    const assetVersion = Date.now().toString();
 
-    const cssUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.css')
-    ).with({ query: `v=${assetVersion}` });
+    const distDir   = vscode.Uri.joinPath(this.extensionUri, 'webview-ui', 'dist');
+    const indexPath = vscode.Uri.joinPath(distDir, 'index.html').fsPath;
 
-    // Read CSS content from disk so it can be embedded in the exported PDF HTML
-    // (webview CSP blocks fetch() to vscode-resource URIs from JS)
-    let dashboardCssText = '';
+    let html: string;
     try {
-      const cssBytes = require('fs').readFileSync(
-        vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.css').fsPath, 'utf8'
-      );
-      dashboardCssText = cssBytes;
-    } catch (_) { /* non-fatal: PDF will be unstyled */ }
-    const jsUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.js')
-    ).with({ query: `v=${assetVersion}` });
-    const iconUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.png')
-    ).with({ query: `v=${assetVersion}` });
+      html = require('fs').readFileSync(indexPath, 'utf8') as string;
+    } catch {
+      // webview-ui hasn't been built yet — show a helpful placeholder
+      return [
+        '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">',
+        `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">`,
+        '<style>body{background:#1e1e1e;color:#ccc;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}</style>',
+        '</head><body><div style="text-align:center">',
+        '<p style="font-size:1.2rem">OrgPulse UI not built.</p>',
+        '<p>Run <code style="background:#333;padding:2px 6px;border-radius:3px">npm run build:webview</code> then reload VS Code.</p>',
+        '</div></body></html>',
+      ].join('\n');
+    }
 
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy"
-    content="default-src 'none';
-             style-src ${webview.cspSource} 'unsafe-inline';
-             script-src 'nonce-${nonce}';
-             img-src ${webview.cspSource} data:;">
-  <title>OrgPulse — Salesforce Architecture Health</title>
-  <link rel="stylesheet" href="${cssUri}">
-</head>
-<body>
-  <div id="app"></div>
-  <div class="drill-down-overlay" id="drill-overlay"></div>
-  <aside class="drill-down-panel" id="drill-panel">
-    <div class="ddp-header">
-      <span class="ddp-title" id="ddp-title">Issue Detail</span>
-      <button class="btn btn-icon" data-action="close-drill" title="Close">&#x2715;</button>
-    </div>
-    <div class="ddp-body" id="ddp-body"></div>
-    <div class="ddp-footer" id="ddp-footer"></div>
-  </aside>
-  <script nonce="${nonce}">window.ORGPULSE_ICON_URI = "${iconUri}"; window.DASHBOARD_CSS = ${JSON.stringify(dashboardCssText)};</script>
-  <script nonce="${nonce}" src="${jsUri}"></script>
-</body>
-</html>`;
+    // Rewrite ./assets/ paths (Vite base:'./') so static refs resolve inside the webview
+    const assetsUri = webview.asWebviewUri(vscode.Uri.joinPath(distDir, 'assets')).toString();
+    html = html.replace(/src="\.?\/assets\//g,  `src="${assetsUri}/`);
+    html = html.replace(/href="\.?\/assets\//g, `href="${assetsUri}/`);
+
+    // Add nonce to every <script> tag (Vite emits one <script type="module"> entry)
+    html = html.replace(/<script /g,  `<script nonce="${nonce}" `);
+    html = html.replace(/<script>/g,  `<script nonce="${nonce}">`);
+
+    // Inject CSP meta right after <head>
+    const csp = [
+      `default-src 'none';`,
+      `style-src ${webview.cspSource} 'unsafe-inline';`,
+      // cspSource allows dynamically-imported Vite chunks (import('./OrgInfo.js') etc.)
+      `script-src 'nonce-${nonce}' ${webview.cspSource};`,
+      `img-src ${webview.cspSource} data:;`,
+      `font-src ${webview.cspSource};`,
+    ].join(' ');
+    html = html.replace('<head>', `<head>\n  <meta http-equiv="Content-Security-Policy" content="${csp}">`);
+
+    // Inject icon URI global before </head>
+    const iconUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.png'));
+    html = html.replace(
+      '</head>',
+      `<script nonce="${nonce}">window.ORGPULSE_ICON_URI="${iconUri}";</script>\n</head>`
+    );
+
+    return html;
   }
 
   // ── Private: nonce ─────────────────────────────────────────────────────────

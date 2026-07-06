@@ -42,6 +42,9 @@ export class OrgInventoryAnalyzer {
       const customObjectCount = entityDefs.filter(e =>
         e.QualifiedApiName.endsWith('__c')
       ).length;
+      const standardObjectCount = entityDefs.filter(e =>
+        !e.QualifiedApiName.endsWith('__c')
+      ).length;
 
       const totalComponents =
         apexClassCount + apexTriggerCount + flowCount +
@@ -166,6 +169,7 @@ export class OrgInventoryAnalyzer {
           apexTriggerCount,
           flowCount,
           customObjectCount,
+          standardObjectCount,
           customFieldCount: customFields.length,
           permissionSetCount: permSets.length,
           validationRuleCount: validationRules.length,
@@ -189,6 +193,7 @@ export class OrgInventoryAnalyzer {
           apexTriggerCount,
           flowCount,
           customObjectCount: 0,
+          standardObjectCount: 0,
           customFieldCount: 0,
           permissionSetCount: 0,
           validationRuleCount: 0,

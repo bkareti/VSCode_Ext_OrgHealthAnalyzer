@@ -1,0 +1,13 @@
+export { default as AskArchitect } from './AskArchitect';
+export { default as Automation } from './Automation';
+export { default as CTAReview } from './CTAReview';
+export { default as CodeQuality } from './CodeQuality';
+export { default as DataModel } from './DataModel';
+export { default as Dependencies } from './Dependencies';
+export { default as FutureReadiness } from './FutureReadiness';
+export { default as OrgInfo } from './OrgInfo';
+export { default as Overview } from './Overview';
+export { default as PerfLimits } from './PerfLimits';
+export { default as GovernorLimits } from './GovernorLimits';
+export { default as SecurityAccess } from './SecurityAccess';
+export { default as StaleMetadata } from './StaleMetadata';

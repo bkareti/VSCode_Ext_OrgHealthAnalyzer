@@ -432,7 +432,7 @@ async function analyzeHtmlTemplate(
  * Main LWC Analyzer class.
  */
 export class LwcAnalyzer {
-  async analyze(): Promise<{
+  async analyze(orgCounts?: { lwc: number; aura: number }): Promise<{
     issues: Issue[];
     lwcSummary: LwcSummary;
   }> {
@@ -453,11 +453,23 @@ export class LwcAnalyzer {
       c.issues.some(i => i.toLowerCase().includes('accessibility'))
     ).length;
 
+    const orgComponentCount = orgCounts?.lwc ?? 0;
+    const orgAuraComponentCount = orgCounts?.aura ?? 0;
+
+    // Use org-level count as totalComponents when workspace scan finds nothing
+    const totalComponents = components.length > 0 ? components.length : orgComponentCount;
+
+    if (orgComponentCount > 0) {
+      logInfo(`LwcAnalyzer: ${orgComponentCount} LWC + ${orgAuraComponentCount} Aura components in org`);
+    }
+
     const summary: LwcSummary = {
-      totalComponents: components.length,
+      totalComponents,
       componentsWithTests: componentList.filter(c => c.hasTests).length,
       componentsWithA11yIssues: a11yIssues,
       componentList,
+      orgComponentCount,
+      orgAuraComponentCount,
     };
 
     logInfo(`LwcAnalyzer: ${issues.length} issues across ${components.length} components`);

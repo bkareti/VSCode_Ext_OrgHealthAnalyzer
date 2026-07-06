@@ -25,6 +25,11 @@ import { Issue, AnalysisResult, CTAReview, CtaDomainFinding } from '../types';
 import { logInfo, logError, logWarning } from '../utils/logger';
 import { getErrorMessage } from '../utils/errors';
 import { getSalesforceService } from './salesforceService';
+import { AssessmentContextService, IAssessmentContextService } from './assessmentContext';
+import { AssessmentContext } from '../types/assessmentContext';
+import { PiiSanitizer } from './assessmentContext/piiSanitizer';
+import { FutureReadinessService, IFutureReadinessService } from './futureReadiness';
+import { FutureReadinessReport, FutureReadinessContext } from '../types/futureReadiness';
 
 // ============================================================================
 // Types
@@ -152,6 +157,7 @@ async function callAnthropic(prompt: string, model?: string, system?: string, ma
 // In-memory AI response cache keyed by ruleId + message
 const aiCache = new Map<string, AIExplanation>();
 const ctaCache = new Map<string, CTAReview>();
+const futureReadinessCache = new Map<string, FutureReadinessReport>();
 const AI_DEBOUNCE_MS = 2000;
 let lastAiCallTs = 0;
 
@@ -1055,11 +1061,19 @@ export class AIService {
   private context: vscode.ExtensionContext;
   private consentGranted: boolean;
   private ctaConsentGranted: boolean;
+  private assessmentContextService: IAssessmentContextService;
+  private futureReadinessService: IFutureReadinessService;
 
-  constructor(context: vscode.ExtensionContext) {
-    this.context             = context;
-    this.consentGranted      = context.globalState.get<boolean>(CONSENT_KEY, false);
-    this.ctaConsentGranted   = context.globalState.get<boolean>(CTA_CONSENT_KEY, false);
+  constructor(
+    context: vscode.ExtensionContext,
+    assessmentContextService?: IAssessmentContextService,
+    futureReadinessService?: IFutureReadinessService,
+  ) {
+    this.context                    = context;
+    this.consentGranted             = context.globalState.get<boolean>(CONSENT_KEY, false);
+    this.ctaConsentGranted          = context.globalState.get<boolean>(CTA_CONSENT_KEY, false);
+    this.assessmentContextService   = assessmentContextService ?? AssessmentContextService.createDefault();
+    this.futureReadinessService     = futureReadinessService ?? FutureReadinessService.createDefault();
     void this.loadAnthropicKey();
   }
 
@@ -1250,6 +1264,136 @@ export class AIService {
   }
 
   // ---------------------------------------------------------------------------
+  // Assessment Context → AI Prompt formatting
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Converts a pre-computed AssessmentContext into the full CTA prompt string.
+   * Retains the CTA persona, output schema, and validation rules; replaces the
+   * old inline snapshot section with the structured, privacy-safe JSON context.
+   */
+  private formatContextAsPrompt(context: AssessmentContext): string {
+    // Load custom prompt template from workspace if present (same logic as buildCtaPrompt).
+    let customPromptTemplate: string | null = null;
+    try {
+      const folders = vscode.workspace.workspaceFolders;
+      if (folders?.length) {
+        const promptPath = path.join(folders[0].uri.fsPath, 'cta-prompt.md');
+        if (fs.existsSync(promptPath)) {
+          const raw = fs.readFileSync(promptPath, 'utf8');
+          const match = raw.match(/---\s*PROMPT START\s*---\s*([\s\S]*?)\s*---\s*PROMPT END\s*---/i) ??
+                        raw.match(/---\s*START\s*---\s*([\s\S]*?)\s*---\s*END\s*---/i);
+          if (match) { customPromptTemplate = match[1].trim(); }
+          else if (raw.trim().length > 100) { customPromptTemplate = raw.trim(); }
+        }
+      }
+    } catch { /* ignore */ }
+
+    const contextJson = JSON.stringify(context, null, 2);
+
+    if (customPromptTemplate) {
+      return customPromptTemplate.replace('{{SNAPSHOT}}', contextJson);
+    }
+
+    // Built-in CTA prompt — persona + output schema from buildCtaPrompt(), with JSON context injected.
+    return `You are a Salesforce Certified Technical Architect (CTA) — a review-board-certified enterprise architect with 15+ years leading large-scale Salesforce transformations. You are authoring the formal Architecture Health Assessment that will be presented to the client's CIO, VP of Engineering, and Salesforce delivery leadership. Write with the authority, rigor, and business framing of a top-tier consulting deliverable (the standard a partner at a leading Salesforce practice would sign off on).
+
+WRITING STANDARD — this is what separates a real CTA report from a generic scan:
+- EVIDENCE-LED: every assertion cites concrete evidence from the snapshot — name the exact class, trigger, object, flow, profile, or metric. Never write a generic sentence that could apply to any org.
+- QUANTIFIED: translate technical findings into business consequences — governor-limit headroom, blast radius (number of dependents), user/seat impact, deployment/release risk, and a credible $ cost or risk range with a probability and timeframe where the evidence supports one.
+- DECISIVE: lead with what matters most. Commit to a Go / Conditional Go / No-Go verdict and defend it with the strongest two or three findings.
+- ACTIONABLE: recommendations name the specific artifact to change and the outcome it protects. "Improve test coverage" is unacceptable; "Add tests for AccountTriggerHandler (currently 0%) to protect the order-sync path before the next release" is the bar.
+- BOARD-READY: professional, direct, no hype, no filler. Make each string field as long as the insight genuinely requires — executiveSummary 4–6 sentences; each domain analysis 2–4 sentences — but never pad. Precision over verbosity.
+- HONEST: where the org is healthy, say so plainly and credit it; do not manufacture risk. Where data is thin, state the assumption rather than inventing specifics.
+
+ARCHITECTURE MATURITY LEVELS: 1=Ad Hoc, 2=Repeatable, 3=Defined, 4=Managed, 5=Optimised. Anchor the level to specific evidence (e.g. multi-trigger objects + no handler pattern → Repeatable, not Defined).
+BENCHMARK REFERENCE (use to position the org, not as filler): Code coverage avg 78%/top 92%; Triggers-per-object avg 1.2/top 1.0; Flow:Apex ratio avg 2.5:1/top 4:1; Custom fields/object avg 38/top <25; Profile count avg 22/top <12.
+
+CRITICAL DATA RULES — MUST FOLLOW:
+1. orgProfile.userScale MUST be the exact number from businessContext.orgComplexityEvidence.activeUsers (e.g. "42 users"). Do NOT guess or approximate.
+2. healthScoreBreakdown MUST use the EXACT numeric scores from the scores[] array in the context (dimension values). Do NOT invent or smooth scores.
+3. businessImpactSummary.revenueRisk MUST describe revenue impact from: system downtime (LDV/lock risk), data integrity failures (missing validation, schema issues), integration failures (callout-in-trigger, idempotency gaps), and security exposure — NOT just test coverage.
+4. Custom Objects and Total Custom Fields must reflect the EXACT counts from architectureSummary.
+5. ALL domain findings must be grounded in specific evidence from the findings[] array (class names, object names, issue counts).
+6. Scores in healthScoreBreakdown must equal the scores[] array dimension values exactly — never recalculate.
+
+Return ONLY valid JSON (no markdown fences) with ALL 15 keys:
+{
+  "verdict": "Go"|"Conditional Go"|"No-Go",
+  "executiveSummary": "<4-6 sentences for the C-suite. Open with the overall verdict and the single most consequential finding (name the artifact). State the org's maturity in one phrase, the top 2-3 risks with their business impact, and close with the headline recommendation. No jargon a CIO wouldn't use.>",
+  "architectureMaturity": { "level": <1-5>, "label": "<Ad Hoc|Repeatable|Defined|Managed|Optimised>", "summary": "<1-2 sentences with 2 specific evidence points from the context.>" },
+  "businessImpactSummary": {
+    "revenueRisk": "<1 sentence: describe risk of revenue loss from system failures, data loss, integration outages, or downtime — cite specific evidence>",
+    "operationalRisk": "<1 sentence: describe operational disruption risk — automation failures, governor limits, LDV locks, etc.>",
+    "complianceRisk": "<1 sentence: describe data exposure, sharing model gaps, without-sharing Apex, or audit trail risks>",
+    "overallSeverity": "Low"|"Medium"|"High"|"Critical"
+  },
+  "orgProfile": {
+    "complexity": "Simple"|"Moderate"|"Complex"|"Enterprise",
+    "userScale": "<exact number from businessContext.orgComplexityEvidence.activeUsers> users",
+    "integrationFootprint": "<brief description based on securitySummary.publicApiEntryPoints and integration findings>",
+    "customizationLevel": "<brief: reference architectureSummary.totalCustomObjects and totalCustomFields>"
+  },
+  "healthScoreBreakdown": [
+    { "area": "Code Quality",      "score": <EXACT value from scores[codeQuality].score>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence with specific evidence>" },
+    { "area": "Automation Design", "score": <EXACT value from scores[automationDesign].score>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence with specific evidence>" },
+    { "area": "Data Model",        "score": <EXACT value from scores[dataModel].score>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence with specific evidence>" },
+    { "area": "Security",          "score": <EXACT value from scores[security].score>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence with specific evidence>" },
+    { "area": "Test Coverage",     "score": <EXACT value from scores[testing].score>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence with specific evidence>" },
+    { "area": "Performance",       "score": <EXACT value from scores[performance].score>, "maxScore": 100, "trend": "improving"|"stable"|"declining", "keyFinding": "<1 sentence with specific evidence>" }
+  ],
+  "topCriticalIssues": [
+    { "rank": 1, "title": "<specific title naming the class/object>", "severity": "Critical"|"High", "domain": "<domain>", "impact": "<1 sentence>", "remediation": "<1 sentence>", "effortEstimate": "<e.g. 1-2 days>" }
+  ],
+  "riskAnalysis": {
+    "probabilityOfIncident": "<1 sentence with % estimate and timeframe based on evidence>",
+    "timeToRisk": "<e.g. 3-6 months>",
+    "riskHeatmap": [
+      { "domain": "System Architecture", "likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" },
+      { "domain": "Security",            "likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" },
+      { "domain": "Data Architecture",   "likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" },
+      { "domain": "Integration",         "likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" },
+      { "domain": "Solution Architecture","likelihood": "Low"|"Medium"|"High", "impact": "Low"|"Medium"|"High" }
+    ]
+  },
+  "benchmarkComparison": [
+    { "metric": "<metric>", "orgValue": "<exact value from context>", "industryAvg": "<avg>", "topQuartile": "<top>", "status": "Below"|"At"|"Above" }
+  ],
+  "domainFindings": [
+    { "domain": "System Architecture", "status": "Pass"|"Warning"|"Fail", "analysis": "<2 sentences with specific class/object names>", "risks": ["<specific risk>"], "recommendations": ["<concrete action>"] },
+    { "domain": "Security",            "status": "Pass"|"Warning"|"Fail", "analysis": "<2 sentences>", "risks": ["<specific>"], "recommendations": ["<concrete>"] },
+    { "domain": "Data Architecture",   "status": "Pass"|"Warning"|"Fail", "analysis": "<2 sentences>", "risks": ["<specific>"], "recommendations": ["<concrete>"] },
+    { "domain": "Integration",         "status": "Pass"|"Warning"|"Fail", "analysis": "<2 sentences>", "risks": ["<specific>"], "recommendations": ["<concrete>"] },
+    { "domain": "Solution Architecture","status": "Pass"|"Warning"|"Fail", "analysis": "<2 sentences>", "risks": ["<specific>"], "recommendations": ["<concrete>"] }
+  ],
+  "aiInsights": { "hiddenRisks": ["<max 3 non-obvious risks>"], "predictions": ["<max 3 data-driven predictions>"], "unusualPatterns": ["<max 3 unusual patterns>"] },
+  "architectureObservations": [
+    { "observation": "<1 sentence citing specific evidence>", "classification": "Strength"|"Weakness"|"Opportunity"|"Threat" }
+  ],
+  "recommendations": {
+    "quickWins": [ { "action": "<specific action>", "effort": "Low"|"Medium"|"High", "impact": "<specific impact>" } ],
+    "strategic": [ { "action": "<specific action>", "timeline": "<e.g. Q3 2026>", "effort": "Low"|"Medium"|"High", "impact": "<specific impact>" } ]
+  },
+  "costOfInaction": { "financialImpact": "<1 sentence with estimated cost/risk>", "technicalDebtGrowth": "<1 sentence>", "risks": ["<max 3 specific risks>"] },
+  "finalRecommendation": { "summary": "<2-3 sentences>", "nextSteps": ["<max 5 immediate, actionable steps>"], "proposedTimeline": "<90-day plan with milestones>" }
+}
+
+VALIDATION RULES:
+- Exactly 5 domainFindings (one per domain above).
+- healthScoreBreakdown MUST have exactly 6 rows matching the 6 scores in the context.
+- All scores in healthScoreBreakdown must equal the context scores[] dimension values exactly.
+- LDV objects in performanceSummary.ldvObjects → Data Architecture status = Warning or Fail.
+- multiTriggerObjectCount > 0 → name them explicitly in System Architecture analysis.
+- apexWithoutSharingCount > 0 with publicApiEntryPoints > 0 → flag in Security as Critical.
+- orgProfile.userScale must be the exact active user count from businessContext.orgComplexityEvidence.activeUsers.
+- benchmarkComparison orgValue fields must use exact values from the context.
+
+=== ORG HEALTH ASSESSMENT CONTEXT ===
+${contextJson}
+`;
+  }
+
+  // ---------------------------------------------------------------------------
   // CTA Architecture Synthesis
   // ---------------------------------------------------------------------------
 
@@ -1278,7 +1422,8 @@ export class AIService {
 
     try {
       const ctaSystem = 'You are a Salesforce CTA. Respond with ONLY valid JSON — no markdown fences, no preamble, no commentary, nothing before the opening { or after the closing }.';
-      const { text, provider } = await callModel(buildCtaPrompt(result), modelPreference, ctaSystem);
+      const assessmentContext = this.assessmentContextService.build(result);
+      const { text, provider } = await callModel(this.formatContextAsPrompt(assessmentContext), modelPreference, ctaSystem);
       const cleaned = extractJsonObject(text);
 
       let parsed: Partial<CTAReview>;
@@ -1367,6 +1512,137 @@ export class AIService {
       // webview (otherwise the loading spinner hangs forever). See #11.
       throw new Error(msg);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Future Readiness — AI narrative over the deterministic assessment
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Enriches the deterministic Future Readiness result with an AI-authored
+   * narrative. Scores, grades, gaps, and the roadmap are computed entirely by
+   * OrgPulse and passed through verbatim — the model only writes prose. Degrades
+   * to the score-only report if parsing fails.
+   */
+  public async synthesizeFutureReadiness(
+    result: AnalysisResult,
+    modelPreference?: string,
+    force = false,
+  ): Promise<FutureReadinessReport | null> {
+    const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
+    if (!cfg.get<boolean>('enabled', true)) {
+      throw new Error('AI features are disabled. Enable them in Settings → sfHealthAnalyzer.ai.enabled.');
+    }
+
+    // Reuse the deterministic assessment computed during analysis when present;
+    // otherwise compute it now (collector-derived checks degrade to 'na').
+    const base: FutureReadinessReport =
+      result.futureReadiness ?? this.futureReadinessService.assess({ result, collectors: {} });
+
+    const cacheKey = `${base.generatedAt}::${modelPreference || 'auto'}`;
+    const cached = force ? undefined : futureReadinessCache.get(cacheKey);
+    if (cached) {
+      logInfo('AI: returning cached Future Readiness narrative');
+      return cached;
+    }
+
+    const consented = await this.ensureCtaConsent(modelPreference);
+    if (!consented) {
+      throw new Error('Future Readiness narrative cancelled — you declined to send the assessment context to the AI model.');
+    }
+
+    const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+
+    try {
+      const system = 'You are a Salesforce CTA. Respond with ONLY valid JSON — no markdown fences, no preamble, nothing before the opening { or after the closing }.';
+      const context = this.futureReadinessService.buildContext(base, result);
+      // Defence-in-depth: strip any residual PII before the context leaves the machine.
+      const safeContext = new PiiSanitizer().sanitize(context);
+      const { text, provider } = await callModel(this.formatFutureReadinessPrompt(safeContext), modelPreference, system);
+      const cleaned = extractJsonObject(text);
+
+      let parsed: {
+        executiveSummary?: string;
+        overallMaturity?: string;
+        packs?: Array<{ packId?: string; currentMaturity?: string; businessImpact?: string; summary?: string }>;
+      };
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (parseErr) {
+        logWarning(`Future Readiness narrative JSON parse failed: ${String(parseErr)}`);
+        const fallback: FutureReadinessReport = { ...base, modelUsed: provider };
+        futureReadinessCache.set(cacheKey, fallback);
+        return fallback;
+      }
+
+      const narrativeByPack = new Map((parsed.packs ?? []).map((p) => [p.packId, p]));
+      const packs = base.packs.map((p) => {
+        const n = narrativeByPack.get(p.packId);
+        if (!n) { return p; }
+        // Scores/grades come from `base` — the model never overwrites them.
+        return {
+          ...p,
+          narrative: { currentMaturity: str(n.currentMaturity), businessImpact: str(n.businessImpact), summary: str(n.summary) },
+        };
+      });
+
+      const report: FutureReadinessReport = {
+        ...base,
+        packs,
+        narrative: { executiveSummary: str(parsed.executiveSummary), overallMaturity: str(parsed.overallMaturity) },
+        modelUsed: provider,
+      };
+
+      futureReadinessCache.set(cacheKey, report);
+      logInfo(`Future Readiness narrative complete — overall ${report.overall.score}/${report.overall.grade}, model: ${provider}`);
+      return report;
+    } catch (err) {
+      logError('Future Readiness narrative generation failed', err as Error);
+      throw new Error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Builds the narrative prompt. Supports a `future-readiness-prompt.md` workspace override. */
+  private formatFutureReadinessPrompt(context: FutureReadinessContext): string {
+    let customTemplate: string | null = null;
+    try {
+      const folders = vscode.workspace.workspaceFolders;
+      if (folders?.length) {
+        const promptPath = path.join(folders[0].uri.fsPath, 'future-readiness-prompt.md');
+        if (fs.existsSync(promptPath)) {
+          const raw = fs.readFileSync(promptPath, 'utf8');
+          if (raw.trim().length > 100) { customTemplate = raw.trim(); }
+        }
+      }
+    } catch { /* ignore */ }
+
+    const contextJson = JSON.stringify(context, null, 2);
+    if (customTemplate) {
+      return customTemplate.replace('{{CONTEXT}}', contextJson);
+    }
+
+    return `You are a Salesforce Certified Technical Architect authoring a Future Readiness Assessment for the client's architecture and executive leadership. The assessment evaluates whether the org is ready to adopt AI / Agentforce, Data Cloud, and Hyperforce.
+
+CRITICAL RULES:
+- The scores, grades, blocking issues, and roadmap in the context are AUTHORITATIVE and computed by OrgPulse. NEVER recalculate, restate different numbers, or contradict them.
+- Your job is INTERPRETATION only: explain what the scores mean, why they matter to the business, and how to sequence the work.
+- Ground every statement in the evidence provided (counts, sObject names, metrics). No generic filler that could apply to any org.
+- Be decisive and board-ready: concise, professional, no hype.
+
+Return ONLY valid JSON (no markdown fences) with exactly these keys:
+{
+  "executiveSummary": "<4-6 sentences: the org's overall future-readiness posture, the single most consequential blocker, and the headline recommendation. Reference the overall score/grade verbatim.>",
+  "overallMaturity": "<1-2 sentences positioning the org's overall maturity across the three capabilities, citing specific evidence.>",
+  "packs": [
+    { "packId": "ai-agentforce", "currentMaturity": "<1-2 sentences on current AI/Agentforce readiness, citing the pack score and weakest dimension.>", "businessImpact": "<1-2 sentences on the business consequence of the gaps.>", "summary": "<1 sentence headline recommendation for this pack.>" },
+    { "packId": "data-cloud", "currentMaturity": "<…>", "businessImpact": "<…>", "summary": "<…>" },
+    { "packId": "hyperforce", "currentMaturity": "<…>", "businessImpact": "<…>", "summary": "<…>" }
+  ]
+}
+
+=== FUTURE READINESS CONTEXT ===
+${contextJson}
+`;
   }
 
   // ---------------------------------------------------------------------------
@@ -1482,6 +1758,7 @@ export class AIService {
     await this.context.globalState.update(CTA_CONSENT_KEY, false);
     aiCache.clear();
     ctaCache.clear();
+    futureReadinessCache.clear();
     vscode.window.showInformationMessage('AI consent revoked. All cached AI results cleared.');
   }
 }
@@ -1492,8 +1769,12 @@ export class AIService {
 
 let _aiService: AIService | null = null;
 
-export function initAIService(context: vscode.ExtensionContext): AIService {
-  _aiService = new AIService(context);
+export function initAIService(
+  context: vscode.ExtensionContext,
+  assessmentContextService?: IAssessmentContextService,
+  futureReadinessService?: IFutureReadinessService,
+): AIService {
+  _aiService = new AIService(context, assessmentContextService, futureReadinessService);
   return _aiService;
 }
 

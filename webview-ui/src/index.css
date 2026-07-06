@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+/* ─── Tailwind v4 theme — maps to VS Code CSS variables ─────────────────── */
+@theme {
+  /* Backgrounds */
+  --color-sf-bg:       var(--sf-bg-primary, #1e1e1e);
+  --color-sf-bg-2:     var(--sf-bg-secondary, #252526);
+  --color-sf-bg-3:     var(--sf-bg-tertiary, #2d2d30);
+
+  /* Text */
+  --color-sf-text:     var(--sf-text-primary, #cccccc);
+  --color-sf-text-2:   var(--sf-text-secondary, #9d9d9d);
+  --color-sf-muted:    var(--sf-text-muted, #6b6b6b);
+
+  /* Accent */
+  --color-sf-accent:   var(--vscode-focusBorder, #007fd4);
+  --color-sf-border:   rgba(255, 255, 255, 0.08);
+
+  /* Score colours */
+  --color-score-excellent: #22c55e;
+  --color-score-good:      #84cc16;
+  --color-score-fair:      #eab308;
+  --color-score-poor:      #f97316;
+  --color-score-critical:  #ef4444;
+
+  /* Severity */
+  --color-sev-error:   #ef4444;
+  --color-sev-warning: #f59e0b;
+  --color-sev-info:    #3b82f6;
+
+  /* Chart palette (7 colours) */
+  --color-chart-1: #3b82f6;
+  --color-chart-2: #8b5cf6;
+  --color-chart-3: #22c55e;
+  --color-chart-4: #f59e0b;
+  --color-chart-5: #ec4899;
+  --color-chart-6: #14b8a6;
+  --color-chart-7: #f97316;
+
+  /* Glassmorphism */
+  --shadow-glass: 0 8px 32px rgba(0, 0, 0, 0.4);
+
+  /* Animation durations */
+  --duration-fast:  0.12s;
+  --duration-base:  0.25s;
+  --duration-slow:  0.5s;
+  --duration-xslow: 0.8s;
+}
+
+/* ─── Animations ─────────────────────────────────────────────────────────── */
+@keyframes fadeIn        { from { opacity: 0 } to { opacity: 1 } }
+@keyframes slideInUp     { from { opacity: 0; transform: translateY(12px) } to { opacity: 1; transform: translateY(0) } }
+@keyframes slideInRight  { from { opacity: 0; transform: translateX(20px) } to { opacity: 1; transform: translateX(0) } }
+@keyframes slideFromRight{ from { transform: translateX(100%) } to { transform: translateX(0) } }
+@keyframes shimmer       { 0% { background-position: -200% 0 } 100% { background-position: 200% 0 } }
+@keyframes orbit         { from { transform: rotate(0deg) translateX(60px) rotate(0deg) } to { transform: rotate(360deg) translateX(60px) rotate(-360deg) } }
+@keyframes barGrow       { from { transform: scaleX(0) } to { transform: scaleX(1) } }
+@keyframes pulseRing     { 0%, 100% { opacity: 0.6 } 50% { opacity: 1 } }
+
+/* ─── Loading screen animations ─────────────────────────────────────────── */
+/* shield-breathe and ecg-draw are injected inline in ShieldLogo (prefixed op-) */
+@keyframes glowPulse     { 0%,100% { opacity: 0.6; transform: scale(1)   }
+                           50%     { opacity: 1;   transform: scale(1.5)  } }
+@keyframes msgFadeIn     { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: translateY(0) } }
+@keyframes insightUp     { from { opacity: 0; transform: translateY(10px) } to { opacity: 1; transform: translateY(0) } }
+
+/* ─── CTA loading animations ─────────────────────────────────────────────── */
+@keyframes spinCW        { from { transform: rotate(0deg) }    to { transform: rotate(360deg) } }
+@keyframes spinCCW       { from { transform: rotate(0deg) }    to { transform: rotate(-360deg) } }
+@keyframes orbitA        { from { transform: rotate(0deg)    translateX(68px) rotate(0deg) }
+                           to   { transform: rotate(360deg)  translateX(68px) rotate(-360deg) } }
+@keyframes orbitB        { from { transform: rotate(0deg)    translateX(90px) rotate(0deg) }
+                           to   { transform: rotate(-360deg) translateX(90px) rotate(360deg) } }
+@keyframes stepAppear    { from { opacity: 0; transform: translateX(-8px) } to { opacity: 1; transform: translateX(0) } }
+@keyframes dotPulse      { 0%,100% { opacity: 0.5; transform: scale(1)   }
+                           50%     { opacity: 1;   transform: scale(1.35) } }
+@keyframes scanLine      { 0%   { top: -4px;  opacity: 0.8 }
+                           80%  { opacity: 0.4 }
+                           100% { top: 100%;  opacity: 0 } }
+
+/* ─── Global resets ──────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: var(--vscode-font-family, system-ui, -apple-system, sans-serif);
+  font-size: 13px;
+  color: var(--color-sf-text);
+  background-color: var(--color-sf-bg);
+}
+
+/* ─── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
+
+/* ─── Focus visible ──────────────────────────────────────────────────────── */
+:focus-visible { outline: 1px solid var(--color-sf-accent); outline-offset: 2px; }

@@ -27,7 +27,7 @@ Press **F5** to launch the Extension Development Host (runs the `watch` task fir
 
 ## Architecture
 
-The extension cleanly separates the **extension host** (Node-side services + analyzers, in `src/`) from the **webview UI** (`src/ui/dashboard.ts` host side + `media/dashboard.js` browser side), communicating only via `postMessage`.
+The extension cleanly separates the **extension host** (Node-side services + analyzers, in `src/`) from the **webview UI** (`webview-ui/` React app), communicating only via `postMessage`.
 
 ### Entry point — `src/extension.ts`
 `activate()` wires everything: initializes the logger, registers built-in rules (`registerBuiltInRules()`), initializes the AI service (`initAIService`) and cache, loads plugins, registers the tree view, and registers all 14 `sfHealthAnalyzer.*` commands. The flagship command `sfHealthAnalyzer.analyzeOrg` runs the full multi-step analysis pipeline that fans out across every analyzer and aggregates results.
@@ -50,8 +50,23 @@ Analyzers delegate reusable checks to a central rule engine.
 ### Reports & scoring — `src/reports/`
 `healthScore.ts` computes per-category scores (0–100) and the overall grade from issue counts/severity into an `AnalysisResult`. `reportGenerator.ts` produces HTML / JSON / SARIF / text exports.
 
-### UI — `src/ui/` + `media/`
-`dashboard.ts` builds the webview (CSP nonce + media URIs) and exchanges messages with `media/dashboard.js`. Extension → webview messages use `{ type: ... }` (e.g. `analysisResults`, `analysisProgress`, `aiExplanation`, `ctaReview`). Webview → extension uses `{ command: ... }` (e.g. `runAnalysis`, `explainIssue`, `exportReport`, `runCtaReview`). `media/dashboard.js` is dependency-free vanilla JS that renders the tabbed dashboard and handles client-side CSV/PDF export (PDF via browser Print). `treeProvider.ts` backs the results tree view.
+### UI — `webview-ui/` (React) + `src/ui/`
+
+> **IMPORTANT: All frontend/UI changes must be made in `webview-ui/src/`.  
+> `media/dashboard.js` and `media/dashboard.css` are dead code — they are NOT served by the active webview and edits there have no effect.**
+
+The active webview is a **React + Vite + Tailwind** app in `webview-ui/`:
+- `webview-ui/src/components/tabs/` — one file per dashboard tab (OrgInfo, Overview, DataModel, etc.)
+- `webview-ui/src/components/common/` — shared UI: `GlassCard`, `StatCard`, `EmptyState`, etc.
+- `webview-ui/src/components/charts/` — `DonutChart` (Recharts PieChart), `ColumnChart` (Recharts BarChart)
+- `webview-ui/src/store/` — Zustand slices (`orgStore`, `uiStore`, `dashboardStore`)
+- `webview-ui/src/types/index.ts` — re-exports all types from `src/types/index.ts`
+
+`src/ui/dashboard.ts` is the **host-side shell**: it calls `buildHtml()` which reads `webview-ui/dist/index.html` (the Vite build output), rewrites asset paths to webview URIs, and injects the CSP. It then proxies messages between the extension host and the React app. Extension → webview messages use `{ type: ... }` (e.g. `analysisResults`, `analysisProgress`, `aiExplanation`). Webview → extension uses `{ command: ... }` (e.g. `runAnalysis`, `explainIssue`, `exportReport`).
+
+**Build:** `npm run compile` runs `build:webview` (Vite bundles `webview-ui/` → `webview-ui/dist/`) before the extension esbuild step. Always run `npm run compile` after changing any file under `webview-ui/src/`.
+
+`treeProvider.ts` backs the sidebar results tree view (extension host only, not the webview).
 
 ### Persistence — `src/utils/`
 Results persist to VS Code `globalState` (survives reload) and to a workspace `.orgpulse/cache.json` file (auto-gitignored). A file watcher invalidates the cache on `.cls`/`.trigger` changes. `config.ts` reads settings from `sfHealthAnalyzer.*` and an optional `.sfhealthrc.json`. `errors.ts` and `logger.ts` provide typed errors and an output-channel logger.
