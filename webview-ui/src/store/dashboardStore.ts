@@ -67,12 +67,16 @@ interface LegacyDashboardState {
   availableModels: AIModel[];
   claudeAuthorized: boolean;
   claudeAuthError: string | null;
+  claudeModelCount: number;
+  copilotAvailable: boolean;
+  copilotModelCount: number;
   aiExplanation: AIExplanationData | null;
   aiExplanationLoading: boolean;
   architectAnswer: string | null;
   architectAnswerLoading: boolean;
   setModels: (models: AIModel[]) => void;
   setClaudeAuth: (authorized: boolean, count?: number, error?: string | null) => void;
+  setCopilotStatus: (available: boolean, count: number) => void;
   setAIExplanation: (data: AIExplanationData | null, loading?: boolean) => void;
   setArchitectAnswer: (answer: string | null, loading?: boolean) => void;
   // cta
@@ -135,12 +139,16 @@ export function useDashboardStore<T>(selector: (state: LegacyDashboardState) => 
     availableModels:        ai.availableModels,
     claudeAuthorized:       ai.claudeAuthorized,
     claudeAuthError:        ai.claudeAuthError,
+    claudeModelCount:       ai.claudeModelCount,
+    copilotAvailable:       ai.copilotAvailable,
+    copilotModelCount:      ai.copilotModelCount,
     aiExplanation:          ai.aiExplanation,
     aiExplanationLoading:   ai.aiExplanationLoading,
     architectAnswer:        ai.architectAnswer,
     architectAnswerLoading: ai.architectAnswerLoading,
     setModels:          ai.setModels,
     setClaudeAuth:      ai.setClaudeAuth,
+    setCopilotStatus:   ai.setCopilotStatus,
     setAIExplanation:   ai.setAIExplanation,
     setArchitectAnswer: ai.setArchitectAnswer,
     // cta

@@ -40,6 +40,7 @@ import {
   PackageTypeSummary,
   AppTypeSummary,
 } from '../types';
+import { DataCloudIdentityCounts } from '../types/futureReadiness';
 import {
   SalesforceAuthError,
   SalesforceConnectionError,
@@ -458,86 +459,47 @@ export class SalesforceService {
    */
   async getFlows(): Promise<FlowDefinition[]> {
     // Strategy: Try multiple approaches from most modern to legacy.
-    // 1) Flow (Tooling) with Status = 'Active' — available in recent API versions
-    // 2) FlowDefinition (Tooling) — deprecated but works on older orgs
-    // In both cases, resolve trigger object via FlowVersion if needed.
+    // 1) FlowDefinitionView (Data API) — multi-row queryable, no metadata-field limits
+    // 2) FlowDefinition (Tooling) — deprecated but works on older orgs;
+    //    resolve trigger object / process type via FlowVersion.
 
-    // ── Attempt 1: Modern Flow Tooling object ─────────────────────────────
-    // NOTE: IsTemplate / TriggerType fields may not exist in older API versions.
-    // Try progressively simpler queries: 1a → 1b → 1c before falling back.
-    // Flow Tooling object uses FullName (not DeveloperName) for the developer/API name
-    type FlowRow = { Id: string; FullName: string; Description?: string; ProcessType?: string; TriggerType?: string };
-    let flows: FlowRow[] | null = null;
-
+    // ── Attempt 1: FlowDefinitionView (Data API) ──────────────────────────
+    // FlowDefinitionView is a standard, multi-row-queryable object that exposes
+    // the flow's API name, process type, trigger type, description, and trigger
+    // object directly — no metadata/FullName fields (which are restricted to a
+    // single row) and no FlowVersion join required.
     try {
-      flows = await this.toolingQuery<FlowRow>(
-        `SELECT Id, FullName, Description, ProcessType, TriggerType
-         FROM Flow
-         WHERE Status = 'Active'`
+      type FlowViewRow = {
+        DurableId: string; ApiName: string; Label?: string;
+        ProcessType?: string; TriggerType?: string; IsActive?: boolean;
+        Description?: string; TriggerObjectOrEventLabel?: string; LastModifiedDate?: string;
+      };
+      const views = await this.query<FlowViewRow>(
+        `SELECT DurableId, ApiName, Label, ProcessType, TriggerType, IsActive,
+                Description, TriggerObjectOrEventLabel, LastModifiedDate
+         FROM FlowDefinitionView
+         WHERE IsActive = true`
       );
-      logInfo(`Fetched ${flows.length} active flows via Flow (Tooling API) [1a]`);
-    } catch {
-      try {
-        flows = await this.toolingQuery<FlowRow>(
-          `SELECT Id, FullName, Description, ProcessType
-           FROM Flow
-           WHERE Status = 'Active'`
-        );
-        logInfo(`Fetched ${flows.length} active flows via Flow (Tooling API) [1b]`);
-      } catch {
-        try {
-          flows = await this.toolingQuery<FlowRow>(
-            `SELECT Id, FullName FROM Flow WHERE Status = 'Active'`
-          );
-          logInfo(`Fetched ${flows.length} active flows via Flow (Tooling API) [1c]`);
-        } catch (err1c) {
-          logWarning(`Flow (Tooling) query failed, trying FlowDefinition fallback: ${getErrorMessage(err1c)}`);
-        }
-      }
-    }
-
-    if (flows !== null) {
-      if (flows.length === 0) { return []; }
-      try {
-        const flowIdChunks = this.chunkArray(flows.map(f => `'${f.Id}'`), 200);
-        const versionMap = new Map<string, string>();
-        for (const chunk of flowIdChunks) {
-          const versions = await this.toolingQuery<{ Id: string; TriggerObjectOrEventReference?: string }>(
-            `SELECT Id, TriggerObjectOrEventReference
-             FROM FlowVersion
-             WHERE Id IN (${chunk.join(',')}) LIMIT ${TOOLING_QUERY_LIMIT}`
-          );
-          for (const v of versions) {
-            if (v.TriggerObjectOrEventReference) {
-              versionMap.set(v.Id, v.TriggerObjectOrEventReference);
-            }
-          }
-        }
-        return flows.map(f => ({
-          Id: f.Id,
-          DeveloperName: f.FullName,
-          ActiveVersionId: f.Id,
-          Description: f.Description,
-          ProcessType: f.ProcessType,
-          TriggerType: f.TriggerType,
-          ObjectApiName: versionMap.get(f.Id) || undefined,
-        }));
-      } catch {
-        return flows.map(f => ({
-          Id: f.Id,
-          DeveloperName: f.FullName,
-          ActiveVersionId: f.Id,
-          Description: f.Description,
-          ProcessType: f.ProcessType,
-          TriggerType: f.TriggerType,
-        }));
-      }
+      logInfo(`Fetched ${views.length} active flows via FlowDefinitionView`);
+      return views.map(v => ({
+        Id: v.DurableId,
+        DeveloperName: v.ApiName,
+        ActiveVersionId: v.DurableId,
+        Description: v.Description,
+        ProcessType: v.ProcessType,
+        TriggerType: v.TriggerType,
+        ObjectApiName: v.TriggerObjectOrEventLabel || undefined,
+      }));
+    } catch (viewErr) {
+      logWarning(`FlowDefinitionView query failed, trying FlowDefinition fallback: ${getErrorMessage(viewErr)}`);
     }
 
     // ── Attempt 2: Legacy FlowDefinition (deprecated but wider compat) ────
+    // NOTE: FlowDefinition has no ProcessType column (that lives on Flow), so we
+    // only select fields it actually exposes and resolve the rest via FlowVersion.
     try {
       const flowDefs = await this.toolingQuery<FlowDefinition>(
-        `SELECT Id, DeveloperName, ActiveVersionId, Description, ProcessType
+        `SELECT Id, DeveloperName, ActiveVersionId, Description
          FROM FlowDefinition
          WHERE ActiveVersionId != null`
       );
@@ -554,27 +516,31 @@ export class SalesforceService {
       if (versionIds.length > 0) {
         try {
           const versionChunks = this.chunkArray(versionIds, 200);
-          const versionMap = new Map<string, string>();
+          const versionMap = new Map<string, { object?: string; processType?: string }>();
 
           for (const chunk of versionChunks) {
             const versions = await this.toolingQuery<{
               Id: string;
               TriggerObjectOrEventReference?: string;
+              ProcessType?: string;
             }>(
-              `SELECT Id, TriggerObjectOrEventReference
+              `SELECT Id, TriggerObjectOrEventReference, ProcessType
                FROM FlowVersion
                WHERE Id IN (${chunk.join(',')}) LIMIT ${TOOLING_QUERY_LIMIT}`
             );
             for (const v of versions) {
-              if (v.TriggerObjectOrEventReference) {
-                versionMap.set(v.Id, v.TriggerObjectOrEventReference);
-              }
+              versionMap.set(v.Id, {
+                object: v.TriggerObjectOrEventReference,
+                processType: v.ProcessType,
+              });
             }
           }
 
           for (const flow of flowDefs) {
-            if (flow.ActiveVersionId && versionMap.has(flow.ActiveVersionId)) {
-              flow.ObjectApiName = versionMap.get(flow.ActiveVersionId);
+            const v = flow.ActiveVersionId ? versionMap.get(flow.ActiveVersionId) : undefined;
+            if (v) {
+              flow.ObjectApiName = v.object ?? flow.ObjectApiName;
+              flow.ProcessType = v.processType ?? flow.ProcessType;
             }
           }
         } catch (err) {
@@ -966,9 +932,10 @@ export class SalesforceService {
    */
   async getProfileUserCounts(): Promise<Array<{ ProfileId: string; userCount: number }>> {
     try {
-      // Use COUNT(Id) with an alias; some orgs need explicit LIMIT on aggregate queries
+      // Leave the COUNT unaliased — Salesforce returns it as the reserved `expr0`
+      // key; explicitly aliasing to `expr0` is rejected ("alias is reserved").
       const rows = await this.query<{ ProfileId: string; expr0: number }>(
-        `SELECT ProfileId, COUNT(Id) expr0
+        `SELECT ProfileId, COUNT(Id)
          FROM User
          WHERE IsActive = true AND UserType = 'Standard'
          GROUP BY ProfileId
@@ -1122,7 +1089,7 @@ export class SalesforceService {
     const byGroup = new Map<string, number>();
     try {
       const setRows = await this.query<{ PermissionSetId: string; expr0: number }>(
-        `SELECT PermissionSetId, COUNT(AssigneeId) expr0
+        `SELECT PermissionSetId, COUNT(AssigneeId)
          FROM PermissionSetAssignment
          WHERE Assignee.IsActive = true
          GROUP BY PermissionSetId
@@ -1136,7 +1103,7 @@ export class SalesforceService {
     }
     try {
       const groupRows = await this.query<{ PermissionSetGroupId: string; expr0: number }>(
-        `SELECT PermissionSetGroupId, COUNT(AssigneeId) expr0
+        `SELECT PermissionSetGroupId, COUNT(AssigneeId)
          FROM PermissionSetAssignment
          WHERE Assignee.IsActive = true AND PermissionSetGroupId != null
          GROUP BY PermissionSetGroupId
@@ -1383,33 +1350,40 @@ export class SalesforceService {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - 180);
     const cutoff = cutoffDate.toISOString().split('T')[0];
+    // Dashboard has no `Name` field — the display name is `Title` and the API
+    // name is `DeveloperName`. Map Title → the returned `Name` for consumers.
+    type DashRow = { Id: string; Title: string; DeveloperName: string; LastModifiedDate: string; CreatedDate: string };
+    const toResult = (r: DashRow) => ({
+      Id: r.Id, Name: r.Title, DeveloperName: r.DeveloperName,
+      LastModifiedDate: r.LastModifiedDate, CreatedDate: r.CreatedDate,
+    });
     try {
-      const rows = await this.query<{ Id: string; Name: string; LastModifiedDate: string; CreatedDate: string }>(
-        `SELECT Id, Name, LastModifiedDate, CreatedDate
+      const rows = await this.query<DashRow>(
+        `SELECT Id, Title, DeveloperName, LastModifiedDate, CreatedDate
          FROM Dashboard
          WHERE LastModifiedDate < ${cutoff}T00:00:00Z
          ORDER BY LastModifiedDate ASC LIMIT 500`
       );
-      return rows.map(r => ({ ...r, DeveloperName: r.Name }));
+      return rows.map(toResult);
     } catch {
       // Fallback: try without ORDER BY (not supported on Dashboard in some editions)
       try {
-        const rows = await this.query<{ Id: string; Name: string; LastModifiedDate: string; CreatedDate: string }>(
-          `SELECT Id, Name, LastModifiedDate, CreatedDate
+        const rows = await this.query<DashRow>(
+          `SELECT Id, Title, DeveloperName, LastModifiedDate, CreatedDate
            FROM Dashboard
            WHERE LastModifiedDate < ${cutoff}T00:00:00Z LIMIT 500`
         );
-        return rows.map(r => ({ ...r, DeveloperName: r.Name }));
+        return rows.map(toResult);
       } catch {
         // Fallback 3: no WHERE clause — fetch all dashboards, filter in JS
         try {
-          const rows = await this.query<{ Id: string; Name: string; LastModifiedDate: string; CreatedDate: string }>(
-            `SELECT Id, Name, LastModifiedDate, CreatedDate FROM Dashboard LIMIT 500`
+          const rows = await this.query<DashRow>(
+            `SELECT Id, Title, DeveloperName, LastModifiedDate, CreatedDate FROM Dashboard LIMIT 500`
           );
           const cutoffIso = `${cutoff}T00:00:00Z`;
           return rows
             .filter(r => r.LastModifiedDate < cutoffIso)
-            .map(r => ({ ...r, DeveloperName: r.Name }));
+            .map(toResult);
         } catch (err3) {
           logWarning(`Could not fetch stale dashboards: ${getErrorMessage(err3)}`);
           return [];
@@ -1741,10 +1715,46 @@ export class SalesforceService {
     }
   }
 
+  /** Return Data Cloud identity-graph object counts (Individual / ContactPoint* / Contact) in one composite call. */
+  async getDataCloudIdentityCounts(): Promise<DataCloudIdentityCounts> {
+    const queries = [
+      'SELECT COUNT() FROM Individual',
+      'SELECT COUNT() FROM ContactPointEmail',
+      'SELECT COUNT() FROM ContactPointPhone',
+      'SELECT COUNT() FROM ContactPointAddress',
+      'SELECT COUNT() FROM Contact',
+      'SELECT COUNT() FROM Contact WHERE Email != null',
+    ];
+    try {
+      const [ind, cpe, cpp, cpa, cTotal, cEmail] = await this.compositeQuery(queries);
+      return {
+        individualCount:          ind?.totalSize ?? 0,
+        contactPointEmailCount:   cpe?.totalSize ?? 0,
+        contactPointPhoneCount:   cpp?.totalSize ?? 0,
+        contactPointAddressCount: cpa?.totalSize ?? 0,
+        contactTotalCount:        cTotal?.totalSize ?? 0,
+        contactWithEmailCount:    cEmail?.totalSize ?? 0,
+      };
+    } catch (err) {
+      logWarning(`Composite Data Cloud identity-count query failed, falling back: ${getErrorMessage(err)}`);
+      const results = await Promise.allSettled(queries.map((q) => this.queryCount(q)));
+      const val = (r: PromiseSettledResult<number>) => (r.status === 'fulfilled' ? r.value : 0);
+      const [ind, cpe, cpp, cpa, cTotal, cEmail] = results;
+      return {
+        individualCount:          val(ind),
+        contactPointEmailCount:   val(cpe),
+        contactPointPhoneCount:   val(cpp),
+        contactPointAddressCount: val(cpa),
+        contactTotalCount:        val(cTotal),
+        contactWithEmailCount:    val(cEmail),
+      };
+    }
+  }
+
   /** Expanded Organization sObject query — superset of getOrgEdition(). */
   async getOrgExtendedDetails(): Promise<OrgExtendedDetails & { name: string; instanceName: string; orgType: string }> {
     try {
-      const rows = await this.query<{
+      type OrgRow = {
         Name: string; InstanceName: string; OrganizationType: string;
         CreatedDate?: string; IsSandbox?: boolean;
         TimeZoneSidKey?: string; LanguageLocaleKey?: string;
@@ -1753,9 +1763,14 @@ export class SalesforceService {
         Street?: string; City?: string; State?: string; PostalCode?: string; Country?: string;
         FiscalYearStartMonth?: number; NamespacePrefix?: string;
         MonthlyPageViewsUsed?: number; MonthlyPageViewsEntitlement?: number;
-      }>(
+      };
+      // DefaultCurrencyIsoCode only exists on Organization when multi-currency is
+      // enabled. Query the always-present fields first so a single-currency org
+      // doesn't lose the entire extended-details payload; then try to enrich with
+      // the currency separately.
+      const rows = await this.query<OrgRow>(
         `SELECT Name, InstanceName, OrganizationType, CreatedDate, IsSandbox,
-                TimeZoneSidKey, LanguageLocaleKey, DefaultCurrencyIsoCode, DefaultLocaleSidKey,
+                TimeZoneSidKey, LanguageLocaleKey, DefaultLocaleSidKey,
                 Division, PrimaryContact, Phone, Fax,
                 Street, City, State, PostalCode, Country,
                 FiscalYearStartMonth, NamespacePrefix,
@@ -1763,6 +1778,18 @@ export class SalesforceService {
          FROM Organization LIMIT 1`
       );
       const org = rows[0];
+      if (org && org.DefaultCurrencyIsoCode === undefined) {
+        try {
+          const currencyRows = await this.query<{ DefaultCurrencyIsoCode?: string }>(
+            `SELECT DefaultCurrencyIsoCode FROM Organization LIMIT 1`
+          );
+          if (currencyRows[0]?.DefaultCurrencyIsoCode) {
+            org.DefaultCurrencyIsoCode = currencyRows[0].DefaultCurrencyIsoCode;
+          }
+        } catch {
+          // Single-currency org: field not available, leave currency undefined.
+        }
+      }
       const instanceName = org?.InstanceName || '';
       const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
         'July', 'August', 'September', 'October', 'November', 'December'];

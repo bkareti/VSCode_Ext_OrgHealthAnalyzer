@@ -90,6 +90,7 @@ export class HealthDashboardPanel {
     const ai = getAIService();
     if (!ai) {
       this.postMessage({ type: 'availableModels', data: [{ id: 'auto', label: 'Auto (best available)', backend: 'vscode-lm' }] });
+      this.postMessage({ type: 'copilotStatus', available: false, count: 0 });
       return;
     }
     try {
@@ -99,6 +100,14 @@ export class HealthDashboardPanel {
       this.postMessage({ type: 'availableModels', data: [{ id: 'auto', label: 'Auto (best available)', backend: 'vscode-lm' }] });
     }
     this.postMessage({ type: 'claudeAuthStatus', authorized: ai.isClaudeAuthorized() });
+
+    // Explicitly check GitHub Copilot extension availability via the LM API.
+    try {
+      const copilotModels = vscode.lm ? await vscode.lm.selectChatModels({ vendor: 'copilot' }) : [];
+      this.postMessage({ type: 'copilotStatus', available: copilotModels.length > 0, count: copilotModels.length });
+    } catch {
+      this.postMessage({ type: 'copilotStatus', available: false, count: 0 });
+    }
   }
 
   /** Show the spinner / progress screen. */

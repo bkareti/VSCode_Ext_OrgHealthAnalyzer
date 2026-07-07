@@ -14,23 +14,24 @@ import TabSkeleton from '@/components/loading/TabSkeleton';
 import ErrorBoundary from '@/components/common/ErrorBoundary';
 
 // ── Lazy-loaded tab screens (each becomes its own JS chunk) ──────────────────
-const Overview        = lazy(() => import('@/components/tabs/Overview'));
-const OrgInfo         = lazy(() => import('@/components/tabs/OrgInfo'));
-const DataModel       = lazy(() => import('@/components/tabs/DataModel'));
-const Automation      = lazy(() => import('@/components/tabs/Automation'));
-const TechnicalDebt   = lazy(() => import('@/components/tabs/TechnicalDebt'));
-const CodeQuality     = lazy(() => import('@/components/tabs/CodeQuality'));
-const PerfLimits      = lazy(() => import('@/components/tabs/PerfLimits'));
-const GovernorLimits  = lazy(() => import('@/components/tabs/GovernorLimits'));
-const SecurityAccess  = lazy(() => import('@/components/tabs/SecurityAccess'));
+const Overview = lazy(() => import('@/components/tabs/Overview'));
+const OrgInfo = lazy(() => import('@/components/tabs/OrgInfo'));
+const DataModel = lazy(() => import('@/components/tabs/DataModel'));
+const Automation = lazy(() => import('@/components/tabs/Automation'));
+const TechnicalDebt = lazy(() => import('@/components/tabs/TechnicalDebt'));
+const CodeQuality = lazy(() => import('@/components/tabs/CodeQuality'));
+const PerfLimits = lazy(() => import('@/components/tabs/PerfLimits'));
+const GovernorLimits = lazy(() => import('@/components/tabs/GovernorLimits'));
+const SecurityAccess = lazy(() => import('@/components/tabs/SecurityAccess'));
 const FutureReadiness = lazy(() => import('@/components/tabs/FutureReadiness'));
-const CTAReview       = lazy(() => import('@/components/tabs/CTAReview'));
-const AskArchitect    = lazy(() => import('@/components/tabs/AskArchitect'));
-const TrendsHistory   = lazy(() => import('@/components/tabs/TrendsHistory'));
+const CTAReview = lazy(() => import('@/components/tabs/CTAReview'));
+const AskArchitect = lazy(() => import('@/components/tabs/AskArchitect'));
+const TrendsHistory = lazy(() => import('@/components/tabs/TrendsHistory'));
+const Settings = lazy(() => import('@/components/tabs/Settings'));
 
 function PlaceholderTab({ label }: { label: string }) {
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-3 text-sf-muted p-8">
+    <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-sf-muted">
       <span className="text-4xl">🚧</span>
       <p className="text-sm">{label} — coming soon</p>
     </div>
@@ -40,13 +41,13 @@ function PlaceholderTab({ label }: { label: string }) {
 export default function App() {
   useExtensionMessages();
 
-  const isLoading          = useOrgStore((s) => s.isLoading);
-  const progressData       = useOrgStore((s) => s.progressData);
+  const isLoading = useOrgStore((s) => s.isLoading);
+  const progressData = useOrgStore((s) => s.progressData);
   const showAnalysisDialog = useUIStore((s) => s.showAnalysisDialog);
 
   return (
     <HashRouter>
-      <div className="flex flex-col h-screen overflow-hidden bg-sf-bg text-sf-text">
+      <div className="flex h-screen flex-col overflow-hidden bg-sf-bg text-sf-text">
         {/* Security mode dialog — shown only when user triggers analysis */}
         {showAnalysisDialog && <SecurityModeDialog />}
 
@@ -63,21 +64,21 @@ export default function App() {
               <Suspense fallback={<TabSkeleton />}>
                 <Routes>
                   <Route index element={<Navigate to="/overview" replace />} />
-                  <Route path="/overview"        element={<Overview />} />
-                  <Route path="/orginfo"         element={<OrgInfo />} />
-                  <Route path="/datamodel"       element={<DataModel />} />
-                  <Route path="/automation"      element={<Automation />} />
-                  <Route path="/techdebt"        element={<TechnicalDebt />} />
-                  <Route path="/code"            element={<CodeQuality />} />
-                  <Route path="/perflimits"      element={<PerfLimits />} />
-                  <Route path="/govlimits"       element={<GovernorLimits />} />
-                  <Route path="/secaccess"       element={<SecurityAccess />} />
+                  <Route path="/overview" element={<Overview />} />
+                  <Route path="/orginfo" element={<OrgInfo />} />
+                  <Route path="/datamodel" element={<DataModel />} />
+                  <Route path="/automation" element={<Automation />} />
+                  <Route path="/techdebt" element={<TechnicalDebt />} />
+                  <Route path="/code" element={<CodeQuality />} />
+                  <Route path="/perflimits" element={<PerfLimits />} />
+                  <Route path="/govlimits" element={<GovernorLimits />} />
+                  <Route path="/secaccess" element={<SecurityAccess />} />
                   <Route path="/futurereadiness" element={<FutureReadiness />} />
-                  <Route path="/cta"             element={<CTAReview />} />
-                  <Route path="/askarchitect"    element={<AskArchitect />} />
-                  <Route path="/trendshistory"   element={<TrendsHistory />} />
-                  <Route path="/reports"         element={<PlaceholderTab label="Reports" />} />
-                  <Route path="/settings"        element={<PlaceholderTab label="Settings" />} />
+                  <Route path="/cta" element={<CTAReview />} />
+                  <Route path="/askarchitect" element={<AskArchitect />} />
+                  <Route path="/trendshistory" element={<TrendsHistory />} />
+                  <Route path="/reports" element={<PlaceholderTab label="Reports" />} />
+                  <Route path="/settings" element={<Settings />} />
                   {/* Catch-all — unknown hash falls back to overview */}
                   <Route path="*" element={<Navigate to="/overview" replace />} />
                 </Routes>

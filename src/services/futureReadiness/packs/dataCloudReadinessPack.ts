@@ -80,6 +80,61 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
       );
     },
   },
+  {
+    id: 'individual-object',
+    dimension: 'Identity Resolution Readiness',
+    weight: 10,
+    evaluate(input) {
+      const counts = input.collectors.dataCloudIdentityCounts;
+      if (!counts) { return na('Individual object counts were not collected.'); }
+      const { individualCount } = counts;
+      const score = individualCount > 0 ? 90 : 40;
+      return outcome(
+        score,
+        [`${individualCount} Individual records`],
+        individualCount === 0
+          ? 'Populate the Individual object (or enable Data Cloud identity resolution) so unified profiles have a consent/identity anchor.'
+          : undefined,
+      );
+    },
+  },
+  {
+    id: 'contact-point-coverage',
+    dimension: 'Identity Resolution Readiness',
+    weight: 10,
+    evaluate(input) {
+      const counts = input.collectors.dataCloudIdentityCounts;
+      if (!counts) { return na('ContactPoint object counts were not collected.'); }
+      const populated = [
+        counts.contactPointEmailCount > 0,
+        counts.contactPointPhoneCount > 0,
+        counts.contactPointAddressCount > 0,
+      ].filter(Boolean).length;
+      const score = populated === 3 ? 90 : populated >= 1 ? 60 : 30;
+      return outcome(
+        score,
+        [`${populated} of 3 ContactPoint types populated (Email: ${counts.contactPointEmailCount}, Phone: ${counts.contactPointPhoneCount}, Address: ${counts.contactPointAddressCount})`],
+        populated < 3 ? 'Populate ContactPointEmail/Phone/Address to give Data Cloud identity resolution multiple match keys.' : undefined,
+      );
+    },
+  },
+  {
+    id: 'contact-email-completeness',
+    dimension: 'Identity Resolution Readiness',
+    weight: 10,
+    evaluate(input) {
+      const counts = input.collectors.dataCloudIdentityCounts;
+      if (!counts || counts.contactTotalCount === 0) { return na('Contact email completeness could not be evaluated.'); }
+      const score = coverageScore(counts.contactWithEmailCount, counts.contactTotalCount, 30);
+      return outcome(
+        score,
+        [`${counts.contactWithEmailCount} of ${counts.contactTotalCount} Contacts have an Email value`],
+        counts.contactWithEmailCount < counts.contactTotalCount
+          ? 'Improve Contact email completeness — email is a primary Data Cloud identity match key.'
+          : undefined,
+      );
+    },
+  },
 
   // ── Data Volume & Scale (15) ─────────────────────────────────────────────
   {
@@ -128,8 +183,89 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
       const score = ext > 0 ? 90 : 65;
       return outcome(
         score,
-        [`${ext} external objects`],
-        ext === 0 ? 'Consider External Objects / data streams to unify external sources within Data Cloud.' : undefined,
+        [`${ext} Salesforce Connect external objects (Salesforce Connect, not Data Cloud Data Streams)`],
+        ext === 0
+          ? 'Consider Salesforce Connect External Objects to federate external sources; see the "Data Streams" check for native Data Cloud ingestion.'
+          : undefined,
+      );
+    },
+  },
+
+  // ── Data Cloud Provisioning (30) ─────────────────────────────────────────
+  {
+    id: 'data-cloud-license',
+    dimension: 'Data Cloud Provisioning',
+    weight: 12,
+    evaluate(input) {
+      const flags = input.collectors.platformFeatures;
+      if (!flags) { return na('Platform feature licenses were not collected.'); }
+      const score = flags.dataCloudEnabled ? 95 : 20;
+      return outcome(
+        score,
+        [flags.dataCloudEnabled ? 'Data Cloud feature license is active' : 'No active Data Cloud feature license detected'],
+        flags.dataCloudEnabled ? undefined : 'Provision the Data Cloud license before any ingestion, identity resolution, or activation work can begin.',
+      );
+    },
+  },
+  {
+    id: 'data-streams',
+    dimension: 'Data Cloud Provisioning',
+    weight: 10,
+    evaluate(input) {
+      const count = input.collectors.dataStreamCount;
+      if (count === undefined) { return na('Data Stream metadata was not collected.'); }
+      const score = count > 0 ? 90 : 30;
+      return outcome(
+        score,
+        [`${count} Data Stream${count === 1 ? '' : 's'} configured`],
+        count === 0 ? 'Configure at least one Data Stream to begin ingesting Salesforce or external data into Data Cloud.' : undefined,
+      );
+    },
+  },
+  {
+    id: 'crm-connector',
+    dimension: 'Data Cloud Provisioning',
+    weight: 8,
+    evaluate(input) {
+      const count = input.collectors.dataConnectorCount;
+      if (count === undefined) { return na('Data Connector metadata was not collected.'); }
+      const score = count > 0 ? 85 : 40;
+      return outcome(
+        score,
+        [`${count} data connector${count === 1 ? '' : 's'} registered`],
+        count === 0 ? 'Connect a CRM or external data source connector so Data Cloud has an ingestion pipeline.' : undefined,
+      );
+    },
+  },
+
+  // ── Activation & Insights (20) ────────────────────────────────────────────
+  {
+    id: 'calculated-insights',
+    dimension: 'Activation & Insights',
+    weight: 10,
+    evaluate(input) {
+      const count = input.collectors.calculatedInsightCount;
+      if (count === undefined) { return na('Calculated Insight metadata was not collected.'); }
+      const score = count > 0 ? 85 : 45;
+      return outcome(
+        score,
+        [`${count} Calculated Insight${count === 1 ? '' : 's'} defined`],
+        count === 0 ? 'Define Calculated Insights to derive activation-ready metrics from unified profiles.' : undefined,
+      );
+    },
+  },
+  {
+    id: 'data-segments',
+    dimension: 'Activation & Insights',
+    weight: 10,
+    evaluate(input) {
+      const count = input.collectors.dataSegmentCount;
+      if (count === undefined) { return na('Segment metadata was not collected.'); }
+      const score = count > 0 ? 85 : 45;
+      return outcome(
+        score,
+        [`${count} Segment${count === 1 ? '' : 's'} defined`],
+        count === 0 ? 'Define at least one Segment to enable activation of unified audiences to downstream channels.' : undefined,
       );
     },
   },
@@ -151,6 +287,21 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
         score,
         [`${over} overprivileged profiles, ${supers} super admins (Modify All Data)`],
         total > 0 ? 'Tighten broad data access before unifying sensitive data in Data Cloud.' : undefined,
+      );
+    },
+  },
+  {
+    id: 'data-spaces',
+    dimension: 'Data Governance',
+    weight: 10,
+    evaluate(input) {
+      const count = input.collectors.dataSpaceCount;
+      if (count === undefined) { return na('Data Space metadata was not collected.'); }
+      const score = count > 0 ? 80 : 55;
+      return outcome(
+        score,
+        [`${count} Data Space${count === 1 ? '' : 's'} configured`],
+        count === 0 ? 'Configure Data Spaces to partition and govern access to unified data by business unit or region.' : undefined,
       );
     },
   },

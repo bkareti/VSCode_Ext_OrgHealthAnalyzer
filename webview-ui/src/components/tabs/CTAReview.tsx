@@ -1,5 +1,7 @@
 import { useState, useMemo } from 'react';
+import { NavLink } from 'react-router-dom';
 import { useDashboardStore } from '@/store/dashboardStore';
+import { useAIStore } from '@/store/slices/aiStore';
 import { useVSCode } from '@/hooks/useVSCode';
 import GlassCard from '@/components/common/GlassCard';
 import InfoCard from '@/components/common/InfoCard';
@@ -12,78 +14,198 @@ import type { CTAReview as CTAReviewType } from '@/types';
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const SUBTABS = ['Risk Summary', 'Findings', 'Recommendations', 'Verdict'] as const;
-type SubTab = typeof SUBTABS[number];
+type SubTab = (typeof SUBTABS)[number];
 
 const VERDICT_COLOR: Record<string, string> = {
-  'Go':             'text-score-good border-score-good bg-score-good/10',
+  Go: 'text-score-good border-score-good bg-score-good/10',
   'Conditional Go': 'text-score-fair border-score-fair bg-score-fair/10',
-  'No-Go':          'text-sev-error border-sev-error bg-sev-error/10',
+  'No-Go': 'text-sev-error border-sev-error bg-sev-error/10',
 };
 
 const HIGHLIGHTS = [
-  { icon: '🧠', bg: 'bg-purple-500/20', title: 'AI-Powered Insights',       desc: 'Advanced AI model analyzes your org data to deliver expert-level assessments.' },
-  { icon: '🛡️', bg: 'bg-green-500/20',  title: 'Secure & Private',           desc: 'Your data stays in your environment. No code, metadata, or PII is stored.' },
-  { icon: '🎯', bg: 'bg-blue-500/20',   title: 'Actionable Recommendations', desc: 'Get prioritized recommendations, quick wins, and a strategic roadmap.' },
+  {
+    icon: '🧠',
+    bg: 'bg-purple-500/20',
+    title: 'AI-Powered Insights',
+    desc: 'Advanced AI model analyzes your org data to deliver expert-level assessments.',
+  },
+  {
+    icon: '🛡️',
+    bg: 'bg-green-500/20',
+    title: 'Secure & Private',
+    desc: 'Your data stays in your environment. No code, metadata, or PII is stored.',
+  },
+  {
+    icon: '🎯',
+    bg: 'bg-blue-500/20',
+    title: 'Actionable Recommendations',
+    desc: 'Get prioritized recommendations, quick wins, and a strategic roadmap.',
+  },
 ];
 
 const FORMAT_OPTIONS = [
-  { id: 'interactive' as const, icon: '🖥', label: 'Interactive Report + PDF', desc: 'Web report with interactive dashboards and PDF export.' },
-  { id: 'pdf'         as const, icon: '📄', label: 'PDF Report',               desc: 'Comprehensive PDF report for presentations.' },
-  { id: 'html'        as const, icon: '</>',label: 'HTML Report',              desc: 'HTML report for sharing and embedding.' },
+  {
+    id: 'interactive' as const,
+    icon: '🖥',
+    label: 'Interactive Report + PDF',
+    desc: 'Web report with interactive dashboards and PDF export.',
+  },
+  {
+    id: 'pdf' as const,
+    icon: '📄',
+    label: 'PDF Report',
+    desc: 'Comprehensive PDF report for presentations.',
+  },
+  {
+    id: 'html' as const,
+    icon: '</>',
+    label: 'HTML Report',
+    desc: 'HTML report for sharing and embedding.',
+  },
 ];
 
 const FEATURE_COLORS = [
-  'bg-blue-500/15', 'bg-purple-500/15', 'bg-green-500/15',
-  'bg-orange-500/15', 'bg-pink-500/15', 'bg-teal-500/15',
+  'bg-blue-500/15',
+  'bg-purple-500/15',
+  'bg-green-500/15',
+  'bg-orange-500/15',
+  'bg-pink-500/15',
+  'bg-teal-500/15',
 ];
 
 const FEATURES = [
-  { icon: '📄', title: 'Executive Summary',          desc: 'High-level overview with key insights, risks, and priorities.' },
-  { icon: '🏛️', title: 'Architecture Review',        desc: 'In-depth review of architecture patterns, design, and maturity.' },
-  { icon: '🛡️', title: 'Security Assessment',        desc: 'Security posture, access controls, compliance, and vulnerability review.' },
-  { icon: '💻', title: 'Code Quality Review',        desc: 'Code quality, best practices, complexity, and technical debt analysis.' },
-  { icon: '🗄️', title: 'Data Model Review',          desc: 'Data model analysis, LDV risks, relationships, and modeling best practices.' },
-  { icon: '🚀', title: 'Performance Review',         desc: 'Performance bottlenecks, governor limits, scalability, and optimization areas.' },
-  { icon: '⚙️', title: 'Automation Review',          desc: 'Flows, processes, triggers, scheduled jobs, and automation effectiveness.' },
-  { icon: '🔗', title: 'Integration Review',         desc: 'Integration patterns, APIs, callouts, and middleware assessment.' },
-  { icon: '⭐', title: 'License & Feature Review',   desc: 'License utilization, feature adoption, and optimization opportunities.' },
-  { icon: '⚠️', title: 'Technical Debt Analysis',    desc: 'Technical debt, code smells, complexity hotspots, and refactoring opportunities.' },
-  { icon: '🚨', title: 'Risks & Issues',             desc: 'Risk assessment, critical issues, and impact analysis.' },
-  { icon: '⚡', title: 'Quick Wins',                 desc: 'High-impact, low-effort recommendations for immediate improvement.' },
-  { icon: '☁️', title: 'AI & Platform Readiness',    desc: 'Readiness for AI, Agentforce, Data Cloud, and platform modernization.' },
-  { icon: '🗺️', title: 'Roadmap & Recommendations', desc: 'Prioritized roadmap with timeline, initiatives, and strategic recommendations.' },
-  { icon: '📈', title: 'Historical Trend Analysis',  desc: 'Trend analysis, score comparison, and improvement trajectory.' },
-  { icon: '🔍', title: 'Visual Diagrams & Maps',     desc: 'Architecture diagrams, data maps, dependency graphs, and heatmaps.' },
-  { icon: '💬', title: 'Executive Talking Points',   desc: 'Key talking points, strengths, risks, and recommendations for stakeholders.' },
-  { icon: '📋', title: 'Technical Appendix',         desc: 'Detailed findings, rule evidence, and supporting documentation.' },
+  {
+    icon: '📄',
+    title: 'Executive Summary',
+    desc: 'High-level overview with key insights, risks, and priorities.',
+  },
+  {
+    icon: '🏛️',
+    title: 'Architecture Review',
+    desc: 'In-depth review of architecture patterns, design, and maturity.',
+  },
+  {
+    icon: '🛡️',
+    title: 'Security Assessment',
+    desc: 'Security posture, access controls, compliance, and vulnerability review.',
+  },
+  {
+    icon: '💻',
+    title: 'Code Quality Review',
+    desc: 'Code quality, best practices, complexity, and technical debt analysis.',
+  },
+  {
+    icon: '🗄️',
+    title: 'Data Model Review',
+    desc: 'Data model analysis, LDV risks, relationships, and modeling best practices.',
+  },
+  {
+    icon: '🚀',
+    title: 'Performance Review',
+    desc: 'Performance bottlenecks, governor limits, scalability, and optimization areas.',
+  },
+  {
+    icon: '⚙️',
+    title: 'Automation Review',
+    desc: 'Flows, processes, triggers, scheduled jobs, and automation effectiveness.',
+  },
+  {
+    icon: '🔗',
+    title: 'Integration Review',
+    desc: 'Integration patterns, APIs, callouts, and middleware assessment.',
+  },
+  {
+    icon: '⭐',
+    title: 'License & Feature Review',
+    desc: 'License utilization, feature adoption, and optimization opportunities.',
+  },
+  {
+    icon: '⚠️',
+    title: 'Technical Debt Analysis',
+    desc: 'Technical debt, code smells, complexity hotspots, and refactoring opportunities.',
+  },
+  {
+    icon: '🚨',
+    title: 'Risks & Issues',
+    desc: 'Risk assessment, critical issues, and impact analysis.',
+  },
+  {
+    icon: '⚡',
+    title: 'Quick Wins',
+    desc: 'High-impact, low-effort recommendations for immediate improvement.',
+  },
+  {
+    icon: '☁️',
+    title: 'AI & Platform Readiness',
+    desc: 'Readiness for AI, Agentforce, Data Cloud, and platform modernization.',
+  },
+  {
+    icon: '🗺️',
+    title: 'Roadmap & Recommendations',
+    desc: 'Prioritized roadmap with timeline, initiatives, and strategic recommendations.',
+  },
+  {
+    icon: '📈',
+    title: 'Historical Trend Analysis',
+    desc: 'Trend analysis, score comparison, and improvement trajectory.',
+  },
+  {
+    icon: '🔍',
+    title: 'Visual Diagrams & Maps',
+    desc: 'Architecture diagrams, data maps, dependency graphs, and heatmaps.',
+  },
+  {
+    icon: '💬',
+    title: 'Executive Talking Points',
+    desc: 'Key talking points, strengths, risks, and recommendations for stakeholders.',
+  },
+  {
+    icon: '📋',
+    title: 'Technical Appendix',
+    desc: 'Detailed findings, rule evidence, and supporting documentation.',
+  },
 ];
 
 const REVIEW_INFO_ROWS = [
-  { icon: '📅', bg: 'bg-blue-500/20',   label: 'Source Scan' },
-  { icon: '📡', bg: 'bg-green-500/20',  label: 'Scan Coverage' },
+  { icon: '📅', bg: 'bg-blue-500/20', label: 'Source Scan' },
+  { icon: '📡', bg: 'bg-green-500/20', label: 'Scan Coverage' },
   { icon: '🏢', bg: 'bg-orange-500/20', label: 'Org Complexity' },
   { icon: '📄', bg: 'bg-purple-500/20', label: 'Estimated Report Length' },
-  { icon: '🤖', bg: 'bg-pink-500/20',   label: 'Generated By' },
+  { icon: '🤖', bg: 'bg-pink-500/20', label: 'Generated By' },
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function fmtDateTime(d: Date | string | undefined): string {
   if (!d) return '—';
-  try { return new Date(d).toLocaleString(); } catch { return '—'; }
+  try {
+    return new Date(d).toLocaleString();
+  } catch {
+    return '—';
+  }
 }
 
 function fmtDate(d: Date | string | undefined): string {
   if (!d) return '';
   try {
-    return new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-  } catch { return ''; }
+    return new Date(d).toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  } catch {
+    return '';
+  }
 }
 
 // ── Report HTML generator (pure — no React, no side effects) ─────────────────
 
 function esc(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function scoreColor(pct: number): string {
@@ -93,24 +215,37 @@ function scoreColor(pct: number): string {
 }
 
 function generateCtaReportHtml(review: CTAReviewType, orgAlias: string): string {
-  const ts = (() => { try { return new Date(review.generatedAt).toLocaleString(); } catch { return review.generatedAt; } })();
+  const ts = (() => {
+    try {
+      return new Date(review.generatedAt).toLocaleString();
+    } catch {
+      return review.generatedAt;
+    }
+  })();
 
   const verdictStyle =
-    review.verdict === 'Go'             ? 'color:#16a34a;border:2px solid #16a34a;background:#f0fdf4' :
-    review.verdict === 'Conditional Go' ? 'color:#b45309;border:2px solid #d97706;background:#fffbeb' :
-                                          'color:#dc2626;border:2px solid #dc2626;background:#fef2f2';
+    review.verdict === 'Go'
+      ? 'color:#16a34a;border:2px solid #16a34a;background:#f0fdf4'
+      : review.verdict === 'Conditional Go'
+        ? 'color:#b45309;border:2px solid #d97706;background:#fffbeb'
+        : 'color:#dc2626;border:2px solid #dc2626;background:#fef2f2';
 
   const verdictAccent =
-    review.verdict === 'Go'             ? '#22c55e' :
-    review.verdict === 'Conditional Go' ? '#f59e0b' : '#ef4444';
+    review.verdict === 'Go'
+      ? '#22c55e'
+      : review.verdict === 'Conditional Go'
+        ? '#f59e0b'
+        : '#ef4444';
 
   // Health score rows + radar chart
-  const scoreBars = (review.healthScoreBreakdown ?? []).map(item => {
-    const pct = Math.round((item.score / item.maxScore) * 100);
-    const color = scoreColor(pct);
-    const trendIcon  = item.trend === 'improving' ? '↑' : item.trend === 'declining' ? '↓' : '→';
-    const trendColor = item.trend === 'improving' ? '#22c55e' : item.trend === 'declining' ? '#ef4444' : '#94a3b8';
-    return `<tr>
+  const scoreBars = (review.healthScoreBreakdown ?? [])
+    .map((item) => {
+      const pct = Math.round((item.score / item.maxScore) * 100);
+      const color = scoreColor(pct);
+      const trendIcon = item.trend === 'improving' ? '↑' : item.trend === 'declining' ? '↓' : '→';
+      const trendColor =
+        item.trend === 'improving' ? '#22c55e' : item.trend === 'declining' ? '#ef4444' : '#94a3b8';
+      return `<tr>
       <td style="padding:9px 12px;font-size:13px;color:#1e293b;white-space:nowrap">${esc(item.area)}</td>
       <td style="padding:9px 12px;width:200px">
         <div style="display:flex;align-items:center;gap:8px">
@@ -123,28 +258,58 @@ function generateCtaReportHtml(review: CTAReviewType, orgAlias: string): string 
       </td>
       <td style="padding:9px 12px;font-size:12px;color:#64748b">${esc(item.keyFinding)}</td>
     </tr>`;
-  }).join('');
+    })
+    .join('');
 
   const radarChart = (() => {
     const items = review.healthScoreBreakdown;
     if (!items || items.length === 0) return '';
-    const cx = 150, cy = 150, r = 105;
+    const cx = 150,
+      cy = 150,
+      r = 105;
     const n = Math.min(items.length, 7);
     const pts = items.slice(0, n);
-    const ang = (i: number) => (Math.PI * 2 * i / n) - Math.PI / 2;
-    const ax  = (i: number, s = 1): [number, number] => [cx + r * s * Math.cos(ang(i)), cy + r * s * Math.sin(ang(i))];
-    const rings = [0.25, 0.5, 0.75, 1].map(s => {
-      const rp = pts.map((_, i) => { const [x, y] = ax(i, s); return `${x},${y}`; }).join(' ');
-      return `<polygon points="${rp}" fill="none" stroke="#e2e8f0" stroke-width="1"/>`;
-    }).join('');
-    const axes   = pts.map((_, i) => { const [x, y] = ax(i); return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="#e2e8f0" stroke-width="1"/>`; }).join('');
-    const data   = pts.map((p, i) => { const [x, y] = ax(i, Math.min(p.score / p.maxScore, 1)); return `${x},${y}`; }).join(' ');
-    const dots   = pts.map((p, i) => { const [x, y] = ax(i, Math.min(p.score / p.maxScore, 1)); return `<circle cx="${x}" cy="${y}" r="3" fill="#3b82f6"/>`; }).join('');
-    const labels = pts.map((p, i) => {
-      const [x, y] = ax(i, 1.22);
-      const anchor = x > cx + 8 ? 'start' : x < cx - 8 ? 'end' : 'middle';
-      return `<text x="${x}" y="${y + 4}" text-anchor="${anchor}" font-size="10" fill="#64748b">${esc(p.area)}</text>`;
-    }).join('');
+    const ang = (i: number) => (Math.PI * 2 * i) / n - Math.PI / 2;
+    const ax = (i: number, s = 1): [number, number] => [
+      cx + r * s * Math.cos(ang(i)),
+      cy + r * s * Math.sin(ang(i)),
+    ];
+    const rings = [0.25, 0.5, 0.75, 1]
+      .map((s) => {
+        const rp = pts
+          .map((_, i) => {
+            const [x, y] = ax(i, s);
+            return `${x},${y}`;
+          })
+          .join(' ');
+        return `<polygon points="${rp}" fill="none" stroke="#e2e8f0" stroke-width="1"/>`;
+      })
+      .join('');
+    const axes = pts
+      .map((_, i) => {
+        const [x, y] = ax(i);
+        return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="#e2e8f0" stroke-width="1"/>`;
+      })
+      .join('');
+    const data = pts
+      .map((p, i) => {
+        const [x, y] = ax(i, Math.min(p.score / p.maxScore, 1));
+        return `${x},${y}`;
+      })
+      .join(' ');
+    const dots = pts
+      .map((p, i) => {
+        const [x, y] = ax(i, Math.min(p.score / p.maxScore, 1));
+        return `<circle cx="${x}" cy="${y}" r="3" fill="#3b82f6"/>`;
+      })
+      .join('');
+    const labels = pts
+      .map((p, i) => {
+        const [x, y] = ax(i, 1.22);
+        const anchor = x > cx + 8 ? 'start' : x < cx - 8 ? 'end' : 'middle';
+        return `<text x="${x}" y="${y + 4}" text-anchor="${anchor}" font-size="10" fill="#64748b">${esc(p.area)}</text>`;
+      })
+      .join('');
     return `<svg width="300" height="300" viewBox="0 0 300 300" xmlns="http://www.w3.org/2000/svg">
       ${rings}${axes}
       <polygon points="${data}" fill="#3b82f625" stroke="#3b82f6" stroke-width="2"/>
@@ -153,27 +318,43 @@ function generateCtaReportHtml(review: CTAReviewType, orgAlias: string): string 
   })();
 
   // Domain findings
-  const domainRows = review.domainFindings.map(d => {
-    const bs = d.status === 'Pass'    ? 'background:#dcfce7;color:#16a34a' :
-               d.status === 'Warning' ? 'background:#fef9c3;color:#b45309' :
-                                        'background:#fee2e2;color:#dc2626';
-    const risks = d.risks.map(r => `<li style="color:#b45309;font-size:12px;margin-bottom:4px;display:flex;gap:6px"><span>⚠</span>${esc(r)}</li>`).join('');
-    const recs  = d.recommendations.map(r => `<li style="color:#3b82f6;font-size:12px;margin-bottom:4px;display:flex;gap:6px"><span>→</span>${esc(r)}</li>`).join('');
-    return `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin-bottom:12px">
+  const domainRows = review.domainFindings
+    .map((d) => {
+      const bs =
+        d.status === 'Pass'
+          ? 'background:#dcfce7;color:#16a34a'
+          : d.status === 'Warning'
+            ? 'background:#fef9c3;color:#b45309'
+            : 'background:#fee2e2;color:#dc2626';
+      const risks = d.risks
+        .map(
+          (r) =>
+            `<li style="color:#b45309;font-size:12px;margin-bottom:4px;display:flex;gap:6px"><span>⚠</span>${esc(r)}</li>`
+        )
+        .join('');
+      const recs = d.recommendations
+        .map(
+          (r) =>
+            `<li style="color:#3b82f6;font-size:12px;margin-bottom:4px;display:flex;gap:6px"><span>→</span>${esc(r)}</li>`
+        )
+        .join('');
+      return `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
         <strong style="font-size:14px;color:#1e293b">${esc(d.domain)}</strong>
         <span style="${bs};padding:2px 10px;border-radius:999px;font-size:11px;font-weight:600">${esc(d.status)}</span>
       </div>
       <p style="font-size:13px;color:#475569;line-height:1.6;margin-bottom:${risks ? '10px' : '0'}">${esc(d.analysis)}</p>
       ${risks ? `<ul style="list-style:none;padding:0;margin-bottom:${recs ? '8px' : '0'}">${risks}</ul>` : ''}
-      ${recs  ? `<ul style="list-style:none;padding:0">${recs}</ul>` : ''}
+      ${recs ? `<ul style="list-style:none;padding:0">${recs}</ul>` : ''}
     </div>`;
-  }).join('');
+    })
+    .join('');
 
   // Top critical issues
-  const criticalIssueHtml = (review.topCriticalIssues ?? []).map(issue => {
-    const sc = issue.severity === 'Critical' ? '#dc2626' : '#b45309';
-    return `<div style="border:1px solid ${sc}25;border-radius:8px;padding:14px;margin-bottom:10px;background:${sc}05">
+  const criticalIssueHtml = (review.topCriticalIssues ?? [])
+    .map((issue) => {
+      const sc = issue.severity === 'Critical' ? '#dc2626' : '#b45309';
+      return `<div style="border:1px solid ${sc}25;border-radius:8px;padding:14px;margin-bottom:10px;background:${sc}05">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
         <span style="background:${sc}20;color:${sc};padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600">#${issue.rank} ${esc(issue.severity)}</span>
         <strong style="font-size:13px;color:#1e293b">${esc(issue.title)}</strong>
@@ -183,33 +364,47 @@ function generateCtaReportHtml(review: CTAReviewType, orgAlias: string): string 
       <p style="font-size:12px;color:#64748b;margin-bottom:4px"><strong>Remediation:</strong> ${esc(issue.remediation)}</p>
       <p style="font-size:11px;color:#94a3b8">Effort: ${esc(issue.effortEstimate)}</p>
     </div>`;
-  }).join('');
+    })
+    .join('');
 
   // Risk heatmap
-  const heatmapRows = (review.riskAnalysis?.riskHeatmap ?? []).map(cell => {
-    const lc = cell.likelihood === 'High' ? '#dc2626' : cell.likelihood === 'Medium' ? '#f59e0b' : '#22c55e';
-    const ic = cell.impact    === 'High' ? '#dc2626' : cell.impact    === 'Medium' ? '#f59e0b' : '#22c55e';
-    return `<tr>
+  const heatmapRows = (review.riskAnalysis?.riskHeatmap ?? [])
+    .map((cell) => {
+      const lc =
+        cell.likelihood === 'High'
+          ? '#dc2626'
+          : cell.likelihood === 'Medium'
+            ? '#f59e0b'
+            : '#22c55e';
+      const ic =
+        cell.impact === 'High' ? '#dc2626' : cell.impact === 'Medium' ? '#f59e0b' : '#22c55e';
+      return `<tr>
       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;color:#1e293b">${esc(cell.domain)}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:center"><span style="background:${lc}20;color:${lc};padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600">${esc(cell.likelihood)}</span></td>
       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:center"><span style="background:${ic}20;color:${ic};padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600">${esc(cell.impact)}</span></td>
     </tr>`;
-  }).join('');
+    })
+    .join('');
 
   // Quick wins
-  const quickWinHtml = (review.recommendations?.quickWins ?? []).map(w =>
-    `<li style="display:flex;gap:10px;align-items:flex-start;padding:12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;margin-bottom:8px">
+  const quickWinHtml = (review.recommendations?.quickWins ?? [])
+    .map(
+      (w) =>
+        `<li style="display:flex;gap:10px;align-items:flex-start;padding:12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;margin-bottom:8px">
       <span style="color:#16a34a;font-size:16px;line-height:1;flex-shrink:0">✓</span>
       <div>
         <div style="font-size:13px;font-weight:600;color:#1e293b;margin-bottom:2px">${esc(w.action)}</div>
         <div style="font-size:12px;color:#64748b">Effort: ${esc(w.effort)} · ${esc(w.impact)}</div>
       </div>
     </li>`
-  ).join('');
+    )
+    .join('');
 
   // Strategic initiatives
-  const strategicHtml = (review.recommendations?.strategic ?? []).map(s =>
-    `<li style="display:flex;gap:10px;align-items:flex-start;padding:12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;margin-bottom:8px">
+  const strategicHtml = (review.recommendations?.strategic ?? [])
+    .map(
+      (s) =>
+        `<li style="display:flex;gap:10px;align-items:flex-start;padding:12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;margin-bottom:8px">
       <span style="color:#3b82f6;font-size:16px;line-height:1;flex-shrink:0">→</span>
       <div>
         <div style="font-size:13px;font-weight:600;color:#1e293b;margin-bottom:2px">${esc(s.action)}</div>
@@ -217,32 +412,50 @@ function generateCtaReportHtml(review: CTAReviewType, orgAlias: string): string 
         ${s.impact ? `<div style="font-size:12px;color:#64748b;margin-top:2px">${esc(s.impact)}</div>` : ''}
       </div>
     </li>`
-  ).join('');
+    )
+    .join('');
 
   // SWOT grid for architecture observations
-  const swotColors: Record<string, string> = { Strength: '#22c55e', Weakness: '#ef4444', Opportunity: '#3b82f6', Threat: '#f59e0b' };
-  const swotGroups: Record<string, string[]> = { Strength: [], Weakness: [], Opportunity: [], Threat: [] };
-  (review.architectureObservations ?? []).forEach(o => { if (swotGroups[o.classification]) swotGroups[o.classification].push(o.observation); });
-  const swotGrid = Object.entries(swotGroups).filter(([, items]) => items.length > 0).map(([label, items]) => {
-    const color = swotColors[label] ?? '#64748b';
-    return `<div style="padding:16px;background:${color}0d;border:1px solid ${color}30;border-radius:8px">
+  const swotColors: Record<string, string> = {
+    Strength: '#22c55e',
+    Weakness: '#ef4444',
+    Opportunity: '#3b82f6',
+    Threat: '#f59e0b',
+  };
+  const swotGroups: Record<string, string[]> = {
+    Strength: [],
+    Weakness: [],
+    Opportunity: [],
+    Threat: [],
+  };
+  (review.architectureObservations ?? []).forEach((o) => {
+    if (swotGroups[o.classification]) swotGroups[o.classification].push(o.observation);
+  });
+  const swotGrid = Object.entries(swotGroups)
+    .filter(([, items]) => items.length > 0)
+    .map(([label, items]) => {
+      const color = swotColors[label] ?? '#64748b';
+      return `<div style="padding:16px;background:${color}0d;border:1px solid ${color}30;border-radius:8px">
       <div style="font-size:11px;font-weight:700;color:${color};text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">${label}</div>
-      <ul style="list-style:none;padding:0">${items.map(i => `<li style="font-size:12px;color:#475569;margin-bottom:4px;display:flex;gap:6px"><span style="color:${color};flex-shrink:0">•</span>${esc(i)}</li>`).join('')}</ul>
+      <ul style="list-style:none;padding:0">${items.map((i) => `<li style="font-size:12px;color:#475569;margin-bottom:4px;display:flex;gap:6px"><span style="color:${color};flex-shrink:0">•</span>${esc(i)}</li>`).join('')}</ul>
     </div>`;
-  }).join('');
+    })
+    .join('');
 
   // Benchmark comparison
-  const benchmarkRows = (review.benchmarkComparison ?? []).map(b => {
-    const sc = b.status === 'Above' ? '#22c55e' : b.status === 'At' ? '#3b82f6' : '#ef4444';
-    const sl = b.status === 'Above' ? '↑ Above' : b.status === 'At' ? '= At' : '↓ Below';
-    return `<tr>
+  const benchmarkRows = (review.benchmarkComparison ?? [])
+    .map((b) => {
+      const sc = b.status === 'Above' ? '#22c55e' : b.status === 'At' ? '#3b82f6' : '#ef4444';
+      const sl = b.status === 'Above' ? '↑ Above' : b.status === 'At' ? '= At' : '↓ Below';
+      return `<tr>
       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;color:#1e293b">${esc(b.metric)}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:center;font-size:13px;font-weight:600;color:#1e293b">${esc(b.orgValue)}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:center;font-size:13px;color:#64748b">${esc(b.industryAvg)}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:center;font-size:13px;color:#64748b">${esc(b.topQuartile)}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:center"><span style="color:${sc};font-size:12px;font-weight:600">${sl}</span></td>
     </tr>`;
-  }).join('');
+    })
+    .join('');
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -294,9 +507,13 @@ function generateCtaReportHtml(review: CTAReviewType, orgAlias: string): string 
   </div>
 
   <!-- Architecture Maturity + Org Profile -->
-  ${(review.architectureMaturity || review.orgProfile) ? `
+  ${
+    review.architectureMaturity || review.orgProfile
+      ? `
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
-    ${review.architectureMaturity ? `
+    ${
+      review.architectureMaturity
+        ? `
     <div class="card" style="border-left:4px solid #8b5cf6">
       <h2>Architecture Maturity</h2>
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
@@ -305,38 +522,70 @@ function generateCtaReportHtml(review: CTAReviewType, orgAlias: string): string 
         <strong style="font-size:15px;color:#1e293b">${esc(review.architectureMaturity.label)}</strong>
       </div>
       <div style="display:flex;gap:6px;margin-bottom:12px">
-        ${Array.from({ length: 5 }, (_, i) =>
-          `<div style="width:26px;height:26px;border-radius:50%;border:2px solid ${i < review.architectureMaturity!.level ? '#8b5cf6' : '#e2e8f0'};background:${i < review.architectureMaturity!.level ? '#8b5cf6' : 'transparent'}"></div>`
+        ${Array.from(
+          { length: 5 },
+          (_, i) =>
+            `<div style="width:26px;height:26px;border-radius:50%;border:2px solid ${i < review.architectureMaturity!.level ? '#8b5cf6' : '#e2e8f0'};background:${i < review.architectureMaturity!.level ? '#8b5cf6' : 'transparent'}"></div>`
         ).join('')}
       </div>
       <p style="font-size:13px;color:#64748b;line-height:1.6">${esc(review.architectureMaturity.summary)}</p>
-    </div>` : '<div></div>'}
-    ${review.orgProfile ? `
+    </div>`
+        : '<div></div>'
+    }
+    ${
+      review.orgProfile
+        ? `
     <div class="card" style="border-left:4px solid #06b6d4">
       <h2>Org Profile</h2>
       <dl style="display:grid;row-gap:10px">
-        ${[['Complexity', review.orgProfile.complexity], ['User Scale', review.orgProfile.userScale], ['Integration', review.orgProfile.integrationFootprint], ['Customization', review.orgProfile.customizationLevel]].map(([l, v]) =>
-          `<div><dt style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em">${l}</dt><dd style="font-size:13px;color:#1e293b;font-weight:500;margin-top:2px">${esc(v)}</dd></div>`
-        ).join('')}
+        ${[
+          ['Complexity', review.orgProfile.complexity],
+          ['User Scale', review.orgProfile.userScale],
+          ['Integration', review.orgProfile.integrationFootprint],
+          ['Customization', review.orgProfile.customizationLevel],
+        ]
+          .map(
+            ([l, v]) =>
+              `<div><dt style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em">${l}</dt><dd style="font-size:13px;color:#1e293b;font-weight:500;margin-top:2px">${esc(v)}</dd></div>`
+          )
+          .join('')}
       </dl>
-    </div>` : '<div></div>'}
-  </div>` : ''}
+    </div>`
+        : '<div></div>'
+    }
+  </div>`
+      : ''
+  }
 
   <!-- Business Impact -->
-  ${review.businessImpactSummary ? `
+  ${
+    review.businessImpactSummary
+      ? `
   <div class="card" style="border-left:4px solid #ef4444">
     <h2>Business Impact</h2>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:12px">
-      ${[{ l: 'Revenue Risk', v: review.businessImpactSummary.revenueRisk, c: '#ef4444' }, { l: 'Operational Risk', v: review.businessImpactSummary.operationalRisk, c: '#f59e0b' }, { l: 'Compliance Risk', v: review.businessImpactSummary.complianceRisk, c: '#8b5cf6' }]
-        .map(({ l, v, c }) => `<div style="padding:14px;background:${c}08;border:1px solid ${c}20;border-radius:8px"><div style="font-size:11px;font-weight:600;color:${c};text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">${l}</div><div style="font-size:13px;color:#1e293b;line-height:1.5">${esc(v)}</div></div>`).join('')}
+      ${[
+        { l: 'Revenue Risk', v: review.businessImpactSummary.revenueRisk, c: '#ef4444' },
+        { l: 'Operational Risk', v: review.businessImpactSummary.operationalRisk, c: '#f59e0b' },
+        { l: 'Compliance Risk', v: review.businessImpactSummary.complianceRisk, c: '#8b5cf6' },
+      ]
+        .map(
+          ({ l, v, c }) =>
+            `<div style="padding:14px;background:${c}08;border:1px solid ${c}20;border-radius:8px"><div style="font-size:11px;font-weight:600;color:${c};text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">${l}</div><div style="font-size:13px;color:#1e293b;line-height:1.5">${esc(v)}</div></div>`
+        )
+        .join('')}
     </div>
     <div style="padding:8px 12px;background:#f8fafc;border-radius:6px;font-size:12px;color:#64748b">
       Overall Severity: <strong style="color:#1e293b">${esc(review.businessImpactSummary.overallSeverity)}</strong>
     </div>
-  </div>` : ''}
+  </div>`
+      : ''
+  }
 
   <!-- Health Score Breakdown + Radar Chart -->
-  ${(review.healthScoreBreakdown ?? []).length > 0 ? `
+  ${
+    (review.healthScoreBreakdown ?? []).length > 0
+      ? `
   <div class="card" style="border-left:4px solid #22c55e">
     <h2>Health Score Breakdown</h2>
     <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
@@ -348,10 +597,14 @@ function generateCtaReportHtml(review: CTAReviewType, orgAlias: string): string 
       </div>
       ${radarChart ? `<div style="flex-shrink:0">${radarChart}</div>` : ''}
     </div>
-  </div>` : ''}
+  </div>`
+      : ''
+  }
 
   <!-- Risk Analysis -->
-  ${review.riskAnalysis ? `
+  ${
+    review.riskAnalysis
+      ? `
   <div class="card" style="border-left:4px solid #f59e0b">
     <h2>Risk Analysis</h2>
     <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:${heatmapRows ? '16px' : '0'}">
@@ -364,79 +617,127 @@ function generateCtaReportHtml(review: CTAReviewType, orgAlias: string): string 
         <div style="font-size:15px;font-weight:700;color:#1e293b">${esc(review.riskAnalysis.timeToRisk)}</div>
       </div>
     </div>
-    ${heatmapRows ? `
+    ${
+      heatmapRows
+        ? `
     <div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Risk Heatmap</div>
-    <table><thead><tr><th>Domain</th><th style="text-align:center">Likelihood</th><th style="text-align:center">Impact</th></tr></thead><tbody>${heatmapRows}</tbody></table>` : ''}
-  </div>` : ''}
+    <table><thead><tr><th>Domain</th><th style="text-align:center">Likelihood</th><th style="text-align:center">Impact</th></tr></thead><tbody>${heatmapRows}</tbody></table>`
+        : ''
+    }
+  </div>`
+      : ''
+  }
 
   <!-- Top Critical Issues -->
-  ${criticalIssueHtml ? `
+  ${
+    criticalIssueHtml
+      ? `
   <div class="card" style="border-left:4px solid #dc2626">
     <h2>Top Critical Issues</h2>
     ${criticalIssueHtml}
-  </div>` : ''}
+  </div>`
+      : ''
+  }
 
   <!-- Domain Findings -->
-  ${review.domainFindings.length > 0 ? `
+  ${
+    review.domainFindings.length > 0
+      ? `
   <div class="card" style="border-left:4px solid #06b6d4">
     <h2>Domain Findings</h2>
     ${domainRows}
-  </div>` : ''}
+  </div>`
+      : ''
+  }
 
   <!-- Benchmark Comparison -->
-  ${benchmarkRows ? `
+  ${
+    benchmarkRows
+      ? `
   <div class="card" style="border-left:4px solid #3b82f6">
     <h2>Benchmark Comparison</h2>
     <table>
       <thead><tr><th>Metric</th><th style="text-align:center">Your Org</th><th style="text-align:center">Industry Avg</th><th style="text-align:center">Top Quartile</th><th style="text-align:center">Status</th></tr></thead>
       <tbody>${benchmarkRows}</tbody>
     </table>
-  </div>` : ''}
+  </div>`
+      : ''
+  }
 
   <!-- Quick Wins -->
-  ${quickWinHtml ? `
+  ${
+    quickWinHtml
+      ? `
   <div class="card" style="border-left:4px solid #22c55e">
     <h2>⚡ Quick Wins</h2>
     <ul style="list-style:none;padding:0">${quickWinHtml}</ul>
-  </div>` : ''}
+  </div>`
+      : ''
+  }
 
   <!-- Strategic Initiatives -->
-  ${strategicHtml ? `
+  ${
+    strategicHtml
+      ? `
   <div class="card" style="border-left:4px solid #3b82f6">
     <h2>🗺️ Strategic Initiatives</h2>
     <ul style="list-style:none;padding:0">${strategicHtml}</ul>
-  </div>` : ''}
+  </div>`
+      : ''
+  }
 
   <!-- AI Insights -->
-  ${review.aiInsights ? `
+  ${
+    review.aiInsights
+      ? `
   <div class="card" style="border-left:4px solid #8b5cf6">
     <h2>🤖 AI Insights</h2>
-    ${review.aiInsights.hiddenRisks.length > 0 ? `
+    ${
+      review.aiInsights.hiddenRisks.length > 0
+        ? `
     <div style="margin-bottom:14px">
       <div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Hidden Risks</div>
-      <ul style="list-style:none;padding:0">${review.aiInsights.hiddenRisks.map(r => `<li style="font-size:13px;color:#475569;margin-bottom:6px;display:flex;gap:8px"><span style="color:#8b5cf6;flex-shrink:0">•</span>${esc(r)}</li>`).join('')}</ul>
-    </div>` : ''}
-    ${review.aiInsights.predictions.length > 0 ? `
+      <ul style="list-style:none;padding:0">${review.aiInsights.hiddenRisks.map((r) => `<li style="font-size:13px;color:#475569;margin-bottom:6px;display:flex;gap:8px"><span style="color:#8b5cf6;flex-shrink:0">•</span>${esc(r)}</li>`).join('')}</ul>
+    </div>`
+        : ''
+    }
+    ${
+      review.aiInsights.predictions.length > 0
+        ? `
     <div style="margin-bottom:14px">
       <div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Predictions</div>
-      <ul style="list-style:none;padding:0">${review.aiInsights.predictions.map(p => `<li style="font-size:13px;color:#475569;margin-bottom:6px;display:flex;gap:8px"><span style="color:#3b82f6;flex-shrink:0">→</span>${esc(p)}</li>`).join('')}</ul>
-    </div>` : ''}
-    ${(review.aiInsights.unusualPatterns ?? []).length > 0 ? `
+      <ul style="list-style:none;padding:0">${review.aiInsights.predictions.map((p) => `<li style="font-size:13px;color:#475569;margin-bottom:6px;display:flex;gap:8px"><span style="color:#3b82f6;flex-shrink:0">→</span>${esc(p)}</li>`).join('')}</ul>
+    </div>`
+        : ''
+    }
+    ${
+      (review.aiInsights.unusualPatterns ?? []).length > 0
+        ? `
     <div>
       <div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Unusual Patterns</div>
-      <ul style="list-style:none;padding:0">${(review.aiInsights.unusualPatterns ?? []).map(p => `<li style="font-size:13px;color:#475569;margin-bottom:6px;display:flex;gap:8px"><span style="color:#f59e0b;flex-shrink:0">!</span>${esc(p)}</li>`).join('')}</ul>
-    </div>` : ''}
-  </div>` : ''}
+      <ul style="list-style:none;padding:0">${(review.aiInsights.unusualPatterns ?? []).map((p) => `<li style="font-size:13px;color:#475569;margin-bottom:6px;display:flex;gap:8px"><span style="color:#f59e0b;flex-shrink:0">!</span>${esc(p)}</li>`).join('')}</ul>
+    </div>`
+        : ''
+    }
+  </div>`
+      : ''
+  }
 
   <!-- Architecture Observations (SWOT) -->
-  ${swotGrid ? `
+  ${
+    swotGrid
+      ? `
   <div class="card" style="border-left:4px solid #06b6d4">
     <h2>Architecture Observations</h2>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">${swotGrid}</div>
-  </div>` : ''}
+  </div>`
+      : ''
+  }
 
   <!-- Cost of Inaction -->
-  ${review.costOfInaction ? `
+  ${
+    review.costOfInaction
+      ? `
   <div class="card" style="border-left:4px solid #f59e0b">
     <h2>Cost of Inaction</h2>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:${review.costOfInaction.risks.length ? '14px' : '0'}">
@@ -449,27 +750,41 @@ function generateCtaReportHtml(review: CTAReviewType, orgAlias: string): string 
         <div style="font-size:13px;color:#1e293b;line-height:1.5">${esc(review.costOfInaction.technicalDebtGrowth)}</div>
       </div>
     </div>
-    ${review.costOfInaction.risks.length > 0 ? `<ul style="list-style:none;padding:0">${review.costOfInaction.risks.map(r => `<li style="font-size:13px;color:#b45309;margin-bottom:6px;display:flex;gap:8px"><span style="flex-shrink:0">⚠</span>${esc(r)}</li>`).join('')}</ul>` : ''}
-  </div>` : ''}
+    ${review.costOfInaction.risks.length > 0 ? `<ul style="list-style:none;padding:0">${review.costOfInaction.risks.map((r) => `<li style="font-size:13px;color:#b45309;margin-bottom:6px;display:flex;gap:8px"><span style="flex-shrink:0">⚠</span>${esc(r)}</li>`).join('')}</ul>` : ''}
+  </div>`
+      : ''
+  }
 
   <!-- Final Recommendation -->
-  ${review.finalRecommendation ? `
+  ${
+    review.finalRecommendation
+      ? `
   <div class="card" style="border-left:4px solid ${verdictAccent}">
     <h2>Final Recommendation</h2>
     <div style="display:inline-flex;align-items:center;padding:8px 20px;border-radius:8px;${verdictStyle};font-size:18px;font-weight:800;margin-bottom:14px">
       ${esc(review.verdict)}
     </div>
     <p style="font-size:14px;color:#475569;line-height:1.7;margin-bottom:${review.finalRecommendation.nextSteps.length > 0 ? '14px' : '0'}">${esc(review.finalRecommendation.summary)}</p>
-    ${review.finalRecommendation.nextSteps.length > 0 ? `
+    ${
+      review.finalRecommendation.nextSteps.length > 0
+        ? `
     <div style="margin-bottom:12px">
       <div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Next Steps</div>
-      <ol style="padding-left:18px;margin:0">${review.finalRecommendation.nextSteps.map(s => `<li style="font-size:13px;color:#475569;margin-bottom:5px">${esc(s)}</li>`).join('')}</ol>
-    </div>` : ''}
-    ${review.finalRecommendation.proposedTimeline ? `
+      <ol style="padding-left:18px;margin:0">${review.finalRecommendation.nextSteps.map((s) => `<li style="font-size:13px;color:#475569;margin-bottom:5px">${esc(s)}</li>`).join('')}</ol>
+    </div>`
+        : ''
+    }
+    ${
+      review.finalRecommendation.proposedTimeline
+        ? `
     <div style="padding:10px 14px;background:#f8fafc;border-radius:6px;font-size:13px;color:#64748b">
       📅 Proposed Timeline: <strong style="color:#1e293b">${esc(review.finalRecommendation.proposedTimeline)}</strong>
-    </div>` : ''}
-  </div>` : ''}
+    </div>`
+        : ''
+    }
+  </div>`
+      : ''
+  }
 
   <!-- Footer -->
   <div style="text-align:center;padding:24px 0;border-top:1px solid #e2e8f0;margin-top:8px">
@@ -488,25 +803,29 @@ function generateCtaReportHtml(review: CTAReviewType, orgAlias: string): string 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function CTAReview() {
-  const [subTab, setSubTab]                 = useState<SubTab>('Risk Summary');
-  const [selectedFormat, setSelectedFormat] = useState<'interactive' | 'pdf' | 'html'>('interactive');
-  const { postMessage }                     = useVSCode();
+  const [subTab, setSubTab] = useState<SubTab>('Risk Summary');
+  const [selectedFormat, setSelectedFormat] = useState<'interactive' | 'pdf' | 'html'>(
+    'interactive'
+  );
+  const { postMessage } = useVSCode();
 
-  const review             = useDashboardStore((s) => s.ctaReview);
-  const ctaLoading         = useDashboardStore((s) => s.ctaLoading);
-  const ctaError           = useDashboardStore((s) => s.ctaError);
-  const models             = useDashboardStore((s) => s.availableModels);
-  const selectedModelId    = useDashboardStore((s) => s.selectedModelId);
-  const setSelectedModelId = useDashboardStore((s) => s.setSelectedModelId);
-  const results            = useDashboardStore((s) => s.results);
+  const review = useDashboardStore((s) => s.ctaReview);
+  const ctaLoading = useDashboardStore((s) => s.ctaLoading);
+  const ctaError = useDashboardStore((s) => s.ctaError);
+  const results = useDashboardStore((s) => s.results);
 
-  const handleRun      = (force = false) => postMessage({ command: 'runCtaReview', model: selectedModelId ?? undefined, force });
+  const copilotAvailable = useAIStore((s) => s.copilotAvailable);
+  const claudeAuthorized = useAIStore((s) => s.claudeAuthorized);
+  const anyProviderActive = copilotAvailable || claudeAuthorized;
+
+  const handleRun = (force = false) => postMessage({ command: 'runCtaReview', force });
   const handleDownload = () => {
     if (!review) return;
-    const orgAlias = (results?.orgDetails as Record<string, string> | undefined)?.alias
-                  ?? (results?.orgDetails as Record<string, string> | undefined)?.username
-                  ?? 'Salesforce-Org';
-    const html    = generateCtaReportHtml(review, orgAlias);
+    const orgAlias =
+      (results?.orgDetails as Record<string, string> | undefined)?.alias ??
+      (results?.orgDetails as Record<string, string> | undefined)?.username ??
+      'Salesforce-Org';
+    const html = generateCtaReportHtml(review, orgAlias);
     const dateStr = new Date().toISOString().slice(0, 10);
     postMessage({ command: 'exportCtaHtml', html, fileName: `OrgPulse_Advisory_${dateStr}.html` });
   };
@@ -541,8 +860,8 @@ export default function CTAReview() {
     const apex = results.codeInventory?.apexClasses ?? 0;
     const objs = results.dataModelSummary?.customObjectCount ?? 0;
     if (apex >= 400 || objs >= 100) return 'Enterprise';
-    if (apex >= 150 || objs >= 50)  return 'Large';
-    if (apex >= 50  || objs >= 15)  return 'Medium';
+    if (apex >= 150 || objs >= 50) return 'Large';
+    if (apex >= 50 || objs >= 15) return 'Medium';
     return 'Small';
   }, [results]);
 
@@ -561,17 +880,20 @@ export default function CTAReview() {
     <div className="space-y-2">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-base font-semibold text-sf-text mb-1">
+          <h1 className="mb-1 text-base font-semibold text-sf-text">
             OrgPulse Advisory <span className="text-sf-accent">✨</span>
           </h1>
           <p className="text-xs text-sf-muted">
-            Generate an AI-powered architecture assessment with actionable insights, risks, and recommendations.
+            Generate an AI-powered architecture assessment with actionable insights, risks, and
+            recommendations.
           </p>
         </div>
         {showRegenerate && (
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex shrink-0 items-center gap-2">
             {review && (
-              <span className={`px-3 py-1 text-xs font-semibold rounded-full border ${VERDICT_COLOR[review.verdict] ?? 'text-sf-text border-sf-border'}`}>
+              <span
+                className={`rounded-full border px-3 py-1 text-xs font-semibold ${VERDICT_COLOR[review.verdict] ?? 'border-sf-border text-sf-text'}`}
+              >
                 {review.verdict}
               </span>
             )}
@@ -582,50 +904,65 @@ export default function CTAReview() {
         )}
       </div>
       {!showRegenerate && (
-        <div className="flex items-center gap-3 px-4 py-2.5 rounded-lg border border-sf-accent/30 bg-sf-accent/5 text-xs">
-          <span className="text-sf-accent text-base shrink-0">ⓘ</span>
-          <span className="text-sf-accent font-semibold shrink-0">Powered by AI</span>
-          <span className="text-sf-muted leading-relaxed">
-            Uses the latest scan data and historical trends to generate a comprehensive architecture assessment.
-            No source code, metadata, or PII is sent to AI.
+        <div className="flex items-center gap-3 rounded-lg border border-sf-accent/30 bg-sf-accent/5 px-4 py-2.5 text-xs">
+          <span className="shrink-0 text-base text-sf-accent">ⓘ</span>
+          <span className="shrink-0 font-semibold text-sf-accent">Powered by AI</span>
+          <span className="leading-relaxed text-sf-muted">
+            Uses the latest scan data and historical trends to generate a comprehensive architecture
+            assessment. No source code, metadata, or PII is sent to AI.
           </span>
         </div>
       )}
     </div>
   );
 
-  const complexityBadgeVariant = orgComplexity === 'Enterprise' || orgComplexity === 'Large' ? 'warning' : 'info';
+  const complexityBadgeVariant =
+    orgComplexity === 'Enterprise' || orgComplexity === 'Large' ? 'warning' : 'info';
 
   const renderRecentAssessments = () => (
     <GlassCard>
-      <div className="flex items-center justify-between mb-3">
+      <div className="mb-3 flex items-center justify-between">
         <p className="text-sm font-semibold text-sf-text">4. Recent Assessments</p>
         {review && <span className="text-[10px] text-sf-accent">View all reports →</span>}
       </div>
       {review ? (
         <div className="overflow-x-auto">
-          <table className="w-full text-xs border-collapse">
+          <table className="w-full border-collapse text-xs">
             <thead>
               <tr className="border-b border-sf-border">
-                {['Report Name', 'Source Scan', 'Model', 'Generated On', 'Status', 'Actions'].map((h) => (
-                  <th key={h} className="pb-2 pr-4 text-left text-[10px] font-medium text-sf-muted uppercase tracking-wider whitespace-nowrap">
-                    {h}
-                  </th>
-                ))}
+                {['Report Name', 'Source Scan', 'Model', 'Generated On', 'Status', 'Actions'].map(
+                  (h) => (
+                    <th
+                      key={h}
+                      className="pr-4 pb-2 text-left text-[10px] font-medium tracking-wider whitespace-nowrap text-sf-muted uppercase"
+                    >
+                      {h}
+                    </th>
+                  )
+                )}
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td className="py-2.5 pr-4 whitespace-nowrap">
                   <span className="text-sf-text">
-                    OrgPulse Advisory{scanDateLabel ? ` – ${scanDateLabel.replace('Full Scan – ', '')}` : ''}
+                    OrgPulse Advisory
+                    {scanDateLabel ? ` – ${scanDateLabel.replace('Full Scan – ', '')}` : ''}
                   </span>
-                  <Badge variant="accent" className="ml-1.5">Latest</Badge>
+                  <Badge variant="accent" className="ml-1.5">
+                    Latest
+                  </Badge>
                 </td>
-                <td className="py-2.5 pr-4 text-sf-text-2 whitespace-nowrap">{scanDateLabel ?? '—'}</td>
-                <td className="py-2.5 pr-4 text-sf-text-2 whitespace-nowrap">{review.modelUsed}</td>
-                <td className="py-2.5 pr-4 text-sf-text-2 whitespace-nowrap">{fmtDateTime(review.generatedAt)}</td>
-                <td className="py-2.5 pr-4"><Badge variant="success">Completed</Badge></td>
+                <td className="py-2.5 pr-4 whitespace-nowrap text-sf-text-2">
+                  {scanDateLabel ?? '—'}
+                </td>
+                <td className="py-2.5 pr-4 whitespace-nowrap text-sf-text-2">{review.modelUsed}</td>
+                <td className="py-2.5 pr-4 whitespace-nowrap text-sf-text-2">
+                  {fmtDateTime(review.generatedAt)}
+                </td>
+                <td className="py-2.5 pr-4">
+                  <Badge variant="success">Completed</Badge>
+                </td>
                 <td className="py-2.5">
                   <div className="flex items-center gap-1.5">
                     <Button size="sm" variant="ghost" onClick={() => setSubTab('Risk Summary')}>
@@ -653,7 +990,7 @@ export default function CTAReview() {
 
   if (!review) {
     return (
-      <div className="p-6 space-y-5">
+      <div className="space-y-5 p-6">
         {renderPageHeader(false)}
 
         {ctaError && <InfoCard variant="error">{ctaError}</InfoCard>}
@@ -661,13 +998,18 @@ export default function CTAReview() {
         {/* Feature highlights — 20:80 icon/content layout */}
         <div className="grid grid-cols-3 gap-3">
           {HIGHLIGHTS.map((h) => (
-            <div key={h.title} className="p-3 rounded-lg border border-sf-border bg-sf-bg-3 flex items-center gap-3">
-              <div className={`w-10 h-10 flex items-center justify-center rounded-lg shrink-0 ${h.bg}`}>
+            <div
+              key={h.title}
+              className="flex items-center gap-3 rounded-lg border border-sf-border bg-sf-bg-3 p-3"
+            >
+              <div
+                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${h.bg}`}
+              >
                 <span className="text-xl">{h.icon}</span>
               </div>
               <div>
-                <p className="text-xs font-semibold text-sf-text mb-0.5">{h.title}</p>
-                <p className="text-[10px] text-sf-muted leading-relaxed">{h.desc}</p>
+                <p className="mb-0.5 text-xs font-semibold text-sf-text">{h.title}</p>
+                <p className="text-[10px] leading-relaxed text-sf-muted">{h.desc}</p>
               </div>
             </div>
           ))}
@@ -675,43 +1017,45 @@ export default function CTAReview() {
 
         {/* Configure + Review Information */}
         <div className="grid grid-cols-2 gap-4">
-
           {/* 1. Configure Assessment */}
           <GlassCard>
-            <p className="text-sm font-semibold text-sf-text mb-3">1. Configure Assessment</p>
+            <p className="mb-3 text-sm font-semibold text-sf-text">1. Configure Assessment</p>
 
-            <div className="mb-3">
-              <label className="text-[10px] text-sf-muted uppercase tracking-wider block mb-1.5">AI Model</label>
-              <div className="flex items-center gap-2">
-                <select
-                  value={selectedModelId ?? ''}
-                  onChange={(e) => setSelectedModelId(e.target.value)}
-                  className="flex-1 px-2 py-1.5 text-xs rounded border border-sf-border bg-sf-bg-3 text-sf-text focus:border-sf-accent outline-none"
-                >
-                  <option value="">Auto-select</option>
-                  {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-                </select>
-                {models.length > 0 && <Badge variant="accent">Recommended</Badge>}
+            {/* No AI provider nudge */}
+            {!anyProviderActive && (
+              <div className="mb-3 flex items-start gap-2 rounded-lg border border-sev-warning/40 bg-sev-warning/5 p-3">
+                <span className="shrink-0 text-sm text-sev-warning">⚠</span>
+                <p className="text-xs leading-relaxed text-sf-muted">
+                  No AI provider connected.{' '}
+                  <NavLink to="/settings" className="text-sf-accent hover:underline">
+                    Go to Settings
+                  </NavLink>{' '}
+                  to connect GitHub Copilot or Claude.
+                </p>
               </div>
-            </div>
+            )}
 
             <div className="mb-4">
-              <label className="text-[10px] text-sf-muted uppercase tracking-wider block mb-1.5">Output Format</label>
+              <label className="mb-1.5 block text-[10px] tracking-wider text-sf-muted uppercase">
+                Output Format
+              </label>
               <div className="grid grid-cols-3 gap-2">
                 {FORMAT_OPTIONS.map((f) => (
                   <button
                     key={f.id}
                     type="button"
                     onClick={() => setSelectedFormat(f.id)}
-                    className={`p-2 rounded-lg border text-left transition-colors ${
+                    className={`rounded-lg border p-2 text-left transition-colors ${
                       selectedFormat === f.id
                         ? 'border-sf-accent bg-sf-accent/10'
                         : 'border-sf-border bg-sf-bg-3 hover:border-sf-accent/40'
                     }`}
                   >
-                    <p className="text-sm mb-0.5">{f.icon}</p>
-                    <p className="text-[10px] font-semibold text-sf-text leading-tight">{f.label}</p>
-                    <p className="text-[9px] text-sf-muted leading-tight mt-0.5">{f.desc}</p>
+                    <p className="mb-0.5 text-sm">{f.icon}</p>
+                    <p className="text-[10px] leading-tight font-semibold text-sf-text">
+                      {f.label}
+                    </p>
+                    <p className="mt-0.5 text-[9px] leading-tight text-sf-muted">{f.desc}</p>
                   </button>
                 ))}
               </div>
@@ -719,13 +1063,13 @@ export default function CTAReview() {
 
             <Button
               variant="primary"
-              className="w-full justify-center mb-2"
+              className="mb-2 w-full justify-center"
               onClick={() => handleRun(false)}
               disabled={!results}
             >
               🔍 Generate AI Architecture Assessment
             </Button>
-            <p className="text-[10px] text-sf-muted text-center">
+            <p className="text-center text-[10px] text-sf-muted">
               {results
                 ? 'This may take 1–3 minutes depending on org size and model.'
                 : 'Run an org analysis first to enable assessment generation.'}
@@ -734,33 +1078,38 @@ export default function CTAReview() {
 
           {/* 2. Review Information */}
           <GlassCard>
-            <p className="text-sm font-semibold text-sf-text mb-3">2. Review Information</p>
+            <p className="mb-3 text-sm font-semibold text-sf-text">2. Review Information</p>
             <div className="space-y-3">
-
               {/* Source Scan */}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <div className={`w-7 h-7 flex items-center justify-center rounded shrink-0 ${REVIEW_INFO_ROWS[0].bg}`}>
+                  <div
+                    className={`flex h-7 w-7 shrink-0 items-center justify-center rounded ${REVIEW_INFO_ROWS[0].bg}`}
+                  >
                     <span className="text-sm">{REVIEW_INFO_ROWS[0].icon}</span>
                   </div>
                   <span className="text-xs text-sf-muted">{REVIEW_INFO_ROWS[0].label}</span>
                 </div>
-                <span className="text-xs text-sf-text font-medium">{scanDateLabel ?? '—'}</span>
+                <span className="text-xs font-medium text-sf-text">{scanDateLabel ?? '—'}</span>
               </div>
 
               {/* Scan Coverage */}
               <div>
-                <div className="flex items-center justify-between mb-1.5">
+                <div className="mb-1.5 flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <div className={`w-7 h-7 flex items-center justify-center rounded shrink-0 ${REVIEW_INFO_ROWS[1].bg}`}>
+                    <div
+                      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded ${REVIEW_INFO_ROWS[1].bg}`}
+                    >
                       <span className="text-sm">{REVIEW_INFO_ROWS[1].icon}</span>
                     </div>
                     <span className="text-xs text-sf-muted">{REVIEW_INFO_ROWS[1].label}</span>
                   </div>
-                  <span className="text-xs text-sf-text font-medium">{results ? `${scanCoverage}%` : '—'}</span>
+                  <span className="text-xs font-medium text-sf-text">
+                    {results ? `${scanCoverage}%` : '—'}
+                  </span>
                 </div>
                 {results && (
-                  <div className="h-2 rounded-full bg-sf-bg-3 overflow-hidden ml-9">
+                  <div className="ml-9 h-2 overflow-hidden rounded-full bg-sf-bg-3">
                     <div
                       className="h-full rounded-full bg-linear-to-r from-green-500 to-emerald-400 transition-all"
                       style={{ width: `${scanCoverage}%` }}
@@ -772,36 +1121,46 @@ export default function CTAReview() {
               {/* Org Complexity */}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <div className={`w-7 h-7 flex items-center justify-center rounded shrink-0 ${REVIEW_INFO_ROWS[2].bg}`}>
+                  <div
+                    className={`flex h-7 w-7 shrink-0 items-center justify-center rounded ${REVIEW_INFO_ROWS[2].bg}`}
+                  >
                     <span className="text-sm">{REVIEW_INFO_ROWS[2].icon}</span>
                   </div>
                   <span className="text-xs text-sf-muted">{REVIEW_INFO_ROWS[2].label}</span>
                 </div>
-                {orgComplexity
-                  ? <Badge variant={complexityBadgeVariant}>{orgComplexity}</Badge>
-                  : <span className="text-xs text-sf-muted">—</span>}
+                {orgComplexity ? (
+                  <Badge variant={complexityBadgeVariant}>{orgComplexity}</Badge>
+                ) : (
+                  <span className="text-xs text-sf-muted">—</span>
+                )}
               </div>
 
               {/* Estimated Report Length */}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <div className={`w-7 h-7 flex items-center justify-center rounded shrink-0 ${REVIEW_INFO_ROWS[3].bg}`}>
+                  <div
+                    className={`flex h-7 w-7 shrink-0 items-center justify-center rounded ${REVIEW_INFO_ROWS[3].bg}`}
+                  >
                     <span className="text-sm">{REVIEW_INFO_ROWS[3].icon}</span>
                   </div>
                   <span className="text-xs text-sf-muted">{REVIEW_INFO_ROWS[3].label}</span>
                 </div>
-                <span className="text-xs text-sf-text font-medium">{estimatedPages ? `~${estimatedPages} pages` : '—'}</span>
+                <span className="text-xs font-medium text-sf-text">
+                  {estimatedPages ? `~${estimatedPages} pages` : '—'}
+                </span>
               </div>
 
               {/* Generated By */}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <div className={`w-7 h-7 flex items-center justify-center rounded shrink-0 ${REVIEW_INFO_ROWS[4].bg}`}>
+                  <div
+                    className={`flex h-7 w-7 shrink-0 items-center justify-center rounded ${REVIEW_INFO_ROWS[4].bg}`}
+                  >
                     <span className="text-sm">{REVIEW_INFO_ROWS[4].icon}</span>
                   </div>
                   <span className="text-xs text-sf-muted">{REVIEW_INFO_ROWS[4].label}</span>
                 </div>
-                <span className="text-xs text-sf-text font-medium">OrgPulse AI Engine</span>
+                <span className="text-xs font-medium text-sf-text">OrgPulse AI Engine</span>
               </div>
             </div>
           </GlassCard>
@@ -809,19 +1168,23 @@ export default function CTAReview() {
 
         {/* 3. What You'll Get — 20:80 icon/content layout with varied colors */}
         <GlassCard>
-          <p className="text-sm font-semibold text-sf-text mb-3">3. What You'll Get</p>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+          <p className="mb-3 text-sm font-semibold text-sf-text">3. What You'll Get</p>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
             {FEATURES.map((f, i) => (
               <div
                 key={f.title}
-                className="p-2.5 rounded-lg border border-sf-border bg-sf-bg-3 hover:border-sf-accent/40 transition-colors flex gap-2 items-start"
+                className="flex items-start gap-2 rounded-lg border border-sf-border bg-sf-bg-3 p-2.5 transition-colors hover:border-sf-accent/40"
               >
-                <div className={`w-8 h-8 flex items-center justify-center rounded shrink-0 ${FEATURE_COLORS[i % FEATURE_COLORS.length]}`}>
+                <div
+                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded ${FEATURE_COLORS[i % FEATURE_COLORS.length]}`}
+                >
                   <span className="text-base">{f.icon}</span>
                 </div>
                 <div className="min-w-0">
-                  <p className="text-[10px] font-semibold text-sf-text leading-tight mb-0.5">{f.title}</p>
-                  <p className="text-[9px] text-sf-muted leading-relaxed">{f.desc}</p>
+                  <p className="mb-0.5 text-[10px] leading-tight font-semibold text-sf-text">
+                    {f.title}
+                  </p>
+                  <p className="text-[9px] leading-relaxed text-sf-muted">{f.desc}</p>
                 </div>
               </div>
             ))}
@@ -839,7 +1202,7 @@ export default function CTAReview() {
   const verdictClass = VERDICT_COLOR[review.verdict] ?? 'text-sf-text border-sf-border';
 
   return (
-    <div className="p-6 space-y-5">
+    <div className="space-y-5 p-6">
       {renderPageHeader(true)}
 
       {/* Sub-tab nav */}
@@ -849,9 +1212,9 @@ export default function CTAReview() {
             key={t}
             type="button"
             onClick={() => setSubTab(t)}
-            className={`px-4 py-2 text-xs border-b-2 transition-colors ${
+            className={`border-b-2 px-4 py-2 text-xs transition-colors ${
               subTab === t
-                ? 'border-sf-accent text-sf-text font-medium'
+                ? 'border-sf-accent font-medium text-sf-text'
                 : 'border-transparent text-sf-muted hover:text-sf-text-2'
             }`}
           >
@@ -864,18 +1227,23 @@ export default function CTAReview() {
       {subTab === 'Risk Summary' && (
         <div className="space-y-4">
           <GlassCard title="Executive Summary">
-            <p className="text-xs text-sf-text-2 leading-relaxed">{review.executiveSummary}</p>
+            <p className="text-xs leading-relaxed text-sf-text-2">{review.executiveSummary}</p>
           </GlassCard>
 
           {review.architectureMaturity && (
             <GlassCard title="Architecture Maturity">
               <div className="flex items-center gap-4">
                 <div className="text-4xl font-bold text-sf-accent">
-                  {review.architectureMaturity.level}<span className="text-sf-muted text-lg">/5</span>
+                  {review.architectureMaturity.level}
+                  <span className="text-lg text-sf-muted">/5</span>
                 </div>
                 <div>
-                  <p className="text-sm font-medium text-sf-text">{review.architectureMaturity.label}</p>
-                  <p className="text-xs text-sf-muted mt-0.5">{review.architectureMaturity.summary}</p>
+                  <p className="text-sm font-medium text-sf-text">
+                    {review.architectureMaturity.label}
+                  </p>
+                  <p className="mt-0.5 text-xs text-sf-muted">
+                    {review.architectureMaturity.summary}
+                  </p>
                 </div>
               </div>
             </GlassCard>
@@ -887,22 +1255,29 @@ export default function CTAReview() {
                 <div className="flex gap-6">
                   <div>
                     <span className="text-sf-muted">Probability of Incident: </span>
-                    <span className="text-sf-text font-medium">{review.riskAnalysis.probabilityOfIncident}</span>
+                    <span className="font-medium text-sf-text">
+                      {review.riskAnalysis.probabilityOfIncident}
+                    </span>
                   </div>
                   <div>
                     <span className="text-sf-muted">Time to Risk: </span>
-                    <span className="text-sf-text font-medium">{review.riskAnalysis.timeToRisk}</span>
+                    <span className="font-medium text-sf-text">
+                      {review.riskAnalysis.timeToRisk}
+                    </span>
                   </div>
                 </div>
                 {review.riskAnalysis.riskHeatmap.length > 0 && (
                   <div className="mt-3">
-                    <p className="text-[10px] text-sf-muted uppercase tracking-wider mb-2">Risk Heatmap</p>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    <p className="mb-2 text-[10px] tracking-wider text-sf-muted uppercase">
+                      Risk Heatmap
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                       {review.riskAnalysis.riskHeatmap.map((cell, i) => (
-                        <div key={i} className="p-2 rounded border border-sf-border bg-sf-bg-3">
-                          <p className="font-medium text-sf-text text-[11px]">{cell.domain}</p>
-                          <p className="text-sf-muted text-[10px] mt-0.5">
-                            L: <span className="capitalize">{cell.likelihood}</span> · I: <span className="capitalize">{cell.impact}</span>
+                        <div key={i} className="rounded border border-sf-border bg-sf-bg-3 p-2">
+                          <p className="text-[11px] font-medium text-sf-text">{cell.domain}</p>
+                          <p className="mt-0.5 text-[10px] text-sf-muted">
+                            L: <span className="capitalize">{cell.likelihood}</span> · I:{' '}
+                            <span className="capitalize">{cell.impact}</span>
                           </p>
                         </div>
                       ))}
@@ -915,15 +1290,18 @@ export default function CTAReview() {
 
           {review.businessImpactSummary && (
             <GlassCard title="Business Impact">
-              <dl className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <dl className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-3">
                 {[
-                  { label: 'Revenue Risk',     value: review.businessImpactSummary.revenueRisk },
-                  { label: 'Operational Risk', value: review.businessImpactSummary.operationalRisk },
-                  { label: 'Compliance Risk',  value: review.businessImpactSummary.complianceRisk },
+                  { label: 'Revenue Risk', value: review.businessImpactSummary.revenueRisk },
+                  {
+                    label: 'Operational Risk',
+                    value: review.businessImpactSummary.operationalRisk,
+                  },
+                  { label: 'Compliance Risk', value: review.businessImpactSummary.complianceRisk },
                 ].map(({ label, value }) => (
                   <div key={label}>
-                    <dt className="text-sf-muted mb-0.5">{label}</dt>
-                    <dd className="text-sf-text leading-snug">{value}</dd>
+                    <dt className="mb-0.5 text-sf-muted">{label}</dt>
+                    <dd className="leading-snug text-sf-text">{value}</dd>
                   </div>
                 ))}
               </dl>
@@ -936,33 +1314,46 @@ export default function CTAReview() {
       {subTab === 'Findings' && (
         <div className="space-y-3">
           {review.topCriticalIssues?.map((issue) => (
-            <div key={issue.rank} className="p-3 rounded-lg border border-sev-error/20 bg-sev-error/5 space-y-1">
+            <div
+              key={issue.rank}
+              className="space-y-1 rounded-lg border border-sev-error/20 bg-sev-error/5 p-3"
+            >
               <div className="flex items-center gap-2">
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-sev-error/20 text-sev-error font-medium">
+                <span className="rounded bg-sev-error/20 px-1.5 py-0.5 text-[10px] font-medium text-sev-error">
                   #{issue.rank} {issue.severity}
                 </span>
                 <span className="text-xs font-medium text-sf-text">{issue.title}</span>
               </div>
-              <p className="text-xs text-sf-muted leading-relaxed">{issue.impact}</p>
+              <p className="text-xs leading-relaxed text-sf-muted">{issue.impact}</p>
               <p className="text-xs text-sf-text-2">
-                <span className="text-sf-muted">Remediation: </span>{issue.remediation}
+                <span className="text-sf-muted">Remediation: </span>
+                {issue.remediation}
               </p>
             </div>
           ))}
           {review.domainFindings.map((domain, i) => (
             <GlassCard key={i} title={domain.domain}>
-              <div className="flex items-center gap-2 mb-2">
-                <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                  domain.status === 'Pass'    ? 'bg-score-good/20 text-score-good' :
-                  domain.status === 'Warning' ? 'bg-sev-warning/20 text-sev-warning' :
-                                                'bg-sev-error/20 text-sev-error'
-                }`}>{domain.status}</span>
+              <div className="mb-2 flex items-center gap-2">
+                <span
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                    domain.status === 'Pass'
+                      ? 'bg-score-good/20 text-score-good'
+                      : domain.status === 'Warning'
+                        ? 'bg-sev-warning/20 text-sev-warning'
+                        : 'bg-sev-error/20 text-sev-error'
+                  }`}
+                >
+                  {domain.status}
+                </span>
               </div>
-              <p className="text-xs text-sf-text-2 leading-relaxed">{domain.analysis}</p>
+              <p className="text-xs leading-relaxed text-sf-text-2">{domain.analysis}</p>
               {domain.risks.length > 0 && (
                 <ul className="mt-2 space-y-1">
                   {domain.risks.map((r, ri) => (
-                    <li key={ri} className="text-xs text-sev-warning flex gap-1.5"><span>⚠</span>{r}</li>
+                    <li key={ri} className="flex gap-1.5 text-xs text-sev-warning">
+                      <span>⚠</span>
+                      {r}
+                    </li>
                   ))}
                 </ul>
               )}
@@ -979,11 +1370,11 @@ export default function CTAReview() {
               <ul className="space-y-2">
                 {review.recommendations.quickWins.map((w, i) => (
                   <li key={i} className="flex items-start gap-2 text-xs">
-                    <span className="text-score-good shrink-0 mt-0.5">✓</span>
+                    <span className="mt-0.5 shrink-0 text-score-good">✓</span>
                     <div>
-                      <span className="text-sf-text font-medium">{w.action}</span>
-                      <span className="text-sf-muted ml-2">· {w.effort} effort</span>
-                      {w.impact && <p className="text-sf-muted mt-0.5">{w.impact}</p>}
+                      <span className="font-medium text-sf-text">{w.action}</span>
+                      <span className="ml-2 text-sf-muted">· {w.effort} effort</span>
+                      {w.impact && <p className="mt-0.5 text-sf-muted">{w.impact}</p>}
                     </div>
                   </li>
                 ))}
@@ -995,11 +1386,11 @@ export default function CTAReview() {
               <ul className="space-y-2">
                 {review.recommendations.strategic.map((s, i) => (
                   <li key={i} className="flex items-start gap-2 text-xs">
-                    <span className="text-sf-accent shrink-0 mt-0.5">→</span>
+                    <span className="mt-0.5 shrink-0 text-sf-accent">→</span>
                     <div>
-                      <span className="text-sf-text font-medium">{s.action}</span>
-                      <span className="text-sf-muted ml-2">· {s.timeline}</span>
-                      {s.impact && <p className="text-sf-muted mt-0.5">{s.impact}</p>}
+                      <span className="font-medium text-sf-text">{s.action}</span>
+                      <span className="ml-2 text-sf-muted">· {s.timeline}</span>
+                      {s.impact && <p className="mt-0.5 text-sf-muted">{s.impact}</p>}
                     </div>
                   </li>
                 ))}
@@ -1010,20 +1401,28 @@ export default function CTAReview() {
             <GlassCard title="AI Insights">
               {review.aiInsights.hiddenRisks.length > 0 && (
                 <div className="mb-3">
-                  <p className="text-[10px] text-sf-muted uppercase tracking-wider mb-1">Hidden Risks</p>
+                  <p className="mb-1 text-[10px] tracking-wider text-sf-muted uppercase">
+                    Hidden Risks
+                  </p>
                   <ul className="space-y-1">
                     {review.aiInsights.hiddenRisks.map((r, i) => (
-                      <li key={i} className="text-xs text-sf-text-2">• {r}</li>
+                      <li key={i} className="text-xs text-sf-text-2">
+                        • {r}
+                      </li>
                     ))}
                   </ul>
                 </div>
               )}
               {review.aiInsights.predictions.length > 0 && (
                 <div>
-                  <p className="text-[10px] text-sf-muted uppercase tracking-wider mb-1">Predictions</p>
+                  <p className="mb-1 text-[10px] tracking-wider text-sf-muted uppercase">
+                    Predictions
+                  </p>
                   <ul className="space-y-1">
                     {review.aiInsights.predictions.map((p, i) => (
-                      <li key={i} className="text-xs text-sf-text-2">• {p}</li>
+                      <li key={i} className="text-xs text-sf-text-2">
+                        • {p}
+                      </li>
                     ))}
                   </ul>
                 </div>
@@ -1037,24 +1436,34 @@ export default function CTAReview() {
       {subTab === 'Verdict' && (
         <div className="space-y-4">
           <GlassCard title="Final Recommendation">
-            <div className={`inline-flex items-center gap-2 px-4 py-2 rounded-full border text-sm font-bold mb-4 ${verdictClass}`}>
+            <div
+              className={`mb-4 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-bold ${verdictClass}`}
+            >
               {review.verdict}
             </div>
             {review.finalRecommendation && (
               <>
-                <p className="text-xs text-sf-text-2 leading-relaxed">{review.finalRecommendation.summary}</p>
+                <p className="text-xs leading-relaxed text-sf-text-2">
+                  {review.finalRecommendation.summary}
+                </p>
                 {review.finalRecommendation.nextSteps.length > 0 && (
                   <div className="mt-3">
-                    <p className="text-[10px] text-sf-muted uppercase tracking-wider mb-1">Next Steps</p>
+                    <p className="mb-1 text-[10px] tracking-wider text-sf-muted uppercase">
+                      Next Steps
+                    </p>
                     <ul className="space-y-1">
                       {review.finalRecommendation.nextSteps.map((s, i) => (
-                        <li key={i} className="text-xs text-sf-text-2">• {s}</li>
+                        <li key={i} className="text-xs text-sf-text-2">
+                          • {s}
+                        </li>
                       ))}
                     </ul>
                   </div>
                 )}
                 {review.finalRecommendation.proposedTimeline && (
-                  <p className="text-xs text-sf-muted mt-2">Timeline: {review.finalRecommendation.proposedTimeline}</p>
+                  <p className="mt-2 text-xs text-sf-muted">
+                    Timeline: {review.finalRecommendation.proposedTimeline}
+                  </p>
                 )}
               </>
             )}
@@ -1062,12 +1471,22 @@ export default function CTAReview() {
           {review.costOfInaction && (
             <GlassCard title="Cost of Inaction">
               <div className="space-y-2 text-xs">
-                <p><span className="text-sf-muted">Financial: </span><span className="text-sf-text-2">{review.costOfInaction.financialImpact}</span></p>
-                <p><span className="text-sf-muted">Technical Debt Growth: </span><span className="text-sf-text-2">{review.costOfInaction.technicalDebtGrowth}</span></p>
+                <p>
+                  <span className="text-sf-muted">Financial: </span>
+                  <span className="text-sf-text-2">{review.costOfInaction.financialImpact}</span>
+                </p>
+                <p>
+                  <span className="text-sf-muted">Technical Debt Growth: </span>
+                  <span className="text-sf-text-2">
+                    {review.costOfInaction.technicalDebtGrowth}
+                  </span>
+                </p>
                 {review.costOfInaction.risks.length > 0 && (
                   <ul className="mt-1 space-y-1">
                     {review.costOfInaction.risks.map((r, i) => (
-                      <li key={i} className="text-sev-warning">• {r}</li>
+                      <li key={i} className="text-sev-warning">
+                        • {r}
+                      </li>
                     ))}
                   </ul>
                 )}

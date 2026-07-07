@@ -14,6 +14,7 @@ type InboundMessage =
   | { type: 'orgHistory'; data: Record<string, ScanHistoryEntry[]> }
   | { type: 'availableModels'; data: AIModel[] }
   | { type: 'claudeAuthStatus'; authorized: boolean; count?: number; error?: string }
+  | { type: 'copilotStatus'; available: boolean; count: number }
   | { type: 'analysisProgress'; step: number; label: string; meta?: Record<string, unknown> }
   | { type: 'loading'; data: boolean; step?: number }
   | { type: 'aiExplanationLoading'; data: boolean }
@@ -34,9 +35,10 @@ export function useExtensionMessages() {
   const setProgress    = useOrgStore((s) => s.setProgress);
   const setOrgHistory  = useOrgStore((s) => s.setOrgHistory);
 
-  const setModels         = useAIStore((s) => s.setModels);
-  const setClaudeAuth     = useAIStore((s) => s.setClaudeAuth);
-  const setAIExplanation  = useAIStore((s) => s.setAIExplanation);
+  const setModels          = useAIStore((s) => s.setModels);
+  const setClaudeAuth      = useAIStore((s) => s.setClaudeAuth);
+  const setCopilotStatus   = useAIStore((s) => s.setCopilotStatus);
+  const setAIExplanation   = useAIStore((s) => s.setAIExplanation);
   const setArchitectAnswer = useAIStore((s) => s.setArchitectAnswer);
 
   const setCTALoading = useCTAStore((s) => s.setCTALoading);
@@ -69,6 +71,10 @@ export function useExtensionMessages() {
 
         case 'claudeAuthStatus':
           setClaudeAuth(msg.authorized, msg.count, msg.error);
+          break;
+
+        case 'copilotStatus':
+          setCopilotStatus(msg.available, msg.count);
           break;
 
         case 'analysisProgress': {

@@ -46,7 +46,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'ADMINISTRATION',
     items: [
       { id: 'reports',  label: 'Reports',  icon: '📄', path: '/reports',  disabled: true },
-      { id: 'settings', label: 'Settings', icon: '⚙️', path: '/settings', disabled: true },
+      { id: 'settings', label: 'Settings', icon: '⚙️', path: '/settings' },
     ],
   },
 ];

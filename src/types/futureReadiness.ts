@@ -192,12 +192,48 @@ export interface CertificateDetail {
   daysUntilExpiry?: number;
 }
 
+/** Data Cloud identity-graph object counts (Data API, single composite/batch round-trip). */
+export interface DataCloudIdentityCounts {
+  individualCount: number;
+  contactPointEmailCount: number;
+  contactPointPhoneCount: number;
+  contactPointAddressCount: number;
+  contactTotalCount: number;
+  contactWithEmailCount: number;
+}
+
 export interface PlatformFeatureFlags {
   dataCloudEnabled: boolean;
   einsteinFeatures: string[];
   agentforceLicensed: boolean;
   enhancedDomainEnabled?: boolean;
+  /** True when org-wide MFA enforcement is active (Organization.IsMfaRequired). */
+  mfaRequired?: boolean;
+  /** True when the Einstein Trust Layer feature license is active. */
+  trustLayerEnabled?: boolean;
   edition: string;
+}
+
+/** A profile that carries at least one Login IP Range restriction. */
+export interface ProfileIpRangeInfo {
+  profileId: string;
+  rangeCount: number;
+}
+
+/** Summary of a Connected App: name + whether its StartUrl uses a hardcoded instance URL. */
+export interface ConnectedAppInfo {
+  name: string;
+  hasHardcodedInstanceUrl: boolean;  /**
+   * IpRelaxation setting: 'Relaxed' | 'WhitelistedIp' | 'NetworkBased' | 'ThirdPartyMfa'.
+   * Any value other than 'Relaxed' means the app enforces IP restrictions that must be
+   * updated for Hyperforce IP blocks.
+   */
+  ipRelaxation?: string;}
+
+/** Installed managed / unmanaged package (for Hyperforce compatibility review). */
+export interface InstalledPackageInfo {
+  name: string;
+  namespacePrefix?: string;
 }
 
 /** Bundle of new-collector outputs; every field is optional/best-effort. */
@@ -207,6 +243,46 @@ export interface ReadinessCollectorData {
   remoteSites?: RemoteSiteDetail[];
   certificates?: CertificateDetail[];
   platformFeatures?: PlatformFeatureFlags;
+  /** Profiles with Login IP Ranges — IP blocks change on Hyperforce. */
+  profileIpRanges?: ProfileIpRangeInfo[];
+  /** Connected Apps with URL metadata for Hyperforce callback review. */
+  connectedApps?: ConnectedAppInfo[];
+  /** Installed packages to verify against the Hyperforce-compatible ISV list. */
+  installedPackages?: InstalledPackageInfo[];
+  /** Count of org-level trusted IP ranges (Network Access) — must be updated for Hyperforce IP blocks. */
+  orgNetworkAccessRangeCount?: number;
+  /** Count of Custom Labels whose Value contains a hardcoded Salesforce instance URL. */
+  hardcodedCustomLabelCount?: number;
+  /** Count of live Experience Cloud sites — each site domain must be updated on Hyperforce. */
+  experienceCloudSiteCount?: number;
+  /** Count of org-wide email addresses using Salesforce-hosted domains that change with Enhanced Domains. */
+  orgWideEmailDomainIssueCount?: number;
+  // ── Agentforce-specific collectors ──────────────────────────────────────
+  /** Count of active Prompt Templates (0 = Agentforce has no AI content generation capability). */
+  promptTemplateCount?: number;
+  /** Count of online/published Knowledge articles (used for Agentforce grounding). */
+  knowledgeArticleCount?: number;
+  /** Count of active Autolaunched (invocable) flows — Agentforce can only invoke these. */
+  autolaunchedFlowCount?: number;
+  /** Count of active Apex classes containing @InvocableMethod — usable as Agentforce actions. */
+  invocableApexCount?: number;
+  /** Count of key standard objects (Account, Contact, Case, Opportunity, Lead) with Private OWD. */
+  privateOwdObjectCount?: number;
+  /** Count of custom fields on key objects whose API name suggests PII (SSN, CreditCard, etc.). */
+  piiSensitiveFieldCount?: number;
+  // ── Data Cloud-specific collectors ──────────────────────────────────────
+  /** Individual/ContactPoint/Contact counts for identity-resolution readiness (single composite call). */
+  dataCloudIdentityCounts?: DataCloudIdentityCounts;
+  /** Count of Data Cloud Data Stream definitions (Tooling API) — 0 means no ingestion configured. */
+  dataStreamCount?: number;
+  /** Count of Data Cloud CRM/data connectors (Tooling API) — 0 means no connector to Data Cloud is set up. */
+  dataConnectorCount?: number;
+  /** Count of Calculated Insights defined in Data Cloud (Tooling API). */
+  calculatedInsightCount?: number;
+  /** Count of Data Cloud Segments defined (Tooling API). */
+  dataSegmentCount?: number;
+  /** Count of Data Cloud Data Spaces configured (Tooling API) — multi-tenant/governance partitioning. */
+  dataSpaceCount?: number;
 }
 
 // ============================================================================

@@ -18,7 +18,7 @@ export type OutboundMessage =
   | { command: 'getModels' }
   | { command: 'authorizeClaude' }
   | { command: 'disconnectClaude' }
-  | { command: 'askArchitect'; question: string; model?: string }
+  | { command: 'askArchitect'; data: { question: string } }
   | { command: 'exportCodeQualityCsv'; data: { csv: string; fileName: string } };
 
 // ── VS Code API singleton ─────────────────────────────────────────────────

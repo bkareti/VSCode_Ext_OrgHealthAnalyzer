@@ -10,7 +10,7 @@ import { getIssues, countIssues, outcome, na } from './packHelpers';
  * migration checklist derived from public Salesforce guidance.
  */
 export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
-  // ── Domain Readiness (20) ────────────────────────────────────────────────
+  // ── Domain Readiness (30) ──────────────────────────────────────────
   {
     id: 'my-domain',
     dimension: 'Domain Readiness',
@@ -38,6 +38,37 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
         pf.enhancedDomainEnabled ? 95 : 45,
         [`Enhanced Domains enabled: ${pf.enhancedDomainEnabled ? 'yes' : 'no'}`],
         pf.enhancedDomainEnabled ? undefined : 'Deploy Enhanced Domains to avoid hardcoded-domain breakage on Hyperforce.',
+      );
+    },
+  },
+
+  {
+    id: 'experience-cloud-sites',
+    dimension: 'Domain Readiness',
+    weight: 5,
+    evaluate(input) {
+      const count = input.collectors.experienceCloudSiteCount;
+      if (count === undefined) { return na('Experience Cloud site data was not collected.'); }
+      const score = count === 0 ? 95 : count <= 2 ? 75 : 60;
+      return outcome(
+        score,
+        [`${count} live Experience Cloud site(s) requiring domain review`],
+        count > 0 ? 'Review Experience Cloud site domains and CDN configuration — Hyperforce changes the base domain structure.' : undefined,
+      );
+    },
+  },
+  {
+    id: 'org-wide-email-domains',
+    dimension: 'Domain Readiness',
+    weight: 5,
+    evaluate(input) {
+      const count = input.collectors.orgWideEmailDomainIssueCount;
+      if (count === undefined) { return na('Org-wide email address data was not collected.'); }
+      const score = count === 0 ? 95 : count <= 2 ? 70 : 50;
+      return outcome(
+        score,
+        [`${count} org-wide email address(es) using Salesforce-hosted domains`],
+        count > 0 ? 'Update org-wide email sender addresses that use Salesforce-hosted domains — these change with Enhanced Domains on Hyperforce.' : undefined,
       );
     },
   },
@@ -78,7 +109,7 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     },
   },
 
-  // ── Integration Hardening (20) ───────────────────────────────────────────
+  // ── Integration Hardening (25) ───────────────────────────────────────────
   {
     id: 'named-credentials',
     dimension: 'Integration Hardening',
@@ -111,14 +142,37 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     },
   },
 
-  // ── Authentication & Access (15) ─────────────────────────────────────────
+  {
+    id: 'hardcoded-custom-labels',
+    dimension: 'Integration Hardening',
+    weight: 5,
+    evaluate(input) {
+      const count = input.collectors.hardcodedCustomLabelCount;
+      if (count === undefined) { return na('Custom Label data was not collected.'); }
+      const score = count === 0 ? 95 : count <= 3 ? 65 : 35;
+      return outcome(
+        score,
+        [`${count} Custom Label(s) with hardcoded Salesforce instance URLs`],
+        count > 0 ? 'Update Custom Labels containing hardcoded instance URLs — use relative paths or My Domain references after migration.' : undefined,
+      );
+    },
+  },
+
+  // ── Authentication & Access (25) ─────────────────────────────────────────
   {
     id: 'mfa-posture',
     dimension: 'Authentication & Access',
     weight: 8,
-    evaluate() {
-      // MFA enforcement is not reliably exposed via metadata; flag for manual verification.
-      return na('MFA enforcement is not exposed via metadata — verify Session Settings and identity policies manually before migration.');
+    evaluate(input) {
+      const pf = input.collectors.platformFeatures;
+      if (!pf || pf.mfaRequired === undefined) {
+        return na('MFA enforcement status unavailable — verify Session Settings and identity policies manually before migration.');
+      }
+      return outcome(
+        pf.mfaRequired ? 95 : 45,
+        [`MFA enforcement: ${pf.mfaRequired ? 'enforced org-wide' : 'NOT enforced'}`],
+        pf.mfaRequired ? undefined : 'Enable org-wide MFA enforcement in Session Settings — a standard Hyperforce security checkpoint.',
+      );
     },
   },
   {
@@ -137,8 +191,39 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
       );
     },
   },
+  {
+    id: 'profile-ip-ranges',
+    dimension: 'Authentication & Access',
+    weight: 5,
+    evaluate(input) {
+      const ranges = input.collectors.profileIpRanges;
+      if (!ranges) { return na('Profile IP range data was not collected.'); }
+      const count = ranges.length;
+      const score = count === 0 ? 95 : count <= 3 ? 70 : 50;
+      return outcome(
+        score,
+        [`${count} profile(s) with Login IP Restrictions`],
+        count > 0 ? 'Update Login IP Ranges on restricted profiles — Hyperforce uses different IP blocks than classic instances.' : undefined,
+      );
+    },
+  },
+  {
+    id: 'network-access-ranges',
+    dimension: 'Authentication & Access',
+    weight: 5,
+    evaluate(input) {
+      const count = input.collectors.orgNetworkAccessRangeCount;
+      if (count === undefined) { return na('Org-level Network Access data was not collected.'); }
+      const score = count === 0 ? 95 : count <= 5 ? 70 : 50;
+      return outcome(
+        score,
+        [`${count} org-level trusted IP range(s) in Network Access`],
+        count > 0 ? 'Update org-level trusted IP ranges (Setup → Network Access) — Hyperforce uses different IP blocks than classic instances.' : undefined,
+      );
+    },
+  },
 
-  // ── Legacy & Compatibility (20) ──────────────────────────────────────────
+  // ── Legacy & Compatibility (35) ──────────────────────────────────────────
   {
     id: 'deprecated-api',
     dimension: 'Legacy & Compatibility',
@@ -158,14 +243,59 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     dimension: 'Legacy & Compatibility',
     weight: 10,
     evaluate(input) {
-      const integrations = input.result.orgInfoData?.integrations;
-      if (!integrations) { return na('Integration metadata unavailable.'); }
-      const apps = integrations.connectedApps ?? 0;
-      const score = apps === 0 ? 90 : apps <= 10 ? 80 : 65;
+      const apps = input.collectors.connectedApps;
+      const count = input.result.orgInfoData?.integrations?.connectedApps ?? apps?.length ?? 0;
+      if (!apps && count === 0) { return na('Connected app details were not collected.'); }
+      const hardcoded = apps?.filter((a) => a.hasHardcodedInstanceUrl).length ?? 0;
+      const ipRestricted = apps?.filter((a) => a.ipRelaxation && a.ipRelaxation !== 'Relaxed').length ?? 0;
+      const issues = hardcoded + ipRestricted;
+      const parts = [
+        hardcoded > 0 ? `${hardcoded} with hardcoded instance URL(s)` : '',
+        ipRestricted > 0 ? `${ipRestricted} with IP restrictions to update` : '',
+      ].filter(Boolean).join('; ');
+      const score = issues === 0
+        ? (count === 0 ? 95 : 85)
+        : issues <= 2 ? 60 : 35;
       return outcome(
         score,
-        [`${apps} connected apps to review for OAuth callback URLs and IP ranges`],
-        apps > 0 ? 'Audit connected app callback URLs and IP allowlists for Hyperforce endpoints.' : undefined,
+        [`${count} connected app(s)${parts ? `; ${parts}` : ''}`],
+        issues > 0
+          ? 'Update callback URLs and IP allowlists on flagged connected apps — Hyperforce instance URLs and IP blocks differ from classic.'
+          : count > 0 ? 'Audit connected app OAuth callback URLs and IP allowlists for Hyperforce endpoints.' : undefined,
+      );
+    },
+  },
+  {
+    id: 'installed-packages',
+    dimension: 'Legacy & Compatibility',
+    weight: 8,
+    evaluate(input) {
+      const pkgs = input.collectors.installedPackages;
+      if (!pkgs) { return na('Installed package data was not collected.'); }
+      const count = pkgs.length;
+      const score = count === 0 ? 95 : count <= 5 ? 85 : count <= 15 ? 72 : 55;
+      return outcome(
+        score,
+        [`${count} installed package(s) to verify against Hyperforce compatibility list`],
+        count > 0 ? `Review all ${count} package(s) against the Salesforce Hyperforce-compatible ISV list before scheduling migration.` : undefined,
+      );
+    },
+  },
+  {
+    id: 'legacy-automation-hyperforce',
+    dimension: 'Legacy & Compatibility',
+    weight: 7,
+    evaluate(input) {
+      const auto = input.result.automationSummary;
+      if (!auto) { return na('Automation summary unavailable.'); }
+      const workflows = auto.totalWorkflowRules ?? 0;
+      const processBuilders = auto.totalProcessBuilders ?? 0;
+      const legacy = workflows + processBuilders;
+      const score = legacy === 0 ? 100 : legacy <= 5 ? 78 : legacy <= 15 ? 58 : 35;
+      return outcome(
+        score,
+        [`${workflows} Workflow Rule(s) and ${processBuilders} Process Builder(s) still active`],
+        legacy > 0 ? 'Migrate Workflow Rules and Process Builders to Flow — Salesforce recommends retiring them before Hyperforce migration.' : undefined,
       );
     },
   },

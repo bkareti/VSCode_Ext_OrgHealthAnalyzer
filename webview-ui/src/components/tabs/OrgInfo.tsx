@@ -32,23 +32,67 @@ function fmt(n: number | null | undefined): string {
   return Number(n).toLocaleString();
 }
 
+// ─── Pagination ────────────────────────────────────────────────────────────────
+// Generic client-side pager for any list-backed table on this tab. Keeps large
+// inventories (packages, apps, license types) scannable instead of dumping
+// every row onto the screen at once.
+const PAGE_SIZE = 8;
+
+function usePagination<T>(items: T[], pageSize: number = PAGE_SIZE) {
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const clampedPage = Math.min(page, totalPages);
+  const start = (clampedPage - 1) * pageSize;
+  const pageItems = items.slice(start, start + pageSize);
+  return {
+    pageItems,
+    page: clampedPage,
+    totalPages,
+    setPage,
+    total: items.length,
+    from: items.length ? start + 1 : 0,
+    to: Math.min(start + pageSize, items.length),
+  };
+}
+
+interface PagerProps {
+  page: number; totalPages: number; from: number; to: number; total: number;
+  setPage: (p: number) => void;
+}
+function Pager({ page, totalPages, from, to, total, setPage }: PagerProps) {
+  if (totalPages <= 1) return null;
+  return (
+    <div className="flex items-center justify-between mt-3 pt-3 border-t border-sf-border/50">
+      <span className="text-[11px] text-sf-muted">Showing {from}–{to} of {total}</span>
+      <div className="flex items-center gap-2">
+        <button type="button" disabled={page <= 1} onClick={() => setPage(page - 1)}
+          className="text-[11px] font-semibold px-2.5 py-1 rounded-md border border-sf-border text-sf-text hover:bg-sf-bg-3 disabled:opacity-30 disabled:cursor-default disabled:hover:bg-transparent transition-colors">
+          ← Prev
+        </button>
+        <span className="text-[11px] text-sf-muted tabular-nums">Page {page} of {totalPages}</span>
+        <button type="button" disabled={page >= totalPages} onClick={() => setPage(page + 1)}
+          className="text-[11px] font-semibold px-2.5 py-1 rounded-md border border-sf-border text-sf-text hover:bg-sf-bg-3 disabled:opacity-30 disabled:cursor-default disabled:hover:bg-transparent transition-colors">
+          Next →
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Local sub-components ──────────────────────────────────────────────────────
 interface KpiCardProps {
-  icon: string; iconBg: string; value: string | number;
+  iconBg: string; value: string | number;
   label: string; sub?: string | null;
 }
-function KpiCard({ icon, iconBg, value, label, sub }: KpiCardProps) {
+function KpiCard({ iconBg, value, label, sub }: KpiCardProps) {
   return (
-    <div className="flex flex-col items-center text-center p-3 rounded-lg border border-sf-border bg-sf-bg-2 gap-1 min-w-0">
-      <div className="w-8 h-8 rounded-lg flex items-center justify-center text-base mb-1 shrink-0"
-        style={{ background: iconBg }}>
-        {icon}
-      </div>
-      <span className="text-base font-bold text-sf-text tabular-nums leading-tight truncate w-full">
+    <div className="relative overflow-hidden flex flex-col gap-1.5 p-3.5 rounded-xl border border-sf-border bg-white/[0.03] min-w-0">
+      <span className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: iconBg.replace(',.15)', ',1)') }} />
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-sf-muted">{label}</span>
+      <span className="text-[22px] font-bold text-sf-text tabular-nums leading-tight truncate w-full">
         {typeof value === 'number' ? value.toLocaleString() : value}
       </span>
-      {sub && <span className="text-[10px] text-sf-muted leading-tight">{sub}</span>}
-      <span className="text-[10px] text-sf-muted/70 uppercase tracking-wide leading-tight">{label}</span>
+      {sub && <span className="text-[11px] text-sf-muted leading-tight">{sub}</span>}
     </div>
   );
 }
@@ -143,7 +187,6 @@ export default function OrgInfo() {
   const nextRelease  = od?.nextReleaseName ?? (isDemo ? "Summer '26" : null);
   const instanceUrl  = od?.instanceUrl  ?? (isDemo ? 'https://login.salesforce.com' : null);
   const isHyperforce = ext.isHyperforce ?? (isDemo ? true : false);
-  const isSandbox    = ext.isSandbox    ?? false;
   const dataCenter   = ext.dataCenter   ?? (isDemo ? 'Hyperforce NA' : null);
   const buildVersion = ext.buildVersion ?? (isDemo ? '246.8' : null);
   const timezone     = ext.timezone     ?? (isDemo ? '(GMT-07:00) Pacific Time (US & Canada)' : null);
@@ -182,7 +225,6 @@ export default function OrgInfo() {
   const editionSub   = orgTypeWords.length > 1 ? orgTypeWords.slice(1).join(' ') : null;
   const region       = instanceRegion(instanceName);
   const instanceSub  = region ? `${region}${isDemo ? ' ◎' : ''}` : null;
-  const orgTypeSub   = isHyperforce ? 'Hyperforce' : (isSandbox ? 'Sandbox' : null);
 
   const cloudsEnabled  = clouds.filter(c => c.enabled).length;
   const cloudsDisabled = clouds.length - cloudsEnabled;
@@ -220,6 +262,12 @@ export default function OrgInfo() {
     { icon: '📥', label: 'Queues',            value: qf.queues           },
   ] : [];
 
+  // ── Paginated tables ─────────────────────────────────────────────────────────
+  const licPager  = usePagination(licenses);
+  const featPager = usePagination(featLics);
+  const pkgPager  = usePagination(pkgList);
+  const appPager  = usePagination(appList);
+
   // ─────────────────────────────────────────────────────────────────────────────
   return (
     <div className="p-6 space-y-4">
@@ -232,6 +280,33 @@ export default function OrgInfo() {
           <span>Showing demo data — run <strong>Scan Now</strong> to see your org's real information</span>
         </div>
       )}
+
+      {/* Tab header + trust pill */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-[19px] font-bold text-sf-text tracking-tight">Organization</h1>
+          <p className="text-xs text-sf-muted mt-0.5">Identity, licenses, clouds, packages and integrations for this org.</p>
+        </div>
+        {trustStatus && (
+          <div className="flex items-center gap-2">
+            <span
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border"
+              style={
+                trustStatus === 'OK'
+                  ? { background: 'rgba(34,197,94,.1)', borderColor: 'rgba(34,197,94,.3)', color: '#22c55e' }
+                  : { background: 'rgba(245,158,11,.1)', borderColor: 'rgba(245,158,11,.3)', color: '#f59e0b' }
+              }
+            >
+              {trustStatus === 'OK' ? '●' : '⚠'} Salesforce Trust: {trustStatus}
+            </span>
+            {(od?.trustIncidents?.length ?? 0) > 0 && (
+              <span className="text-[11px] text-sev-warning">
+                {od!.trustIncidents.length} active incident{od!.trustIncidents.length === 1 ? '' : 's'} on {instanceName}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Sub-tab nav */}
       <div className="flex gap-0 border-b border-sf-border overflow-x-auto scrollbar-none shrink-0">
@@ -251,43 +326,23 @@ export default function OrgInfo() {
       {subTab === 'Overview' && (
         <div className="space-y-4">
 
-          {/* Trust status pill (from Salesforce Trust API — real data only) */}
-          {trustStatus && (
-            <div className="flex items-center gap-2">
-              <span
-                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border"
-                style={
-                  trustStatus === 'OK'
-                    ? { background: 'rgba(34,197,94,.1)', borderColor: 'rgba(34,197,94,.3)', color: '#22c55e' }
-                    : { background: 'rgba(245,158,11,.1)', borderColor: 'rgba(245,158,11,.3)', color: '#f59e0b' }
-                }
-              >
-                {trustStatus === 'OK' ? '●' : '⚠'} Salesforce Trust: {trustStatus}
-              </span>
-              {(od?.trustIncidents?.length ?? 0) > 0 && (
-                <span className="text-[11px] text-sev-warning">
-                  {od!.trustIncidents.length} active incident{od!.trustIncidents.length === 1 ? '' : 's'} on {instanceName}
-                </span>
-              )}
-            </div>
-          )}
-
-          {/* KPI Strip — 6 cards (packages/integrations live in their cards below) */}
-          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-            <KpiCard icon="👑" iconBg="rgba(245,158,11,.15)" value={editionMain}
+          {/* KPI Strip — 6 cards */}
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
+            <KpiCard iconBg="rgba(245,158,11,.15)" value={editionMain}
               label="Edition" sub={editionSub} />
-            <KpiCard icon="🌐" iconBg="rgba(1,118,211,.15)" value={instanceName || '—'}
+            <KpiCard iconBg="rgba(59,130,246,.15)" value={instanceName || '—'}
               label="Instance" sub={instanceSub} />
-            <KpiCard icon="☁️" iconBg="rgba(20,184,166,.15)" value={isSandbox ? 'Sandbox' : 'Production'}
-              label="Org Type" sub={orgTypeSub} />
-            <KpiCard icon="📡" iconBg="rgba(139,92,246,.15)" value={apiVersion || '—'}
+            <KpiCard iconBg="rgba(139,92,246,.15)" value={apiVersion || '—'}
               label="API Version" sub={nextRelease} />
-            <KpiCard icon="👤" iconBg="rgba(34,197,94,.15)"
+            <KpiCard iconBg="rgba(34,197,94,.15)"
               value={qf ? fmt(qf.users) : (results?.orgInfoData?.activeUsers ? fmt(results.orgInfoData.activeUsers) : (isDemo ? '4,250' : '—'))}
-              label="Users" sub="Active Users" />
-            <KpiCard icon="🪪" iconBg="rgba(59,130,246,.15)"
+              label="Active Users" sub="of assigned seats" />
+            <KpiCard iconBg="rgba(20,184,166,.15)"
               value={usedLic ? usedLic.toLocaleString() : '—'}
-              label="Active Licenses" sub={totalLic ? `of ${totalLic.toLocaleString()}` : null} />
+              label="Licenses Used" sub={totalLic ? `of ${totalLic.toLocaleString()} · ${licUtilPct}%` : null} />
+            <KpiCard iconBg="rgba(236,72,153,.15)"
+              value={storageLabel ? `${(storageUsedMB / 1024).toFixed(1)} GB` : '—'}
+              label="Data Storage" sub={storageLimitMB ? `of ${Math.round(storageLimitMB / 1024)} TB · ${storagePct}%` : null} />
           </div>
 
           {/* Row 1: Org Details | Clouds Overview | License Summary */}
@@ -403,7 +458,7 @@ export default function OrgInfo() {
                   </tr>
                 </thead>
                 <tbody>
-                  {licenses.slice(0, 8).map((l, i) => {
+                  {licenses.slice(0, 6).map((l, i) => {
                     const pct = l.totalLicenses > 0 ? Math.round(l.usedLicenses / l.totalLicenses * 100) : 0;
                     const barClr = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#22c55e';
                     return (
@@ -505,10 +560,10 @@ export default function OrgInfo() {
             </GlassCard>
           </div>
 
-          {/* Quick Facts horizontal strip */}
+          {/* Build Inventory horizontal strip */}
           {qfItems.length > 0 && (
             <GlassCard>
-              <h3 className="text-xs font-semibold text-sf-text mb-3">📌 Quick Facts</h3>
+              <h3 className="text-xs font-semibold text-sf-text mb-3">🏗 Build Inventory</h3>
               <div className="flex overflow-x-auto scrollbar-none">
                 {qfItems.map((f, i) => (
                   <div key={f.label} className="flex items-center">
@@ -574,7 +629,7 @@ export default function OrgInfo() {
                   </tr>
                 </thead>
                 <tbody>
-                  {licenses.map((l, i) => {
+                  {licPager.pageItems.map((l, i) => {
                     const pct = l.totalLicenses > 0 ? Math.round(l.usedLicenses / l.totalLicenses * 100) : 0;
                     const clr = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#22c55e';
                     return (
@@ -597,6 +652,7 @@ export default function OrgInfo() {
                 </tbody>
               </table>
             </div>
+            <Pager {...licPager} />
           </GlassCard>
 
           {/* Feature licenses (merged from former "Feature Usage" sub-tab) */}
@@ -612,7 +668,7 @@ export default function OrgInfo() {
                     </tr>
                   </thead>
                   <tbody>
-                    {featLics.map((fl, i) => {
+                    {featPager.pageItems.map((fl, i) => {
                       const fPct = fl.totalLicenses > 0 ? Math.round(fl.usedLicenses / fl.totalLicenses * 100) : 0;
                       const fClr = fPct > 90 ? '#ef4444' : fPct > 70 ? '#f59e0b' : '#22c55e';
                       return (
@@ -644,6 +700,7 @@ export default function OrgInfo() {
                   </tbody>
                 </table>
               </div>
+              <Pager {...featPager} />
             </GlassCard>
           )}
         </div>
@@ -658,37 +715,40 @@ export default function OrgInfo() {
             </div>
           )}
           {pkgList.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-xs">
-                <thead>
-                  <tr className="border-b border-sf-border">
-                    {['Name', 'Namespace', 'Version', 'Type'].map(h => (
-                      <th key={h} className="text-left py-2 px-2 text-sf-muted font-medium">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {pkgList.map((p, i) => {
-                    const name = p.SubscriberPackage?.Name ?? p.SubscriberPackageVersion?.Name ?? '—';
-                    const ns   = p.SubscriberPackage?.NamespacePrefix ?? '—';
-                    const ver  = p.SubscriberPackageVersion
-                      ? `v${p.SubscriberPackageVersion.MajorVersion}.${p.SubscriberPackageVersion.MinorVersion}.${p.SubscriberPackageVersion.PatchVersion}`
-                      : '—';
-                    const hasNs = ns && ns !== '—';
-                    const typeColor = hasNs ? '#3b82f6' : '#f59e0b';
-                    const typeLabel = hasNs ? 'Managed' : 'Unlocked';
-                    return (
-                      <tr key={p.Id ?? i} className={`border-b border-sf-border/40 ${i % 2 ? 'bg-sf-bg-3/30' : ''}`}>
-                        <td className="py-1.5 px-2 text-sf-text">{name}</td>
-                        <td className="py-1.5 px-2 text-sf-muted font-mono">{ns}</td>
-                        <td className="py-1.5 px-2 text-sf-muted">{ver}</td>
-                        <td className="py-1.5 px-2 font-semibold" style={{ color: typeColor }}>{typeLabel}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-sf-border">
+                      {['Name', 'Namespace', 'Version', 'Type'].map(h => (
+                        <th key={h} className="text-left py-2 px-2 text-sf-muted font-medium">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pkgPager.pageItems.map((p, i) => {
+                      const name = p.SubscriberPackage?.Name ?? p.SubscriberPackageVersion?.Name ?? '—';
+                      const ns   = p.SubscriberPackage?.NamespacePrefix ?? '—';
+                      const ver  = p.SubscriberPackageVersion
+                        ? `v${p.SubscriberPackageVersion.MajorVersion}.${p.SubscriberPackageVersion.MinorVersion}.${p.SubscriberPackageVersion.PatchVersion}`
+                        : '—';
+                      const hasNs = ns && ns !== '—';
+                      const typeColor = hasNs ? '#3b82f6' : '#f59e0b';
+                      const typeLabel = hasNs ? 'Managed' : 'Unlocked';
+                      return (
+                        <tr key={p.Id ?? i} className={`border-b border-sf-border/40 ${i % 2 ? 'bg-sf-bg-3/30' : ''}`}>
+                          <td className="py-1.5 px-2 text-sf-text">{name}</td>
+                          <td className="py-1.5 px-2 text-sf-muted font-mono">{ns}</td>
+                          <td className="py-1.5 px-2 text-sf-muted">{ver}</td>
+                          <td className="py-1.5 px-2 font-semibold" style={{ color: typeColor }}>{typeLabel}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <Pager {...pkgPager} />
+            </>
           ) : (
             <p className="text-xs text-sf-muted text-center py-8">
               {isDemo ? 'Run analysis to see installed packages.' : 'No installed packages found.'}
@@ -717,7 +777,7 @@ export default function OrgInfo() {
                     </tr>
                   </thead>
                   <tbody>
-                    {appList.map((ap, i) => (
+                    {appPager.pageItems.map((ap, i) => (
                       <tr key={ap.label ?? i} className={`border-b border-sf-border/40 ${i % 2 ? 'bg-sf-bg-3/30' : ''}`}>
                         <td className="py-1.5 px-2 text-sf-text">{ap.label ?? '—'}</td>
                         <td className="py-1.5 px-2 text-sf-muted">{ap.type ?? 'Standard'}</td>
@@ -730,6 +790,7 @@ export default function OrgInfo() {
                   </tbody>
                 </table>
               </div>
+              <Pager {...appPager} />
             </GlassCard>
           )}
         </div>

@@ -114,6 +114,36 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
       );
     },
   },
+  {
+    id: 'owd-accessibility',
+    dimension: 'Security & Sharing',
+    weight: 6,
+    evaluate(input) {
+      const count = input.collectors.privateOwdObjectCount;
+      if (count === undefined) { return na('Org-Wide Default sharing data was not collected.'); }
+      const score = count === 0 ? 100 : count <= 1 ? 65 : count <= 3 ? 40 : 20;
+      return outcome(
+        score,
+        [`${count} of 5 core standard objects (Account, Contact, Case, Opportunity, Lead) have Private OWD`],
+        count > 0 ? 'Objects with Private OWD block the Agentforce service user from grounding — add explicit sharing rules or adjust OWD for AI-accessible objects.' : undefined,
+      );
+    },
+  },
+  {
+    id: 'pii-field-risk',
+    dimension: 'Security & Sharing',
+    weight: 4,
+    evaluate(input) {
+      const count = input.collectors.piiSensitiveFieldCount;
+      if (count === undefined) { return na('PII field detection data was not collected.'); }
+      const score = count === 0 ? 100 : count <= 3 ? 70 : count <= 8 ? 45 : 25;
+      return outcome(
+        score,
+        [`${count} custom field(s) with PII-indicative API names (SSN, CreditCard, DOB, etc.)`],
+        count > 0 ? 'Configure Einstein Trust Layer data masking for PII fields before grounding prompts — prevents sensitive data leakage to AI models.' : undefined,
+      );
+    },
+  },
 
   // ── Flow & API Readiness (15) ────────────────────────────────────────────
   {
@@ -141,8 +171,38 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
       const score = flows >= 10 ? 95 : flows >= 3 ? 80 : flows > 0 ? 65 : 50;
       return outcome(
         score,
-        [`${flows} active flows`],
+        [`${flows} active flows (all types)`],
         flows < 3 ? 'Adopt Flow for declarative automation that Agentforce actions can safely invoke.' : undefined,
+      );
+    },
+  },
+  {
+    id: 'invocable-flows',
+    dimension: 'Flow & API Readiness',
+    weight: 7,
+    evaluate(input) {
+      const count = input.collectors.autolaunchedFlowCount;
+      if (count === undefined) { return na('Autolaunched flow count was not collected.'); }
+      const score = count >= 5 ? 95 : count >= 2 ? 80 : count === 1 ? 65 : 40;
+      return outcome(
+        score,
+        [`${count} active Autolaunched (Agentforce-invocable) flow(s)`],
+        count === 0 ? 'Create Autolaunched flows with outputs — Agentforce can only invoke Autolaunched flows, not Screen flows.' : undefined,
+      );
+    },
+  },
+  {
+    id: 'invocable-apex',
+    dimension: 'Flow & API Readiness',
+    weight: 5,
+    evaluate(input) {
+      const count = input.collectors.invocableApexCount;
+      if (count === undefined) { return na('Invocable Apex count was not collected.'); }
+      const score = count >= 5 ? 95 : count >= 1 ? 80 : 55;
+      return outcome(
+        score,
+        [`${count} active Apex class(es) exposing @InvocableMethod`],
+        count === 0 ? 'Add @InvocableMethod to Apex classes that Agentforce actions should be able to call.' : undefined,
       );
     },
   },
@@ -166,6 +226,68 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
         !pf.agentforceLicensed && einstein.length === 0
           ? 'Enable Einstein / Agentforce features and provision the required licenses to begin AI adoption.'
           : undefined,
+      );
+    },
+  },
+  {
+    id: 'data-cloud-connection',
+    dimension: 'AI Feature Enablement',
+    weight: 5,
+    evaluate(input) {
+      const pf = input.collectors.platformFeatures;
+      if (!pf) { return na('Platform feature detection unavailable.'); }
+      const score = pf.dataCloudEnabled ? 95 : 50;
+      return outcome(
+        score,
+        [`Data Cloud enabled: ${pf.dataCloudEnabled ? 'yes' : 'no'}`],
+        !pf.dataCloudEnabled ? 'Connect Data Cloud to unlock production-grade Agentforce grounding and a unified customer data layer for AI actions.' : undefined,
+      );
+    },
+  },
+
+  // ── AI Configuration (20) ──────────────────────────────────────────
+  {
+    id: 'trust-layer',
+    dimension: 'AI Configuration',
+    weight: 8,
+    evaluate(input) {
+      const pf = input.collectors.platformFeatures;
+      if (!pf) { return na('Platform feature detection unavailable.'); }
+      const score = pf.trustLayerEnabled ? 95 : 35;
+      return outcome(
+        score,
+        [`Einstein Trust Layer: ${pf.trustLayerEnabled ? 'enabled' : 'not detected'}`],
+        !pf.trustLayerEnabled ? 'Enable the Einstein Trust Layer — it provides data masking, PII protection, and auditability required for safe AI grounding.' : undefined,
+      );
+    },
+  },
+  {
+    id: 'prompt-templates',
+    dimension: 'AI Configuration',
+    weight: 8,
+    evaluate(input) {
+      const count = input.collectors.promptTemplateCount;
+      if (count === undefined) { return na('Prompt Template data was not collected.'); }
+      const score = count >= 3 ? 95 : count >= 1 ? 75 : 30;
+      return outcome(
+        score,
+        [`${count} Prompt Template(s) configured`],
+        count === 0 ? 'Create Prompt Templates in Prompt Builder — Agentforce requires them to generate AI-powered responses and content.' : undefined,
+      );
+    },
+  },
+  {
+    id: 'knowledge-articles',
+    dimension: 'AI Configuration',
+    weight: 4,
+    evaluate(input) {
+      const count = input.collectors.knowledgeArticleCount;
+      if (count === undefined) { return na('Knowledge article data was not collected.'); }
+      const score = count >= 50 ? 95 : count >= 10 ? 80 : count > 0 ? 65 : 45;
+      return outcome(
+        score,
+        [`${count} published Knowledge article(s)`],
+        count === 0 ? 'Publish Knowledge articles — Agentforce copilot actions ground responses from Knowledge to provide accurate, org-specific answers.' : undefined,
       );
     },
   },

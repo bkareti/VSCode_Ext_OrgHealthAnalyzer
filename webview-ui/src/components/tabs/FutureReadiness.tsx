@@ -231,7 +231,17 @@ function TrendChart({ historical, packs }: { historical: ReadinessTrend[]; packs
 
 // ── Analysis Methodology sub-tab ──────────────────────────────────────────────
 
-const METHODOLOGY_PACKS = [
+interface MethodologyPack {
+  packId: string;
+  icon: string;
+  name: string;
+  description: string;
+  dimensions: { name: string; inspects: string; source: string; signal: string }[];
+  /** Readiness criteria that can't be evaluated from any API — documented here only, never scored. */
+  manualNotes?: string[];
+}
+
+const METHODOLOGY_PACKS: MethodologyPack[] = [
   {
     packId: 'ai-agentforce',
     icon: '🤖',
@@ -250,13 +260,19 @@ const METHODOLOGY_PACKS = [
     packId: 'data-cloud',
     icon: '☁️',
     name: 'Data Cloud Readiness',
-    description: 'Assesses data quality, identity resolution, volume readiness, and governance for Salesforce Data Cloud ingestion.',
+    description: 'Assesses identity resolution, data model quality, volume readiness, provisioning, activation, and governance for Salesforce Data Cloud.',
     dimensions: [
-      { name: 'Identity Resolution',   inspects: 'Active duplicate rules and matching rules per object', source: 'DuplicateRule + MatchingRule collectors', signal: 'count' },
-      { name: 'Data Model Quality',    inspects: 'Required field ratio, lookup vs master-detail relationships', source: 'dataModelStats', signal: 'ratio' },
-      { name: 'Data Volume & Scale',   inspects: 'Record counts for LDV-candidate objects', source: 'objectRecordCounts', signal: 'count' },
-      { name: 'Integration & External',inspects: 'Named credentials, connected external data sources', source: 'integrationSummary', signal: 'count' },
-      { name: 'Data Governance',       inspects: 'Consent / privacy objects, sharing model configuration', source: 'dataModelSummary + profileSummary', signal: 'presence' },
+      { name: 'Identity Resolution Readiness', inspects: 'Duplicate/matching rules, Individual & ContactPoint coverage, Contact email completeness', source: 'DuplicateRule + MatchingRule + Individual/ContactPoint/Contact collectors', signal: 'count' },
+      { name: 'Data Model Quality',            inspects: 'Required field ratio, lookup vs master-detail relationships', source: 'dataModelStats', signal: 'ratio' },
+      { name: 'Data Volume & Scale',            inspects: 'Record counts for LDV-candidate objects', source: 'objectRecordCounts', signal: 'count' },
+      { name: 'Integration & External Data',    inspects: 'Named credentials, Salesforce Connect external objects', source: 'integrationSummary + dataModelSummary', signal: 'count' },
+      { name: 'Data Cloud Provisioning',        inspects: 'Data Cloud license, Data Streams configured, CRM/data connectors', source: 'platformFeatures + DataStreamDefinition/DataConnector collectors', signal: 'presence' },
+      { name: 'Activation & Insights',          inspects: 'Calculated Insights and Segments defined', source: 'CalculatedInsight/Segment collectors', signal: 'presence' },
+      { name: 'Data Governance',                inspects: 'Overprivileged profiles, super admins, Data Space configuration', source: 'profileSummary + userSummary + DataSpace collector', signal: 'presence' },
+    ],
+    manualNotes: [
+      'Privacy/consent policy (GDPR/CCPA) — not queryable from metadata; verify manually with your compliance process.',
+      'Activation targets (Marketing Cloud, etc.) — platform-specific; verify manually per downstream activation channel.',
     ],
   },
   {
@@ -285,6 +301,10 @@ const DATA_SOURCES = [
   { src: 'platformFeatures',           desc: 'Feature licenses derived from featureLicenses list' },
   { src: 'DuplicateRule / MatchingRule', desc: 'Active duplicate & matching rules (new lightweight collector)' },
   { src: 'RemoteProxy / Certificate',  desc: 'Remote site http:// endpoints and cert expiry (collector)' },
+  { src: 'Individual / ContactPoint*',       desc: 'Identity-graph object counts for Data Cloud matching (batched composite query)' },
+  { src: 'DataStreamDefinition / DataConnector', desc: 'Data Cloud ingestion configuration (Tooling API existence checks)' },
+  { src: 'CalculatedInsight / Segment',      desc: 'Data Cloud activation & insights configuration (Tooling API existence checks)' },
+  { src: 'DataSpace',                        desc: 'Data Cloud governance/tenant partitioning (Tooling API existence check)' },
 ];
 
 function AnalysisMethodology() {
@@ -373,6 +393,16 @@ function AnalysisMethodology() {
                       ))}
                     </tbody>
                   </table>
+                  {pack.manualNotes && pack.manualNotes.length > 0 && (
+                    <div className="p-3 border-t border-sf-border/50 bg-white/[0.015]">
+                      <p className="text-[10px] font-semibold uppercase tracking-wide text-sf-muted mb-1">Manual Review Required (Not Scored)</p>
+                      <ul className="space-y-0.5">
+                        {pack.manualNotes.map((note) => (
+                          <li key={note} className="text-[11px] text-sf-muted">• {note}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               )}
             </GlassCard>

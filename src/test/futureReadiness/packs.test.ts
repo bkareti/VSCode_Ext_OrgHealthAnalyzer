@@ -49,4 +49,48 @@ suite('Readiness packs', () => {
     const idr = (a: typeof withRules) => a.dimensions.find((d) => d.dimension === 'Identity Resolution Readiness')!.score;
     assert.ok(idr(withRules) > idr(withoutRules), 'identity resolution should score higher when rules exist');
   });
+
+  test('Data Cloud Provisioning scores higher when license, Data Streams, and a connector are present', () => {
+    const pack = new DataCloudReadinessPack(...deps());
+    const provisioned = pack.assess(input({
+      platformFeatures: { dataCloudEnabled: true, einsteinFeatures: [], agentforceLicensed: false, edition: 'Enterprise' },
+      dataStreamCount: 3,
+      dataConnectorCount: 1,
+    }));
+    const unprovisioned = pack.assess(input({
+      platformFeatures: { dataCloudEnabled: false, einsteinFeatures: [], agentforceLicensed: false, edition: 'Enterprise' },
+      dataStreamCount: 0,
+      dataConnectorCount: 0,
+    }));
+
+    const provisioning = (a: typeof provisioned) => a.dimensions.find((d) => d.dimension === 'Data Cloud Provisioning')!.score;
+    assert.ok(provisioning(provisioned) > provisioning(unprovisioned), 'Data Cloud Provisioning should score higher once license, streams, and connector are configured');
+  });
+
+  test('Identity Resolution Readiness improves with Individual/ContactPoint coverage and Contact email completeness', () => {
+    const pack = new DataCloudReadinessPack(...deps());
+    const wellCovered = pack.assess(input({
+      dataCloudIdentityCounts: {
+        individualCount: 100,
+        contactPointEmailCount: 50,
+        contactPointPhoneCount: 40,
+        contactPointAddressCount: 30,
+        contactTotalCount: 100,
+        contactWithEmailCount: 95,
+      },
+    }));
+    const poorlyCovered = pack.assess(input({
+      dataCloudIdentityCounts: {
+        individualCount: 0,
+        contactPointEmailCount: 0,
+        contactPointPhoneCount: 0,
+        contactPointAddressCount: 0,
+        contactTotalCount: 100,
+        contactWithEmailCount: 5,
+      },
+    }));
+
+    const idr = (a: typeof wellCovered) => a.dimensions.find((d) => d.dimension === 'Identity Resolution Readiness')!.score;
+    assert.ok(idr(wellCovered) > idr(poorlyCovered), 'identity resolution should score higher with strong Individual/ContactPoint/email coverage');
+  });
 });
