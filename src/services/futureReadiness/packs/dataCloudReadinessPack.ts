@@ -14,6 +14,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'duplicate-rules',
     dimension: 'Identity Resolution Readiness',
     weight: 13,
+    label: 'Duplicate Rules on key objects',
+    whyItMatters: 'Duplicate Rules prevent redundant records from fragmenting identity resolution before Data Cloud ingestion.',
     evaluate(input) {
       const rules = input.collectors.duplicateRules;
       if (!rules) { return na('Duplicate rule metadata was not collected.'); }
@@ -31,6 +33,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'matching-rules',
     dimension: 'Identity Resolution Readiness',
     weight: 12,
+    label: 'Matching Rules for identity resolution',
+    whyItMatters: "Matching Rules define how records are compared and merged — Data Cloud's identity resolution relies on them to unify profiles.",
     evaluate(input) {
       const rules = input.collectors.matchingRules;
       if (!rules) { return na('Matching rule metadata was not collected.'); }
@@ -49,6 +53,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'reference-integrity',
     dimension: 'Data Model Quality',
     weight: 13,
+    label: 'Object relationship / reference integrity',
+    whyItMatters: "Clear object relationships let Data Cloud map reference integrity accurately across ingested sources.",
     evaluate(input) {
       const stats = input.result.dataModelStats ?? [];
       if (stats.length === 0) { return na('Data model stats unavailable.'); }
@@ -67,6 +73,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'field-documentation',
     dimension: 'Data Model Quality',
     weight: 12,
+    label: 'Field documentation coverage',
+    whyItMatters: 'Documented fields give Data Cloud mapping and harmonization a reliable, self-describing schema to work from.',
     evaluate(input) {
       const stats = input.result.dataModelStats ?? [];
       if (stats.length === 0) { return na('Data model stats unavailable.'); }
@@ -84,6 +92,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'individual-object',
     dimension: 'Identity Resolution Readiness',
     weight: 10,
+    label: 'Individual Records exist',
+    whyItMatters: 'The Individual object anchors consent and identity for every unified profile in Data Cloud.',
     evaluate(input) {
       const counts = input.collectors.dataCloudIdentityCounts;
       if (!counts) { return na('Individual object counts were not collected.'); }
@@ -102,6 +112,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'contact-point-coverage',
     dimension: 'Identity Resolution Readiness',
     weight: 10,
+    label: 'ContactPoint objects populated',
+    whyItMatters: "ContactPointEmail/Phone/Address give identity resolution multiple match keys to unify a person's records.",
     evaluate(input) {
       const counts = input.collectors.dataCloudIdentityCounts;
       if (!counts) { return na('ContactPoint object counts were not collected.'); }
@@ -122,6 +134,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'contact-email-completeness',
     dimension: 'Identity Resolution Readiness',
     weight: 10,
+    label: 'Contact email completeness',
+    whyItMatters: "Email is a primary identity match key — incomplete email data weakens Data Cloud's ability to unify contacts.",
     evaluate(input) {
       const counts = input.collectors.dataCloudIdentityCounts;
       if (!counts || counts.contactTotalCount === 0) { return na('Contact email completeness could not be evaluated.'); }
@@ -141,6 +155,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'ldv-objects',
     dimension: 'Data Volume & Scale',
     weight: 15,
+    label: 'Large data volume (LDV) objects',
+    whyItMatters: 'Objects at large record volumes need an incremental data-stream and indexing strategy before Data Cloud ingestion.',
     evaluate(input) {
       const counts = input.result.objectRecordCounts ?? {};
       const keys = Object.keys(counts);
@@ -161,6 +177,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'integration-surface',
     dimension: 'Integration & External Data',
     weight: 10,
+    label: 'Integration surface (Named Credentials / APIs)',
+    whyItMatters: 'Named Credentials and API entry points are the pipes that feed external systems into Data Cloud.',
     evaluate(input) {
       const integrations = input.result.orgInfoData?.integrations;
       const eps = input.result.entryPoints?.length ?? 0;
@@ -178,6 +196,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'external-objects',
     dimension: 'Integration & External Data',
     weight: 10,
+    label: 'Salesforce Connect external objects',
+    whyItMatters: 'External objects show whether federated data sources are already surfaced in Salesforce ahead of Data Cloud ingestion.',
     evaluate(input) {
       const ext = input.result.dataModelSummary?.externalObjectCount ?? 0;
       const score = ext > 0 ? 90 : 65;
@@ -196,6 +216,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'data-cloud-license',
     dimension: 'Data Cloud Provisioning',
     weight: 12,
+    label: 'Data Cloud license provisioned',
+    whyItMatters: 'A Data Cloud feature license is the prerequisite for any ingestion, identity resolution, or activation work.',
     evaluate(input) {
       const flags = input.collectors.platformFeatures;
       if (!flags) { return na('Platform feature licenses were not collected.'); }
@@ -211,6 +233,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'data-streams',
     dimension: 'Data Cloud Provisioning',
     weight: 10,
+    label: 'Data Streams configured',
+    whyItMatters: 'Data Streams are the ingestion pipeline — without at least one, no data enters Data Cloud.',
     evaluate(input) {
       const count = input.collectors.dataStreamCount;
       if (count === undefined) { return na('Data Stream metadata was not collected.'); }
@@ -226,6 +250,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'crm-connector',
     dimension: 'Data Cloud Provisioning',
     weight: 8,
+    label: 'CRM / data connector configured',
+    whyItMatters: 'A connector gives Data Cloud a live pipeline from your CRM or external systems to ingest records.',
     evaluate(input) {
       const count = input.collectors.dataConnectorCount;
       if (count === undefined) { return na('Data Connector metadata was not collected.'); }
@@ -243,6 +269,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'calculated-insights',
     dimension: 'Activation & Insights',
     weight: 10,
+    label: 'Calculated Insights defined',
+    whyItMatters: 'Calculated Insights turn unified profiles into activation-ready metrics for downstream use.',
     evaluate(input) {
       const count = input.collectors.calculatedInsightCount;
       if (count === undefined) { return na('Calculated Insight metadata was not collected.'); }
@@ -258,6 +286,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'data-segments',
     dimension: 'Activation & Insights',
     weight: 10,
+    label: 'Segments defined',
+    whyItMatters: 'Segments are what let Data Cloud activate unified audiences to marketing and other downstream channels.',
     evaluate(input) {
       const count = input.collectors.dataSegmentCount;
       if (count === undefined) { return na('Segment metadata was not collected.'); }
@@ -275,6 +305,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'access-governance',
     dimension: 'Data Governance',
     weight: 15,
+    label: 'Access governance (profiles & admins)',
+    whyItMatters: 'Overprivileged profiles and super admins widen the blast radius when sensitive data is unified in Data Cloud.',
     evaluate(input) {
       const p = input.result.profileSummary;
       const u = input.result.userSummary;
@@ -294,6 +326,8 @@ export const DATA_CLOUD_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'data-spaces',
     dimension: 'Data Governance',
     weight: 10,
+    label: 'Data Spaces configured',
+    whyItMatters: 'Data Spaces partition and govern access to unified data by business unit, region, or brand.',
     evaluate(input) {
       const count = input.collectors.dataSpaceCount;
       if (count === undefined) { return na('Data Space metadata was not collected.'); }

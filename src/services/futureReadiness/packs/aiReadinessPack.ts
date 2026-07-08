@@ -14,6 +14,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'undocumented-fields',
     dimension: 'Data & Metadata Quality',
     weight: 13,
+    label: 'Field documentation coverage',
+    whyItMatters: 'Self-describing, documented fields give AI grounding reliable metadata to reason over.',
     evaluate(input) {
       const stats = input.result.dataModelStats ?? [];
       if (stats.length === 0) { return na('Data model stats unavailable — run a full analysis.'); }
@@ -31,6 +33,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'unused-fields',
     dimension: 'Data & Metadata Quality',
     weight: 12,
+    label: 'Unused custom fields',
+    whyItMatters: 'Unused custom fields add schema noise that can confuse AI models during grounding.',
     evaluate(input) {
       const stats = input.result.dataModelStats ?? [];
       const stale = input.result.staleMetadata;
@@ -51,6 +55,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'legacy-automation',
     dimension: 'Automation Simplicity',
     weight: 12,
+    label: 'Legacy Workflow Rules & Process Builders',
+    whyItMatters: 'Legacy automation should be migrated to Flow before layering AI-driven automation on top of it.',
     evaluate(input) {
       const auto = input.result.automationSummary;
       if (!auto) { return na('Automation summary unavailable.'); }
@@ -69,6 +75,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'multi-trigger-objects',
     dimension: 'Automation Simplicity',
     weight: 8,
+    label: 'Multi-trigger objects',
+    whyItMatters: 'Objects with multiple triggers produce unpredictable execution order for AI-driven automation to reason about.',
     evaluate(input) {
       const auto = input.result.automationSummary;
       if (!auto) { return na('Automation summary unavailable.'); }
@@ -88,6 +96,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'overprivileged-profiles',
     dimension: 'Security & Sharing',
     weight: 10,
+    label: 'Overprivileged profiles',
+    whyItMatters: 'Overprivileged profiles widen the data AI/Agentforce features can access before appropriate guardrails exist.',
     evaluate(input) {
       const p = input.result.profileSummary;
       if (!p) { return na('Profile security data unavailable.'); }
@@ -104,6 +114,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'without-sharing-apex',
     dimension: 'Security & Sharing',
     weight: 10,
+    label: 'Without-sharing Apex classes',
+    whyItMatters: 'AI features must honor record visibility — without-sharing Apex can leak data across the record-level security model.',
     evaluate(input) {
       const cnt = countIssues(input, (i) => i.category === 'security' && /without.?sharing/i.test(i.message));
       const score = cnt === 0 ? 100 : cnt <= 2 ? 70 : cnt <= 5 ? 50 : 30;
@@ -118,6 +130,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'owd-accessibility',
     dimension: 'Security & Sharing',
     weight: 6,
+    label: 'Private OWD on core objects',
+    whyItMatters: 'Private Org-Wide Defaults block the Agentforce service user from grounding on core objects unless sharing rules are added.',
     evaluate(input) {
       const count = input.collectors.privateOwdObjectCount;
       if (count === undefined) { return na('Org-Wide Default sharing data was not collected.'); }
@@ -133,6 +147,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'pii-field-risk',
     dimension: 'Security & Sharing',
     weight: 4,
+    label: 'PII-indicative field risk',
+    whyItMatters: 'Fields that look like they hold PII need Trust Layer masking before being exposed to AI grounding.',
     evaluate(input) {
       const count = input.collectors.piiSensitiveFieldCount;
       if (count === undefined) { return na('PII field detection data was not collected.'); }
@@ -150,6 +166,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'api-entry-points',
     dimension: 'Flow & API Readiness',
     weight: 8,
+    label: 'Public API entry points',
+    whyItMatters: 'Governed API/Flow entry points give Agentforce actions safe automation hooks to call.',
     evaluate(input) {
       const eps = input.result.entryPoints ?? [];
       const score = eps.length >= 3 ? 95 : eps.length > 0 ? 85 : 65;
@@ -164,6 +182,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'flow-adoption',
     dimension: 'Flow & API Readiness',
     weight: 7,
+    label: 'Flow adoption',
+    whyItMatters: 'Broad Flow adoption gives Agentforce a library of declarative automation it can safely invoke.',
     evaluate(input) {
       const auto = input.result.automationSummary;
       if (!auto) { return na('Automation summary unavailable.'); }
@@ -180,6 +200,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'invocable-flows',
     dimension: 'Flow & API Readiness',
     weight: 7,
+    label: 'Autolaunched (invocable) flows',
+    whyItMatters: 'Agentforce can only invoke Autolaunched flows with outputs, not Screen flows — this is the action surface it depends on.',
     evaluate(input) {
       const count = input.collectors.autolaunchedFlowCount;
       if (count === undefined) { return na('Autolaunched flow count was not collected.'); }
@@ -195,6 +217,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'invocable-apex',
     dimension: 'Flow & API Readiness',
     weight: 5,
+    label: 'Invocable Apex methods',
+    whyItMatters: 'Apex classes exposing @InvocableMethod give Agentforce additional custom actions to call.',
     evaluate(input) {
       const count = input.collectors.invocableApexCount;
       if (count === undefined) { return na('Invocable Apex count was not collected.'); }
@@ -212,6 +236,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'einstein-agentforce',
     dimension: 'AI Feature Enablement',
     weight: 10,
+    label: 'Einstein / Agentforce licensing',
+    whyItMatters: 'An Agentforce or Einstein feature license is the prerequisite for enabling any AI adoption in the org.',
     evaluate(input) {
       const pf = input.collectors.platformFeatures;
       if (!pf) { return na('Platform feature detection unavailable.'); }
@@ -233,6 +259,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'data-cloud-connection',
     dimension: 'AI Feature Enablement',
     weight: 5,
+    label: 'Data Cloud connection',
+    whyItMatters: 'Data Cloud unlocks production-grade Agentforce grounding against a unified customer data layer.',
     evaluate(input) {
       const pf = input.collectors.platformFeatures;
       if (!pf) { return na('Platform feature detection unavailable.'); }
@@ -250,6 +278,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'trust-layer',
     dimension: 'AI Configuration',
     weight: 8,
+    label: 'Einstein Trust Layer enablement',
+    whyItMatters: 'The Trust Layer provides data masking, PII protection, and auditability required for safe AI grounding.',
     evaluate(input) {
       const pf = input.collectors.platformFeatures;
       if (!pf) { return na('Platform feature detection unavailable.'); }
@@ -265,6 +295,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'prompt-templates',
     dimension: 'AI Configuration',
     weight: 8,
+    label: 'Prompt Templates configured',
+    whyItMatters: 'Agentforce needs Prompt Templates in Prompt Builder to generate AI-powered responses and content.',
     evaluate(input) {
       const count = input.collectors.promptTemplateCount;
       if (count === undefined) { return na('Prompt Template data was not collected.'); }
@@ -280,6 +312,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'knowledge-articles',
     dimension: 'AI Configuration',
     weight: 4,
+    label: 'Published Knowledge articles',
+    whyItMatters: 'Agentforce copilot actions ground responses in Knowledge to provide accurate, org-specific answers.',
     evaluate(input) {
       const count = input.collectors.knowledgeArticleCount;
       if (count === undefined) { return na('Knowledge article data was not collected.'); }
@@ -297,6 +331,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'test-coverage',
     dimension: 'Configuration Quality',
     weight: 6,
+    label: 'Apex test coverage',
+    whyItMatters: 'Solid test coverage lets AI-driven automation be deployed and iterated on safely.',
     evaluate(input) {
       const cov = input.result.testCoverageSummary;
       if (!cov) { return na('Test coverage summary unavailable.'); }
@@ -312,6 +348,8 @@ export const AI_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'technical-debt',
     dimension: 'Configuration Quality',
     weight: 4,
+    label: 'Technical debt volume',
+    whyItMatters: 'AI features interact more reliably with stable, well-structured code with lower technical debt.',
     evaluate(input) {
       const debt = countIssues(input, (i) => i.category === 'technical-debt');
       const score = debt === 0 ? 100 : debt <= 5 ? 80 : debt <= 15 ? 60 : 40;

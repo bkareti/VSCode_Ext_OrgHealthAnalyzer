@@ -15,6 +15,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'my-domain',
     dimension: 'Domain Readiness',
     weight: 10,
+    label: 'My Domain enabled',
+    whyItMatters: 'My Domain is a hard prerequisite for Hyperforce and for Enhanced Domains.',
     evaluate(input) {
       const ext = input.result.orgInfoData?.extended;
       if (!ext) { return na('Org extended details unavailable.'); }
@@ -31,6 +33,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'enhanced-domains',
     dimension: 'Domain Readiness',
     weight: 10,
+    label: 'Enhanced Domains enabled',
+    whyItMatters: 'Enhanced Domains prevent hardcoded-domain breakage when URLs change on Hyperforce.',
     evaluate(input) {
       const pf = input.collectors.platformFeatures;
       if (!pf || pf.enhancedDomainEnabled === undefined) { return na('Enhanced Domain status was not collected.'); }
@@ -46,6 +50,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'experience-cloud-sites',
     dimension: 'Domain Readiness',
     weight: 5,
+    label: 'Experience Cloud site domain review',
+    whyItMatters: "Each live Experience Cloud site's domain and CDN configuration must be reviewed — Hyperforce changes the base domain structure.",
     evaluate(input) {
       const count = input.collectors.experienceCloudSiteCount;
       if (count === undefined) { return na('Experience Cloud site data was not collected.'); }
@@ -61,6 +67,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'org-wide-email-domains',
     dimension: 'Domain Readiness',
     weight: 5,
+    label: 'Org-wide email domains',
+    whyItMatters: 'Org-wide email addresses on Salesforce-hosted domains change when Enhanced Domains take effect on Hyperforce.',
     evaluate(input) {
       const count = input.collectors.orgWideEmailDomainIssueCount;
       if (count === undefined) { return na('Org-wide email address data was not collected.'); }
@@ -78,6 +86,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'remote-sites-https',
     dimension: 'Secure Endpoints',
     weight: 13,
+    label: 'Remote Site Settings use HTTPS',
+    whyItMatters: 'Insecure http:// remote site endpoints must be migrated to https:// before a Hyperforce cutover.',
     evaluate(input) {
       const sites = input.collectors.remoteSites;
       if (!sites) { return na('Remote site detail was not collected.'); }
@@ -94,6 +104,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'certificates',
     dimension: 'Secure Endpoints',
     weight: 12,
+    label: 'Certificate expiry & strength',
+    whyItMatters: 'Expiring or weak certificates create outages or security gaps during the Hyperforce migration window.',
     evaluate(input) {
       const certs = input.collectors.certificates;
       if (!certs) { return na('Certificate detail was not collected.'); }
@@ -114,6 +126,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'named-credentials',
     dimension: 'Integration Hardening',
     weight: 10,
+    label: 'Named Credentials vs legacy credentials',
+    whyItMatters: 'Named Credentials keep endpoints and secrets portable instead of hardcoded, which is required for a smooth Hyperforce cutover.',
     evaluate(input) {
       const integrations = input.result.orgInfoData?.integrations;
       if (!integrations) { return na('Integration metadata unavailable.'); }
@@ -131,6 +145,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'hardcoded-urls',
     dimension: 'Integration Hardening',
     weight: 10,
+    label: 'Hardcoded URL / endpoint references',
+    whyItMatters: 'Hardcoded Salesforce URLs break when the instance moves — they must reference My Domain or Named Credentials instead.',
     evaluate(input) {
       const cnt = countIssues(input, (i) => /hardcod/i.test(i.message) && /url|endpoint|instance|domain/i.test(i.message));
       const score = cnt === 0 ? 95 : cnt <= 3 ? 60 : 35;
@@ -146,6 +162,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'hardcoded-custom-labels',
     dimension: 'Integration Hardening',
     weight: 5,
+    label: 'Custom Labels with hardcoded instance URLs',
+    whyItMatters: 'Custom Labels referencing the current instance URL directly will point to the wrong place after migration.',
     evaluate(input) {
       const count = input.collectors.hardcodedCustomLabelCount;
       if (count === undefined) { return na('Custom Label data was not collected.'); }
@@ -163,6 +181,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'mfa-posture',
     dimension: 'Authentication & Access',
     weight: 8,
+    label: 'Org-wide MFA enforcement',
+    whyItMatters: 'MFA enforcement is a standard Hyperforce security checkpoint reviewed before migration.',
     evaluate(input) {
       const pf = input.collectors.platformFeatures;
       if (!pf || pf.mfaRequired === undefined) {
@@ -179,6 +199,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'guest-user-exposure',
     dimension: 'Authentication & Access',
     weight: 7,
+    label: 'Guest user exposure',
+    whyItMatters: 'Guest user sharing and object access is a standard Hyperforce security checkpoint.',
     evaluate(input) {
       const u = input.result.userSummary;
       if (!u) { return na('User governance data unavailable.'); }
@@ -195,6 +217,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'profile-ip-ranges',
     dimension: 'Authentication & Access',
     weight: 5,
+    label: 'Profile Login IP Ranges',
+    whyItMatters: 'Hyperforce uses different IP address blocks than classic instances — profile-level IP restrictions must be updated.',
     evaluate(input) {
       const ranges = input.collectors.profileIpRanges;
       if (!ranges) { return na('Profile IP range data was not collected.'); }
@@ -211,6 +235,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'network-access-ranges',
     dimension: 'Authentication & Access',
     weight: 5,
+    label: 'Org-level Network Access ranges',
+    whyItMatters: "Org-level trusted IP ranges must be updated for Hyperforce's different IP address blocks.",
     evaluate(input) {
       const count = input.collectors.orgNetworkAccessRangeCount;
       if (count === undefined) { return na('Org-level Network Access data was not collected.'); }
@@ -228,6 +254,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'deprecated-api',
     dimension: 'Legacy & Compatibility',
     weight: 10,
+    label: 'Deprecated API version usage',
+    whyItMatters: 'Components on retired API versions can break when the org moves to Hyperforce infrastructure.',
     evaluate(input) {
       const cnt = getIssues(input).filter((i) => i.category === 'technical-debt' && /api.?version/i.test(i.message)).length;
       const score = cnt === 0 ? 95 : cnt <= 5 ? 70 : 45;
@@ -242,6 +270,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'connected-apps',
     dimension: 'Legacy & Compatibility',
     weight: 10,
+    label: 'Connected App URLs & IP restrictions',
+    whyItMatters: 'Connected App callback URLs and IP allowlists often hardcode the current instance and must be reviewed for Hyperforce.',
     evaluate(input) {
       const apps = input.collectors.connectedApps;
       const count = input.result.orgInfoData?.integrations?.connectedApps ?? apps?.length ?? 0;
@@ -269,6 +299,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'installed-packages',
     dimension: 'Legacy & Compatibility',
     weight: 8,
+    label: 'Installed package compatibility',
+    whyItMatters: 'Installed packages need to be checked against the Salesforce Hyperforce-compatible ISV list before migration.',
     evaluate(input) {
       const pkgs = input.collectors.installedPackages;
       if (!pkgs) { return na('Installed package data was not collected.'); }
@@ -285,6 +317,8 @@ export const HYPERFORCE_READINESS_CHECKS: ReadinessCheck[] = [
     id: 'legacy-automation-hyperforce',
     dimension: 'Legacy & Compatibility',
     weight: 7,
+    label: 'Legacy Workflow Rules & Process Builders',
+    whyItMatters: 'Salesforce recommends retiring Workflow Rules and Process Builder in favor of Flow before a Hyperforce migration.',
     evaluate(input) {
       const auto = input.result.automationSummary;
       if (!auto) { return na('Automation summary unavailable.'); }

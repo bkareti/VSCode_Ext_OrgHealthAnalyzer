@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useOrgStore } from '@/store/slices/orgStore';
 import { useUIStore } from '@/store/slices/uiStore';
 import { Button } from '@/components/common';
+import ThemeToggle from '@/components/common/ThemeToggle';
 import ExportModal from '@/components/modals/ExportModal';
 
 export default function Header() {
@@ -37,6 +38,7 @@ export default function Header() {
 
         {/* Actions */}
         <div className="flex items-center gap-2 shrink-0">
+          <ThemeToggle />
           <Button variant="ghost" size="sm" onClick={() => setShowExport(true)}>
             Export
           </Button>

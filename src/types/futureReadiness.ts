@@ -10,6 +10,7 @@
  */
 
 import type { QuickWin, ScoreGrade, ConfidenceLevel } from './assessmentContext';
+import type { ArchitectRecommendationSection } from './architectRecommendations';
 
 // ============================================================================
 // Primitives
@@ -37,6 +38,10 @@ export interface ReadinessSignal {
   packId: PackId;
   /** Display name of the sub-dimension this signal contributes to. */
   dimension: string;
+  /** Short human-readable title for UI display, e.g. "Duplicate Rules on key objects". */
+  label?: string;
+  /** Evergreen, static one-sentence explanation shown regardless of pass/fail status. */
+  whyItMatters?: string;
   status: ReadinessStatus;
   /** 0-100 score for this signal. */
   score: number;
@@ -117,6 +122,8 @@ export interface PackNarrative {
   currentMaturity: string;
   businessImpact: string;
   summary: string;
+  /** Evidence-cited pointers grouped by section (Immediate Risks / Quick Wins / Strategic). */
+  sections: ArchitectRecommendationSection[];
 }
 
 export interface FutureReadinessNarrative {
@@ -141,6 +148,8 @@ export interface ReadinessPackAssessment {
   blockingIssues: ReadinessGap[];
   quickWins: QuickWin[];
   strategicInitiatives: StrategicInitiative[];
+  /** Per-check detail (one entry per ReadinessCheck) — powers the Detailed Readiness Checks UI. */
+  signals: ReadinessSignal[];
   /** AI narrative — undefined on the deterministic build; filled by synthesizeFutureReadiness. */
   narrative?: PackNarrative;
 }
@@ -302,6 +311,7 @@ export interface ReadinessContextGap {
   severity: GapSeverity;
   area: string;
   whyItMatters: string;
+  evidence: string[];
 }
 
 export interface ReadinessContextPack {

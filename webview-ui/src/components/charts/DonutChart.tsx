@@ -1,6 +1,5 @@
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-
-const COLORS = ['#3b82f6','#8b5cf6','#22c55e','#f59e0b','#ec4899','#14b8a6','#f97316'];
+import { useChartTheme } from '@/hooks/useChartTheme';
 
 interface Entry { name: string; value: number }
 
@@ -8,9 +7,14 @@ interface Props {
   data: Entry[];
   height?: number;
   showLegend?: boolean;
+  colors?: string[];
+  centerLabel?: string;
+  centerSubLabel?: string;
 }
 
-export default function DonutChart({ data, height = 200, showLegend = true }: Props) {
+export default function DonutChart({ data, height = 200, showLegend = true, colors, centerLabel, centerSubLabel }: Props) {
+  const theme = useChartTheme();
+  const palette = colors ?? theme.chartColors;
   const total = data.reduce((s, d) => s + d.value, 0);
 
   return (
@@ -28,16 +32,21 @@ export default function DonutChart({ data, height = 200, showLegend = true }: Pr
           animationDuration={600}
         >
           {data.map((_, i) => (
-            <Cell key={i} fill={COLORS[i % COLORS.length]} />
+            <Cell key={i} fill={palette[i % palette.length]} />
           ))}
         </Pie>
         {/* Centre total */}
-        <text x="50%" y="50%" textAnchor="middle" dominantBaseline="middle" fill="#cccccc" fontSize={14} fontWeight={700}>
-          {total.toLocaleString()}
+        <text x="50%" y={centerSubLabel ? '46%' : '50%'} textAnchor="middle" dominantBaseline="middle" fill={theme.text} fontSize={14} fontWeight={700}>
+          {centerLabel ?? total.toLocaleString()}
         </text>
+        {centerSubLabel && (
+          <text x="50%" y="60%" textAnchor="middle" dominantBaseline="middle" fill={theme.textMuted} fontSize={10} fontWeight={500}>
+            {centerSubLabel}
+          </text>
+        )}
         <Tooltip
-          contentStyle={{ background: '#252526', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, fontSize: 11 }}
-          itemStyle={{ color: '#cccccc' }}
+          contentStyle={{ background: theme.tooltipBg, border: `1px solid ${theme.border}`, borderRadius: 6, fontSize: 11 }}
+          itemStyle={{ color: theme.text }}
           formatter={(v) => { const n = v as number; return [`${n} (${total ? ((n/total)*100).toFixed(1) : 0}%)`, '']; }}
         />
         {showLegend && (
@@ -46,7 +55,7 @@ export default function DonutChart({ data, height = 200, showLegend = true }: Pr
             iconSize={8}
             verticalAlign="bottom"
             align="center"
-            wrapperStyle={{ fontSize: 11, color: '#9d9d9d', paddingTop: 8 }}
+            wrapperStyle={{ fontSize: 11, color: theme.textMuted, paddingTop: 8 }}
           />
         )}
       </PieChart>

@@ -70,7 +70,7 @@ export default function TrendsHistory() {
           const score = latest.scores[key] ?? 0;
           const delta = prev ? (latest.scores[key] ?? 0) - (prev.scores[key] ?? 0) : null;
           return (
-            <div key={label} className="rounded-xl border border-sf-border bg-white/[0.03] p-3 flex flex-col gap-1 items-center text-center">
+            <div key={label} className="rounded-xl border border-sf-border bg-sf-glass p-3 flex flex-col gap-1 items-center text-center">
               <span className="text-[10px] text-sf-muted uppercase tracking-wide">{label}</span>
               <span className="text-xl font-bold tabular-nums" style={{ color }}>{score}</span>
               {delta !== null && (

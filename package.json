@@ -107,6 +107,11 @@
         "category": "OrgPulse"
       },
       {
+        "command": "sfHealthAnalyzer.runLicenseRecommendations",
+        "title": "Run License Recommendations (AI narrative)",
+        "category": "OrgPulse"
+      },
+      {
         "command": "sfHealthAnalyzer.askArchitect",
         "title": "Ask the Architect (AI)",
         "category": "OrgPulse"

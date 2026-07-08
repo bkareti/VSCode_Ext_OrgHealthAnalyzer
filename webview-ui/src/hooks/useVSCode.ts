@@ -15,11 +15,20 @@ export type OutboundMessage =
   | { command: 'exportCtaHtml'; html: string; fileName: string }
   | { command: 'runCtaReview'; model?: string; force?: boolean }
   | { command: 'runFutureReadiness'; model?: string; force?: boolean }
+  | { command: 'runLicenseRecommendations'; model?: string; force?: boolean }
+  | { command: 'runOrgInfoRecommendations'; model?: string; force?: boolean }
   | { command: 'getModels' }
   | { command: 'authorizeClaude' }
   | { command: 'disconnectClaude' }
+  | { command: 'authorizeOpenAI' }
+  | { command: 'disconnectOpenAI' }
+  | { command: 'authorizeGemini' }
+  | { command: 'disconnectGemini' }
+  | { command: 'setPreferredModel'; data: { modelId: string; label?: string } }
   | { command: 'askArchitect'; data: { question: string } }
-  | { command: 'exportCodeQualityCsv'; data: { csv: string; fileName: string } };
+  | { command: 'exportCodeQualityCsv'; data: { csv: string; fileName: string } }
+  | { command: 'getArchitectPrompts' }
+  | { command: 'saveArchitectPrompt'; data: { scopeId: string; text: string } };
 
 // ── VS Code API singleton ─────────────────────────────────────────────────
 interface VSCodeAPI {

@@ -70,6 +70,13 @@ export type {
   ScanHistoryEntry,
 } from '../../../src/types/index';
 
+// Architect Recommendations — evidence-cited pointer sections (shared across Future Readiness pilot and future tabs)
+export type {
+  RecommendationPriority,
+  ArchitectRecommendationPoint,
+  ArchitectRecommendationSection,
+} from '../../../src/types/architectRecommendations';
+
 // Future Readiness Assessment types
 export type {
   PackId,
@@ -91,3 +98,19 @@ export type {
   FutureReadinessResult,
   FutureReadinessReport,
 } from '../../../src/types/futureReadiness';
+
+// License Recommendations — AI-enriched card data for the Clouds & Licenses tab
+export type {
+  LicenseImpact,
+  LicenseCardId,
+  LicenseRecommendationCard,
+  LicenseRecommendationsReport,
+} from '../../../src/types/licenseRecommendations';
+
+// Org Info Recommendations — AI-enriched card data for the Overview tab
+export type {
+  OrgInfoImpact,
+  OrgInfoCardId,
+  OrgInfoRecommendationCard,
+  OrgInfoRecommendationsReport,
+} from '../../../src/types/orgInfoRecommendations';

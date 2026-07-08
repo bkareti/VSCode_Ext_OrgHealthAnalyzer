@@ -22,6 +22,8 @@ import {
   FutureReadinessSnapshot,
 } from './services/futureReadiness';
 import { collectReadinessData } from './services/futureReadiness/collectors';
+import { buildLicenseRecommendationsBase } from './services/licenseRecommendations';
+import { buildOrgInfoRecommendationsBase } from './services/orgInfoRecommendations';
 
 // Analyzers
 import { createApexAnalyzer } from './analyzers/apexAnalyzer';
@@ -142,6 +144,20 @@ const CACHE_FOLDER = '.orgpulse';
 const CACHE_FILE = 'cache.json';
 
 // ============================================================================
+// Schema Validation Helpers
+// ============================================================================
+
+/** Check if a FutureReadinessReport has the new-schema `signals` field on every pack.
+ *  Stale reports from before this redesign will have `dimensions`/`blockingIssues` but
+ *  missing `signals`, causing crashes when the new UI tries to read `.signals.length`. */
+function isFutureReadinessSchemaValid(report: any): boolean {
+  if (!report?.packs || !Array.isArray(report.packs)) {
+    return true; // no packs data, skip validation
+  }
+  return report.packs.every((p: any) => Array.isArray(p.signals));
+}
+
+// ============================================================================
 // File-based Cache Helpers
 // ============================================================================
 
@@ -179,6 +195,11 @@ function loadCacheFromFile(): AnalysisResult | null {
     const data = JSON.parse(raw) as AnalysisResult;
     // Restore Date objects from JSON
     if (data.timestamp) { data.timestamp = new Date(data.timestamp); }
+    // Drop stale futureReadiness that predates the signals field to avoid crashes
+    if (data.futureReadiness && !isFutureReadinessSchemaValid(data.futureReadiness)) {
+      logWarning('Stale Future Readiness data detected (predates signals field) — will be regenerated on next analysis');
+      data.futureReadiness = undefined;
+    }
     logInfo(`Loaded cached analysis from ${filePath} (${new Date(data.timestamp).toLocaleString()})`);
     return data;
   } catch (e) {
@@ -249,6 +270,11 @@ export function activate(context: vscode.ExtensionContext) {
     try {
       // Restore dates from JSON serialization
       stored.timestamp = new Date(stored.timestamp);
+      // Drop stale futureReadiness that predates the signals field to avoid crashes
+      if (stored.futureReadiness && !isFutureReadinessSchemaValid(stored.futureReadiness)) {
+        logWarning('Stale Future Readiness data detected (predates signals field) — will be regenerated on next analysis');
+        stored.futureReadiness = undefined;
+      }
       currentResult = stored;
       healthResultsProvider.setResults(currentResult);
       vscode.commands.executeCommand('setContext', 'sfHealthAnalyzer.hasResults', true);
@@ -387,6 +413,66 @@ function registerCommands(context: vscode.ExtensionContext): void {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         panel.postMessage({ type: 'futureReadinessError', message: msg });
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sfHealthAnalyzer.runLicenseRecommendations', async (modelPreference?: string, force?: boolean) => {
+      const ai = getAIService();
+      if (!ai) {
+        vscode.window.showWarningMessage('AI Service not initialised. Run a full analysis first.');
+        return;
+      }
+      if (!currentResult) {
+        vscode.window.showWarningMessage('No analysis data available. Run Salesforce: Run Org Health Analyzer first.');
+        return;
+      }
+      const panel = getDashboardPanel(context.extensionUri);
+      panel.postMessage({ type: 'licenseRecommendationsLoading' });
+      try {
+        const report = await ai.synthesizeLicenseRecommendations(currentResult, modelPreference, !!force);
+        if (report) {
+          currentResult.licenseRecommendations = report;
+          panel.postMessage({ type: 'licenseRecommendations', data: report });
+          context.globalState.update(RESULT_STORAGE_KEY, currentResult);
+          saveCacheToFile(currentResult);
+        } else {
+          panel.postMessage({ type: 'licenseRecommendationsError', message: 'No narrative was generated. Try another model or configure an API key in Settings → sfHealthAnalyzer.ai.' });
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        panel.postMessage({ type: 'licenseRecommendationsError', message: msg });
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sfHealthAnalyzer.runOrgInfoRecommendations', async (modelPreference?: string, force?: boolean) => {
+      const ai = getAIService();
+      if (!ai) {
+        vscode.window.showWarningMessage('AI Service not initialised. Run a full analysis first.');
+        return;
+      }
+      if (!currentResult) {
+        vscode.window.showWarningMessage('No analysis data available. Run Salesforce: Run Org Health Analyzer first.');
+        return;
+      }
+      const panel = getDashboardPanel(context.extensionUri);
+      panel.postMessage({ type: 'orgInfoRecommendationsLoading' });
+      try {
+        const report = await ai.synthesizeOrgInfoRecommendations(currentResult, modelPreference, !!force);
+        if (report) {
+          currentResult.orgInfoRecommendations = report;
+          panel.postMessage({ type: 'orgInfoRecommendations', data: report });
+          context.globalState.update(RESULT_STORAGE_KEY, currentResult);
+          saveCacheToFile(currentResult);
+        } else {
+          panel.postMessage({ type: 'orgInfoRecommendationsError', message: 'No narrative was generated. Try another model or configure an API key in Settings → sfHealthAnalyzer.ai.' });
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        panel.postMessage({ type: 'orgInfoRecommendationsError', message: msg });
       }
     })
   );
@@ -1185,6 +1271,16 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
             totalLicenses: licenses.reduce((s, l) => s + l.totalLicenses, 0),
           };
         } catch (e) { failStep('Org Info Extended', e); }
+
+        // ─── License Recommendations (deterministic; AI narrative added on demand) ──
+        try {
+          currentResult.licenseRecommendations = buildLicenseRecommendationsBase(currentResult);
+        } catch (e) { failStep('License Recommendations', e); }
+
+        // ─── Org Info Recommendations (deterministic; AI narrative added on demand) ─
+        try {
+          currentResult.orgInfoRecommendations = buildOrgInfoRecommendationsBase(currentResult);
+        } catch (e) { failStep('Org Info Recommendations', e); }
 
         // Update metadata with new counts
         if (currentResult.metadata) {

@@ -35,6 +35,8 @@ export class ReadinessRuleEngine implements IReadinessRuleEngine {
         id: check.id,
         packId: pack.id,
         dimension: check.dimension,
+        label: check.label,
+        whyItMatters: check.whyItMatters,
         status,
         score,
         weight: check.weight,

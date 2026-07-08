@@ -3,8 +3,11 @@ import { useOrgStore } from '@/store/slices/orgStore';
 import { useAIStore } from '@/store/slices/aiStore';
 import { useCTAStore } from '@/store/slices/ctaStore';
 import { useFutureReadinessStore } from '@/store/slices/futureReadinessStore';
+import { useLicenseRecommendationsStore } from '@/store/slices/licenseRecommendationsStore';
+import { useOrgInfoRecommendationsStore } from '@/store/slices/orgInfoRecommendationsStore';
+import { useArchitectPromptsStore, type ArchitectPromptScope } from '@/store/slices/architectPromptsStore';
 import { vscodeApi } from '@/hooks/useVSCode';
-import type { AnalysisResult, CTAReview, FutureReadinessReport, ScanHistoryEntry } from '@/types';
+import type { AnalysisResult, CTAReview, FutureReadinessReport, LicenseRecommendationsReport, OrgInfoRecommendationsReport, ScanHistoryEntry } from '@/types';
 import type { ProgressData } from '@/store/slices/orgStore';
 import type { AIModel, AIExplanationData } from '@/store/slices/aiStore';
 
@@ -14,7 +17,10 @@ type InboundMessage =
   | { type: 'orgHistory'; data: Record<string, ScanHistoryEntry[]> }
   | { type: 'availableModels'; data: AIModel[] }
   | { type: 'claudeAuthStatus'; authorized: boolean; count?: number; error?: string }
+  | { type: 'openaiAuthStatus'; authorized: boolean; count?: number; error?: string }
+  | { type: 'geminiAuthStatus'; authorized: boolean; count?: number; error?: string }
   | { type: 'copilotStatus'; available: boolean; count: number }
+  | { type: 'preferredModel'; data: string }
   | { type: 'analysisProgress'; step: number; label: string; meta?: Record<string, unknown> }
   | { type: 'loading'; data: boolean; step?: number }
   | { type: 'aiExplanationLoading'; data: boolean }
@@ -24,10 +30,18 @@ type InboundMessage =
   | { type: 'ctaReview'; data: CTAReview }
   | { type: 'ctaReviewError'; message: string }
   | { type: 'architectAnswerLoading'; data: boolean }
+  | { type: 'architectAnswerProgress'; data: string }
   | { type: 'architectAnswer'; data: string; error?: string }
   | { type: 'futureReadinessLoading' }
   | { type: 'futureReadiness'; data: FutureReadinessReport }
-  | { type: 'futureReadinessError'; message: string };
+  | { type: 'futureReadinessError'; message: string }
+  | { type: 'licenseRecommendationsLoading' }
+  | { type: 'licenseRecommendations'; data: LicenseRecommendationsReport }
+  | { type: 'licenseRecommendationsError'; message: string }
+  | { type: 'orgInfoRecommendationsLoading' }
+  | { type: 'orgInfoRecommendations'; data: OrgInfoRecommendationsReport }
+  | { type: 'orgInfoRecommendationsError'; message: string }
+  | { type: 'architectPrompts'; data: { scopes: ArchitectPromptScope[]; overrides: Record<string, string> } };
 
 export function useExtensionMessages() {
   const setResults     = useOrgStore((s) => s.setResults);
@@ -35,11 +49,15 @@ export function useExtensionMessages() {
   const setProgress    = useOrgStore((s) => s.setProgress);
   const setOrgHistory  = useOrgStore((s) => s.setOrgHistory);
 
-  const setModels          = useAIStore((s) => s.setModels);
-  const setClaudeAuth      = useAIStore((s) => s.setClaudeAuth);
-  const setCopilotStatus   = useAIStore((s) => s.setCopilotStatus);
-  const setAIExplanation   = useAIStore((s) => s.setAIExplanation);
-  const setArchitectAnswer = useAIStore((s) => s.setArchitectAnswer);
+  const setModels           = useAIStore((s) => s.setModels);
+  const setClaudeAuth       = useAIStore((s) => s.setClaudeAuth);
+  const setOpenAIAuth       = useAIStore((s) => s.setOpenAIAuth);
+  const setGeminiAuth       = useAIStore((s) => s.setGeminiAuth);
+  const setCopilotStatus    = useAIStore((s) => s.setCopilotStatus);
+  const setPreferredModelId = useAIStore((s) => s.setPreferredModelId);
+  const setAIExplanation    = useAIStore((s) => s.setAIExplanation);
+  const setArchitectAnswer  = useAIStore((s) => s.setArchitectAnswer);
+  const setArchitectAnswerProgress = useAIStore((s) => s.setArchitectAnswerProgress);
 
   const setCTALoading = useCTAStore((s) => s.setCTALoading);
   const setCTAReview  = useCTAStore((s) => s.setCTAReview);
@@ -48,6 +66,16 @@ export function useExtensionMessages() {
   const setFRReport  = useFutureReadinessStore((s) => s.setReport);
   const setFRLoading = useFutureReadinessStore((s) => s.setLoading);
   const setFRError   = useFutureReadinessStore((s) => s.setError);
+
+  const setLRReport  = useLicenseRecommendationsStore((s) => s.setReport);
+  const setLRLoading = useLicenseRecommendationsStore((s) => s.setLoading);
+  const setLRError   = useLicenseRecommendationsStore((s) => s.setError);
+
+  const setOIRReport  = useOrgInfoRecommendationsStore((s) => s.setReport);
+  const setOIRLoading = useOrgInfoRecommendationsStore((s) => s.setLoading);
+  const setOIRError   = useOrgInfoRecommendationsStore((s) => s.setError);
+
+  const setArchitectPrompts = useArchitectPromptsStore((s) => s.setPrompts);
 
   useEffect(() => {
     const handler = (event: MessageEvent<InboundMessage>) => {
@@ -59,6 +87,8 @@ export function useExtensionMessages() {
           setResults(msg.data);
           // Seed the readiness slice from the deterministic result computed during analysis.
           if (msg.data.futureReadiness) { setFRReport(msg.data.futureReadiness); }
+          if (msg.data.licenseRecommendations) { setLRReport(msg.data.licenseRecommendations); }
+          if (msg.data.orgInfoRecommendations) { setOIRReport(msg.data.orgInfoRecommendations); }
           break;
 
         case 'orgHistory':
@@ -73,8 +103,20 @@ export function useExtensionMessages() {
           setClaudeAuth(msg.authorized, msg.count, msg.error);
           break;
 
+        case 'openaiAuthStatus':
+          setOpenAIAuth(msg.authorized, msg.count, msg.error);
+          break;
+
+        case 'geminiAuthStatus':
+          setGeminiAuth(msg.authorized, msg.count, msg.error);
+          break;
+
         case 'copilotStatus':
           setCopilotStatus(msg.available, msg.count);
+          break;
+
+        case 'preferredModel':
+          setPreferredModelId(msg.data);
           break;
 
         case 'analysisProgress': {
@@ -111,6 +153,10 @@ export function useExtensionMessages() {
           setArchitectAnswer(null, msg.data);
           break;
 
+        case 'architectAnswerProgress':
+          setArchitectAnswerProgress(msg.data);
+          break;
+
         case 'architectAnswer':
           setArchitectAnswer(msg.error ? `Error: ${msg.error}` : msg.data, false);
           break;
@@ -127,6 +173,34 @@ export function useExtensionMessages() {
           setFRError(msg.message);
           break;
 
+        case 'licenseRecommendationsLoading':
+          setLRLoading(true);
+          break;
+
+        case 'licenseRecommendations':
+          setLRReport(msg.data);
+          break;
+
+        case 'licenseRecommendationsError':
+          setLRError(msg.message);
+          break;
+
+        case 'orgInfoRecommendationsLoading':
+          setOIRLoading(true);
+          break;
+
+        case 'orgInfoRecommendations':
+          setOIRReport(msg.data);
+          break;
+
+        case 'orgInfoRecommendationsError':
+          setOIRError(msg.message);
+          break;
+
+        case 'architectPrompts':
+          setArchitectPrompts(msg.data.scopes, msg.data.overrides);
+          break;
+
         // aiPdfSummary handled directly in PDFConsentDialog if needed
       }
     };
@@ -136,8 +210,11 @@ export function useExtensionMessages() {
     return () => window.removeEventListener('message', handler);
   }, [
     setResults, setLoading, setProgress, setOrgHistory,
-    setModels, setClaudeAuth, setAIExplanation, setArchitectAnswer,
+    setModels, setClaudeAuth, setOpenAIAuth, setGeminiAuth, setCopilotStatus, setPreferredModelId, setAIExplanation, setArchitectAnswer,
     setCTALoading, setCTAReview, setCTAError,
     setFRReport, setFRLoading, setFRError,
+    setLRReport, setLRLoading, setLRError,
+    setOIRReport, setOIRLoading, setOIRError,
+    setArchitectPrompts,
   ]);
 }

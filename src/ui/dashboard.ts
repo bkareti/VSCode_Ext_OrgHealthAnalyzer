@@ -11,7 +11,8 @@
 import * as vscode from 'vscode';
 import { AnalysisResult, Issue, DashboardMessage, ScanHistoryEntry } from '../types';
 import { reportGenerator } from '../reports/reportGenerator';
-import { getAIService, AIExplanation } from '../services/aiService';
+import { getAIService, AIExplanation, getPreferredModelSelector } from '../services/aiService';
+import { ARCHITECT_PROMPT_SCOPES, loadArchitectPrompts, saveArchitectPrompt } from '../services/architectPrompts';
 
 // ============================================================================
 // Dashboard Panel
@@ -87,6 +88,8 @@ export class HealthDashboardPanel {
 
   /** Enumerate the user's available AI models and send them to the webview. */
   public async pushAvailableModels(): Promise<void> {
+    this.postMessage({ type: 'preferredModel', data: getPreferredModelSelector() });
+
     const ai = getAIService();
     if (!ai) {
       this.postMessage({ type: 'availableModels', data: [{ id: 'auto', label: 'Auto (best available)', backend: 'vscode-lm' }] });
@@ -100,6 +103,8 @@ export class HealthDashboardPanel {
       this.postMessage({ type: 'availableModels', data: [{ id: 'auto', label: 'Auto (best available)', backend: 'vscode-lm' }] });
     }
     this.postMessage({ type: 'claudeAuthStatus', authorized: ai.isClaudeAuthorized() });
+    this.postMessage({ type: 'openaiAuthStatus', authorized: ai.isOpenAIAuthorized() });
+    this.postMessage({ type: 'geminiAuthStatus', authorized: ai.isGeminiAuthorized() });
 
     // Explicitly check GitHub Copilot extension availability via the LM API.
     try {
@@ -303,7 +308,8 @@ export class HealthDashboardPanel {
       }
 
       case 'exportCtaHtml': {
-        const { html, fileName } = message.data as { html: string; fileName: string };
+        // Sent flat (not nested under `data`) — see OutboundMessage in useVSCode.ts.
+        const { html, fileName } = message as unknown as { html: string; fileName: string };
         const defaultUri = vscode.Uri.joinPath(
           vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(require('os').homedir()),
           fileName || 'OrgPulse_CTA_Review.html'
@@ -326,7 +332,11 @@ export class HealthDashboardPanel {
           break; // CTA review disabled in Safe mode — webview handles UI
         }
         const force = (message as { force?: boolean }).force ?? false;
-        await vscode.commands.executeCommand('sfHealthAnalyzer.runCtaReview', message.model ?? 'auto', force);
+        // Pass the override through as-is (undefined when not sent) so the
+        // command falls back to the persisted sfHealthAnalyzer.ai.preferredModel
+        // setting instead of being force-fed the literal string 'auto', which
+        // would silently bypass that setting.
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runCtaReview', message.model, force);
         break;
       }
 
@@ -335,12 +345,39 @@ export class HealthDashboardPanel {
           break; // AI narrative disabled in Safe mode — deterministic scores still render
         }
         const force = (message as { force?: boolean }).force ?? false;
-        await vscode.commands.executeCommand('sfHealthAnalyzer.runFutureReadiness', message.model ?? 'auto', force);
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runFutureReadiness', message.model, force);
+        break;
+      }
+
+      case 'runLicenseRecommendations': {
+        if (this.securityMode === 'safe') {
+          break; // AI narrative disabled in Safe mode — deterministic card values still render
+        }
+        const force = (message as { force?: boolean }).force ?? false;
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runLicenseRecommendations', message.model, force);
+        break;
+      }
+
+      case 'runOrgInfoRecommendations': {
+        if (this.securityMode === 'safe') {
+          break; // AI narrative disabled in Safe mode — deterministic card values still render
+        }
+        const force = (message as { force?: boolean }).force ?? false;
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runOrgInfoRecommendations', message.model, force);
         break;
       }
 
       case 'getModels': {
         await this.pushAvailableModels();
+        break;
+      }
+
+      case 'setPreferredModel': {
+        const { modelId, label } = (message.data as { modelId?: string; label?: string }) ?? {};
+        if (!modelId) { break; }
+        await vscode.workspace.getConfiguration('sfHealthAnalyzer.ai').update('preferredModel', modelId, vscode.ConfigurationTarget.Global);
+        await this.pushAvailableModels();
+        void vscode.window.showInformationMessage(`Active AI model set to: ${label ?? modelId}`);
         break;
       }
 
@@ -375,6 +412,86 @@ export class HealthDashboardPanel {
         break;
       }
 
+      case 'authorizeOpenAI': {
+        const ai = getAIService();
+        if (!ai) {
+          this.postMessage({ type: 'openaiAuthStatus', authorized: false, error: 'AI service not initialised. Run an analysis first.' });
+          break;
+        }
+        const result = await ai.authorizeOpenAI();
+        // Refresh the picker (now includes ChatGPT models) then report status.
+        await this.pushAvailableModels();
+        this.postMessage({
+          type: 'openaiAuthStatus',
+          authorized: ai.isOpenAIAuthorized(),
+          count: result.count,
+          error: result.ok ? undefined : result.error,
+        });
+        if (result.ok) {
+          void vscode.window.showInformationMessage(`ChatGPT connected — ${result.count} model(s) available.`);
+        } else if (result.error && result.error !== 'No API key entered.') {
+          void vscode.window.showWarningMessage(`Could not connect ChatGPT: ${result.error}`);
+        }
+        break;
+      }
+
+      case 'disconnectOpenAI': {
+        const ai = getAIService();
+        if (ai) { await ai.disconnectOpenAI(); }
+        await this.pushAvailableModels();
+        this.postMessage({ type: 'openaiAuthStatus', authorized: false });
+        break;
+      }
+
+      case 'authorizeGemini': {
+        const ai = getAIService();
+        if (!ai) {
+          this.postMessage({ type: 'geminiAuthStatus', authorized: false, error: 'AI service not initialised. Run an analysis first.' });
+          break;
+        }
+        const result = await ai.authorizeGemini();
+        // Refresh the picker (now includes Gemini models) then report status.
+        await this.pushAvailableModels();
+        this.postMessage({
+          type: 'geminiAuthStatus',
+          authorized: ai.isGeminiAuthorized(),
+          count: result.count,
+          error: result.ok ? undefined : result.error,
+        });
+        if (result.ok) {
+          void vscode.window.showInformationMessage(`Gemini connected — ${result.count} model(s) available.`);
+        } else if (result.error && result.error !== 'No API key entered.') {
+          void vscode.window.showWarningMessage(`Could not connect Gemini: ${result.error}`);
+        }
+        break;
+      }
+
+      case 'disconnectGemini': {
+        const ai = getAIService();
+        if (ai) { await ai.disconnectGemini(); }
+        await this.pushAvailableModels();
+        this.postMessage({ type: 'geminiAuthStatus', authorized: false });
+        break;
+      }
+
+      case 'getArchitectPrompts': {
+        this.postMessage({ type: 'architectPrompts', data: { scopes: ARCHITECT_PROMPT_SCOPES, overrides: loadArchitectPrompts() } });
+        break;
+      }
+
+      case 'saveArchitectPrompt': {
+        const { scopeId, text } = (message.data as { scopeId?: string; text?: string }) ?? {};
+        try {
+          if (!scopeId) { throw new Error('Missing scopeId.'); }
+          saveArchitectPrompt(scopeId, text ?? '');
+          this.postMessage({ type: 'architectPrompts', data: { scopes: ARCHITECT_PROMPT_SCOPES, overrides: loadArchitectPrompts() } });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          void vscode.window.showWarningMessage(`Failed to save recommendation prompt: ${msg}`);
+        }
+        break;
+      }
+
       case 'askArchitect': {
         const question = (message.data as { question?: string })?.question ?? '';
         const model = (message.data as { model?: string })?.model;
@@ -397,7 +514,9 @@ export class HealthDashboardPanel {
         }
         this.panel.webview.postMessage({ type: 'architectAnswerLoading', data: true });
         try {
-          const answer = await ai.askArchitect(question, this.currentResult, model);
+          const answer = await ai.askArchitect(question, this.currentResult, model, (progress) => {
+            this.panel.webview.postMessage({ type: 'architectAnswerProgress', data: progress });
+          });
           this.panel.webview.postMessage({ type: 'architectAnswer', data: answer });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -528,6 +647,9 @@ export class HealthDashboardPanel {
       `script-src 'nonce-${nonce}' ${webview.cspSource};`,
       `img-src ${webview.cspSource} data:;`,
       `font-src ${webview.cspSource};`,
+      // Needed for the CTA Review "Download PDF" flow — a hidden srcdoc iframe
+      // renders the report so the native print dialog can be triggered on it.
+      `frame-src 'self';`,
     ].join(' ');
     html = html.replace('<head>', `<head>\n  <meta http-equiv="Content-Security-Policy" content="${csp}">`);
 

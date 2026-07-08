@@ -30,15 +30,21 @@ import { AssessmentContext } from '../types/assessmentContext';
 import { PiiSanitizer } from './assessmentContext/piiSanitizer';
 import { FutureReadinessService, IFutureReadinessService } from './futureReadiness';
 import { FutureReadinessReport, FutureReadinessContext } from '../types/futureReadiness';
+import { ArchitectRecommendationSection } from '../types/architectRecommendations';
+import { LicenseRecommendationsReport } from '../types/licenseRecommendations';
+import { buildLicenseRecommendationsBase } from './licenseRecommendations';
+import { OrgInfoRecommendationsReport } from '../types/orgInfoRecommendations';
+import { buildOrgInfoRecommendationsBase } from './orgInfoRecommendations';
+import { getArchitectPromptAddendum } from './architectPrompts';
 
 // ============================================================================
 // Types
 // ============================================================================
 
-export type AIProviderName = 'claude' | 'copilot' | 'custom' | 'none';
+export type AIProviderName = 'claude' | 'copilot' | 'custom' | 'openai' | 'gemini' | 'none';
 
 /** Which transport a model is reached through. */
-export type AiBackend = 'vscode-lm' | 'custom' | 'anthropic';
+export type AiBackend = 'vscode-lm' | 'custom' | 'anthropic' | 'openai' | 'gemini';
 
 /** A selectable model surfaced to the dashboard model picker. */
 export interface ModelOption {
@@ -118,7 +124,7 @@ function pickBestAnthropicModel(): string {
  * least 16 384 output tokens. The optional `system` instruction is forwarded as a
  * top-level system prompt (nudges the model to emit raw JSON only for the CTA call).
  */
-async function callAnthropic(prompt: string, model?: string, system?: string, maxTokens = 16384): Promise<string> {
+async function callAnthropic(prompt: string, model?: string, system?: string, maxTokens = 16384): Promise<{ text: string; modelId: string; truncated: boolean }> {
   const key = anthropicKeyCache;
   if (!key) {
     throw new Error('Claude is not authorized. Click "Authorize Claude" in the CTA tab and paste an Anthropic API key.');
@@ -148,16 +154,125 @@ async function callAnthropic(prompt: string, model?: string, system?: string, ma
     .filter(c => c.type === 'text' && typeof c.text === 'string')
     .map(c => c.text)
     .join('');
-  if (data.stop_reason === 'max_tokens') {
+  const truncated = data.stop_reason === 'max_tokens';
+  if (truncated) {
     logWarning('AI: Anthropic response hit max_tokens — report JSON may be truncated.');
   }
-  return text;
+  return { text, modelId: useModel, truncated };
+}
+
+// ============================================================================
+// Direct OpenAI (ChatGPT) backend (API-key based, stored in Secret Storage)
+// ============================================================================
+
+const OPENAI_SECRET_KEY = 'sfHealthAnalyzer.ai.openaiApiKey';
+const OPENAI_API_BASE = 'https://api.openai.com/v1';
+
+interface SimpleModel { id: string; label: string; }
+let openaiKeyCache: string | undefined;
+let openaiModelsCache: SimpleModel[] = [];
+
+const OPENAI_CHAT_MODEL_RE = /^(gpt-|o1|o3|o4|chatgpt)/i;
+const OPENAI_EXCLUDE_RE = /(embedding|whisper|tts|moderation|dall-e|davinci|babbage|ada)/i;
+
+/** List the chat-capable OpenAI models the given key can access (also validates the key). */
+async function listOpenAIModels(key: string): Promise<SimpleModel[]> {
+  const resp = await fetch(`${OPENAI_API_BASE}/models`, {
+    headers: { Authorization: `Bearer ${key}` },
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`OpenAI API ${resp.status} ${resp.statusText}${body ? ` — ${body.slice(0, 200)}` : ''}`);
+  }
+  const data = (await resp.json()) as { data?: Array<{ id: string }> };
+  return (data.data || [])
+    .map(m => m.id)
+    .filter(id => OPENAI_CHAT_MODEL_RE.test(id) && !OPENAI_EXCLUDE_RE.test(id))
+    .sort()
+    .map(id => ({ id, label: id }));
+}
+
+/** Pick the best ChatGPT model id from the discovered list. */
+function pickBestOpenAIModel(): string {
+  const ids = openaiModelsCache.map(m => m.id);
+  return (
+    ids.find(i => /^gpt-5/i.test(i)) ||
+    ids.find(i => /^gpt-4o/i.test(i)) ||
+    ids.find(i => /^gpt-4/i.test(i)) ||
+    ids[0] ||
+    'gpt-4o'
+  );
+}
+
+/** Build the OpenAI-compatible endpoint config for the ChatGPT backend. */
+function openAIConfig(customModel?: string): CustomConfig {
+  return {
+    baseUrl: OPENAI_API_BASE,
+    model: customModel && customModel !== 'auto' ? customModel : pickBestOpenAIModel(),
+    apiKey: openaiKeyCache || '',
+  };
+}
+
+// ============================================================================
+// Direct Gemini backend (API-key based, stored in Secret Storage)
+//
+// Uses Gemini's OpenAI-compatibility endpoint for chat/tool calls (identical
+// wire format to OpenAI, so it reuses callCustomChat/runCustomToolLoop below),
+// but its own native endpoint for model listing (the compat layer's /models
+// listing is unreliable).
+// ============================================================================
+
+const GEMINI_SECRET_KEY = 'sfHealthAnalyzer.ai.geminiApiKey';
+const GEMINI_NATIVE_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+const GEMINI_OPENAI_BASE = 'https://generativelanguage.googleapis.com/v1beta/openai';
+
+let geminiKeyCache: string | undefined;
+let geminiModelsCache: SimpleModel[] = [];
+
+/** List the chat-capable Gemini models the given key can access (also validates the key). */
+async function listGeminiModels(key: string): Promise<SimpleModel[]> {
+  const resp = await fetch(`${GEMINI_NATIVE_BASE}/models?key=${encodeURIComponent(key)}`);
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`Gemini API ${resp.status} ${resp.statusText}${body ? ` — ${body.slice(0, 200)}` : ''}`);
+  }
+  const data = (await resp.json()) as {
+    models?: Array<{ name: string; displayName?: string; supportedGenerationMethods?: string[] }>;
+  };
+  return (data.models || [])
+    .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map(m => {
+      const id = m.name.replace(/^models\//, '');
+      return { id, label: m.displayName || id };
+    });
+}
+
+/** Pick the best Gemini model id from the discovered list. */
+function pickBestGeminiModel(): string {
+  const ids = geminiModelsCache.map(m => m.id);
+  return (
+    ids.find(i => /^gemini-.*pro/i.test(i)) ||
+    ids.find(i => /^gemini/i.test(i)) ||
+    ids[0] ||
+    'gemini-1.5-pro'
+  );
+}
+
+/** Build the OpenAI-compatible endpoint config for the Gemini backend. */
+function geminiConfig(customModel?: string): CustomConfig {
+  return {
+    baseUrl: GEMINI_OPENAI_BASE,
+    model: customModel && customModel !== 'auto' ? customModel : pickBestGeminiModel(),
+    apiKey: geminiKeyCache || '',
+  };
 }
 
 // In-memory AI response cache keyed by ruleId + message
 const aiCache = new Map<string, AIExplanation>();
 const ctaCache = new Map<string, CTAReview>();
 const futureReadinessCache = new Map<string, FutureReadinessReport>();
+const licenseRecommendationsCache = new Map<string, LicenseRecommendationsReport>();
+const orgInfoRecommendationsCache = new Map<string, OrgInfoRecommendationsReport>();
 const AI_DEBOUNCE_MS = 2000;
 let lastAiCallTs = 0;
 
@@ -172,6 +287,7 @@ function aiCacheKey(issue: Issue): string {
 interface SelectedModel {
   model: vscode.LanguageModelChat;
   provider: AIProviderName;
+  modelId: string;
 }
 
 /** Ordered family *prefixes* to prefer for a given vendor (newest first). */
@@ -200,18 +316,22 @@ async function resolveCandidate(candidate: ModelCandidate): Promise<vscode.Langu
   return models[0];
 }
 
+/**
+ * Read the user's persisted model preference from settings.
+ * Precedence: ai.preferredModel → legacy ai.ctaModel → 'auto'.
+ */
+export function getPreferredModelSelector(): string {
+  const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
+  return (cfg.get<string>('preferredModel') || cfg.get<string>('ctaModel', 'auto') || 'auto').trim();
+}
+
 async function selectBestModel(overridePreference?: string): Promise<SelectedModel> {
   if (!vscode.lm) {
     throw new Error('VS Code Language Model API not available');
   }
 
   // Read user preference from settings (can be overridden by caller).
-  // Precedence: explicit arg → ai.preferredModel → legacy ai.ctaModel → 'auto'.
-  const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
-  const preference = overridePreference
-    ?? cfg.get<string>('preferredModel')
-    ?? cfg.get<string>('ctaModel', 'auto')
-    ?? 'auto';
+  const preference = overridePreference || getPreferredModelSelector();
 
   // Exact model selector "vendor/family" coming from the dynamic picker.
   if (preference && preference.includes('/') && !preference.startsWith('custom:')) {
@@ -222,7 +342,7 @@ async function selectBestModel(overridePreference?: string): Promise<SelectedMod
       const exact = await vscode.lm.selectChatModels({ vendor, family });
       if (exact && exact.length > 0) {
         logInfo(`AI: selected model ${exact[0].name} (exact ${preference})`);
-        return { model: exact[0], provider: vendor === 'anthropic' ? 'claude' : 'copilot' };
+        return { model: exact[0], provider: vendor === 'anthropic' ? 'claude' : 'copilot', modelId: exact[0].name };
       }
     } catch {
       // exact selector unavailable — fall through to heuristic
@@ -252,7 +372,7 @@ async function selectBestModel(overridePreference?: string): Promise<SelectedMod
     const model = await resolveCandidate(candidate);
     if (model) {
       logInfo(`AI: selected model ${model.name} (vendor=${model.vendor}, family=${model.family})`);
-      return { model, provider: candidate.provider };
+      return { model, provider: candidate.provider, modelId: model.name };
     }
   }
 
@@ -261,7 +381,7 @@ async function selectBestModel(overridePreference?: string): Promise<SelectedMod
   if (anyModels && anyModels.length > 0) {
     const m = anyModels[0];
     logWarning(`AI: no preferred model found — falling back to ${m.name} (vendor=${m.vendor}, family=${m.family})`);
-    return { model: m, provider: m.vendor === 'anthropic' ? 'claude' : 'copilot' };
+    return { model: m, provider: m.vendor === 'anthropic' ? 'claude' : 'copilot', modelId: m.name };
   }
 
   throw new Error('No AI language model available. Install GitHub Copilot Chat, an Anthropic extension, or configure a local endpoint (Settings → sfHealthAnalyzer.ai.custom).');
@@ -302,10 +422,16 @@ function resolveBackend(selectorId?: string): { backend: AiBackend; customModel?
   const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
   let sel = (selectorId || '').trim();
   if (!sel) {
-    sel = (cfg.get<string>('preferredModel') || cfg.get<string>('ctaModel', 'auto') || 'auto').trim();
+    sel = getPreferredModelSelector();
   }
   if (sel.startsWith('anthropic:')) {
     return { backend: 'anthropic', customModel: sel.slice('anthropic:'.length) };
+  }
+  if (sel.startsWith('openai:')) {
+    return { backend: 'openai', customModel: sel.slice('openai:'.length) };
+  }
+  if (sel.startsWith('gemini:')) {
+    return { backend: 'gemini', customModel: sel.slice('gemini:'.length) };
   }
   if (sel.startsWith('custom:')) {
     return { backend: 'custom', customModel: sel.slice('custom:'.length) || getCustomConfig().model };
@@ -332,6 +458,20 @@ async function listModelOptions(): Promise<ModelOption[]> {
     options.push({ id: 'anthropic:auto', label: 'Claude (auto — best available)', backend: 'anthropic' });
     for (const m of anthropicModelsCache) {
       options.push({ id: `anthropic:${m.id}`, label: `Claude: ${m.display_name}`, backend: 'anthropic' });
+    }
+  }
+
+  if (openaiKeyCache) {
+    options.push({ id: 'openai:auto', label: 'ChatGPT (auto — best available)', backend: 'openai' });
+    for (const m of openaiModelsCache) {
+      options.push({ id: `openai:${m.id}`, label: `ChatGPT: ${m.label}`, backend: 'openai' });
+    }
+  }
+
+  if (geminiKeyCache) {
+    options.push({ id: 'gemini:auto', label: 'Gemini (auto — best available)', backend: 'gemini' });
+    for (const m of geminiModelsCache) {
+      options.push({ id: `gemini:${m.id}`, label: `Gemini: ${m.label}`, backend: 'gemini' });
     }
   }
 
@@ -411,6 +551,74 @@ function extractJsonObject(raw: string): string {
     return stripped.slice(first, last + 1).trim();
   }
   return stripped;
+}
+
+/**
+ * Best-effort repair for a JSON object string that was cut off mid-generation
+ * (e.g. the model hit its output-token limit). Closes a dangling string and
+ * any still-open brackets/braces so JSON.parse gets a shot at recovering
+ * whatever fields did complete before the cutoff. Not a general JSON5/JSONC
+ * parser — only handles the "response stopped mid-value" truncation shape.
+ */
+function repairTruncatedJson(text: string): string {
+  let inString = false;
+  const stack: Array<'{' | '['> = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' && text[i - 1] !== '\\') { inString = !inString; continue; }
+    if (inString) { continue; }
+    if (c === '{' || c === '[') { stack.push(c); }
+    else if (c === '}' || c === ']') { stack.pop(); }
+  }
+
+  let repaired = text;
+  if (inString) { repaired += '"'; }
+  repaired = repaired.replace(/,\s*$/, '').replace(/:\s*$/, ': null');
+  while (stack.length) {
+    repaired += stack.pop() === '{' ? '}' : ']';
+  }
+  return repaired;
+}
+
+/**
+ * Marker prefix the webview matches on to show a "choose a different model"
+ * affordance instead of the generic error banner. Keep this string in sync
+ * with the check in the webview's error-banner rendering.
+ */
+const AI_TRUNCATED_MARKER = 'AI response was cut off';
+
+function buildTruncatedReportError(): Error {
+  return new Error(
+    `${AI_TRUNCATED_MARKER} before the report could finish — the selected model's output limit is too small for a report this size. Pick a model with a larger output/context window in Settings, then regenerate.`
+  );
+}
+
+const RECOMMENDATION_PRIORITIES = new Set(['Critical', 'High', 'Medium', 'Low']);
+
+/**
+ * Sanitizes a model-returned "sections" payload into ArchitectRecommendationSection[].
+ * Drops anything malformed rather than throwing — a missing section is fine, a crash isn't.
+ */
+function parseArchitectSections(raw: unknown): ArchitectRecommendationSection[] {
+  if (!Array.isArray(raw)) { return []; }
+  const sections: ArchitectRecommendationSection[] = [];
+  for (const s of raw) {
+    if (!s || typeof s !== 'object') { continue; }
+    const title = typeof (s as { title?: unknown }).title === 'string' ? (s as { title: string }).title.trim() : '';
+    const rawPoints = (s as { points?: unknown }).points;
+    if (!title || !Array.isArray(rawPoints)) { continue; }
+    const points = rawPoints
+      .filter((p): p is Record<string, unknown> => !!p && typeof p === 'object')
+      .map((p) => {
+        const text = typeof p.text === 'string' ? p.text.trim() : '';
+        const priority = RECOMMENDATION_PRIORITIES.has(p.priority as string) ? (p.priority as 'Critical' | 'High' | 'Medium' | 'Low') : 'Medium';
+        const evidence = Array.isArray(p.evidence) ? p.evidence.filter((e): e is string => typeof e === 'string' && e.trim().length > 0) : undefined;
+        return { text, priority, evidence };
+      })
+      .filter((p) => p.text.length > 0);
+    if (points.length > 0) { sections.push({ title, points }); }
+  }
+  return sections;
 }
 
 // ============================================================================
@@ -741,20 +949,35 @@ ${snapshot}
 // Core AI call helper
 // ============================================================================
 
-async function callModel(prompt: string, modelPreference?: string, system?: string): Promise<{ text: string; provider: AIProviderName }> {
+async function callModel(prompt: string, modelPreference?: string, system?: string): Promise<{ text: string; provider: AIProviderName; modelId: string; truncated: boolean }> {
   const { backend, customModel } = resolveBackend(modelPreference);
   if (backend === 'anthropic') {
-    const text = await callAnthropic(prompt, customModel, system);
-    return { text, provider: 'claude' };
+    const { text, modelId, truncated } = await callAnthropic(prompt, customModel, system);
+    return { text, provider: 'claude', modelId, truncated };
+  }
+  if (backend === 'openai') {
+    const cfg = openAIConfig(customModel);
+    const { text, truncated } = await callCustomChat(cfg, prompt, system);
+    return { text, provider: 'openai', modelId: cfg.model, truncated };
+  }
+  if (backend === 'gemini') {
+    const cfg = geminiConfig(customModel);
+    const { text, truncated } = await callCustomChat(cfg, prompt, system);
+    return { text, provider: 'gemini', modelId: cfg.model, truncated };
   }
   if (backend === 'custom') {
-    const text = await callCustomChat(prompt, customModel);
-    return { text, provider: 'custom' };
+    const cfg = { ...getCustomConfig(), model: customModel || getCustomConfig().model };
+    const { text, truncated } = await callCustomChat(cfg, prompt, system);
+    return { text, provider: 'custom', modelId: cfg.model || 'custom', truncated };
   }
 
-  const { model, provider } = await selectBestModel(modelPreference);
+  const { model, provider, modelId } = await selectBestModel(modelPreference);
 
-  const messages = [vscode.LanguageModelChatMessage.User(prompt)];
+  // The VS Code Language Model API has no system-role message — fold the
+  // system instruction in as a leading user turn instead of dropping it.
+  const messages = system
+    ? [vscode.LanguageModelChatMessage.User(system), vscode.LanguageModelChatMessage.User(prompt)]
+    : [vscode.LanguageModelChatMessage.User(prompt)];
   let response;
   try {
     response = await model.sendRequest(
@@ -777,7 +1000,10 @@ async function callModel(prompt: string, modelPreference?: string, system?: stri
     raw += chunk;
   }
 
-  return { text: raw, provider };
+  // No finish-reason is exposed on LanguageModelChatResponse, so truncation
+  // can't be detected directly for this backend — callers fall back to a
+  // JSON-repair heuristic instead.
+  return { text: raw, provider, modelId, truncated: false };
 }
 
 // ============================================================================
@@ -788,43 +1014,53 @@ async function callModel(prompt: string, modelPreference?: string, system?: stri
 interface OAToolCall { id: string; type?: string; function: { name: string; arguments: string }; }
 interface OAMessage { role: string; content: string | null; tool_calls?: OAToolCall[]; tool_call_id?: string; name?: string; }
 
-function customHeaders(custom: CustomConfig): Record<string, string> {
+function customHeaders(cfg: CustomConfig): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (custom.apiKey) { headers['Authorization'] = `Bearer ${custom.apiKey}`; }
+  if (cfg.apiKey) { headers['Authorization'] = `Bearer ${cfg.apiKey}`; }
   return headers;
 }
 
-/** Single-shot completion against the custom endpoint (no tools). */
-async function callCustomChat(prompt: string, model?: string): Promise<string> {
-  const custom = getCustomConfig();
-  const useModel = model || custom.model;
-  if (!custom.baseUrl || !useModel) {
-    throw new Error('Local/custom AI endpoint not configured (Settings → sfHealthAnalyzer.ai.custom.baseUrl and .model).');
+/**
+ * Single-shot completion against any OpenAI-compatible /chat/completions
+ * endpoint — used for the local/custom backend, and (with a fixed base URL +
+ * cached key) for the direct ChatGPT and Gemini backends.
+ */
+async function callCustomChat(cfg: CustomConfig, prompt: string, system?: string): Promise<{ text: string; truncated: boolean }> {
+  if (!cfg.baseUrl || !cfg.model) {
+    throw new Error('AI endpoint not configured (Settings → sfHealthAnalyzer.ai.custom.baseUrl and .model).');
   }
-  const resp = await fetch(`${custom.baseUrl}/chat/completions`, {
+  const messages: OAMessage[] = [];
+  if (system) { messages.push({ role: 'system', content: system }); }
+  messages.push({ role: 'user', content: prompt });
+  const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
     method: 'POST',
-    headers: customHeaders(custom),
-    body: JSON.stringify({ model: useModel, messages: [{ role: 'user', content: prompt }], stream: false }),
+    headers: customHeaders(cfg),
+    body: JSON.stringify({ model: cfg.model, messages, stream: false }),
   });
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
-    throw new Error(`Local/custom endpoint error ${resp.status}: ${body.slice(0, 200)}`);
+    throw new Error(`${cfg.baseUrl} error ${resp.status}: ${body.slice(0, 200)}`);
   }
-  const json = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
-  return json.choices?.[0]?.message?.content ?? '';
+  const json = await resp.json() as { choices?: Array<{ message?: { content?: string }; finish_reason?: string }> };
+  const text = json.choices?.[0]?.message?.content ?? '';
+  const truncated = json.choices?.[0]?.finish_reason === 'length';
+  if (truncated) {
+    logWarning(`AI: ${cfg.baseUrl} response hit the token limit (finish_reason=length) — report JSON may be truncated.`);
+  }
+  return { text, truncated };
 }
 
 /**
- * Tool-augmented chat loop against the custom endpoint (OpenAI tools schema).
- * Falls back to a no-tools answer if the endpoint/model rejects `tools`.
+ * Tool-augmented chat loop against an OpenAI-compatible endpoint (tools
+ * schema) — used for the local/custom backend and the direct ChatGPT/Gemini
+ * backends. Falls back to a no-tools answer if the endpoint/model rejects
+ * `tools`.
  */
-async function runCustomToolLoop(initial: OAMessage[], model?: string): Promise<string> {
-  const custom = getCustomConfig();
-  const useModel = model || custom.model;
-  if (!custom.baseUrl || !useModel) {
-    throw new Error('Local/custom AI endpoint not configured (Settings → sfHealthAnalyzer.ai.custom.baseUrl and .model).');
+async function runCustomToolLoop(cfg: CustomConfig, initial: OAMessage[], onProgress?: (msg: string) => void): Promise<string> {
+  if (!cfg.baseUrl || !cfg.model) {
+    throw new Error('AI endpoint not configured (Settings → sfHealthAnalyzer.ai.custom.baseUrl and .model).');
   }
-  const headers = customHeaders(custom);
+  const headers = customHeaders(cfg);
   const tools = ARCHITECT_TOOLS.map(t => ({
     type: 'function',
     function: { name: t.name, description: t.description, parameters: t.inputSchema },
@@ -835,20 +1071,21 @@ async function runCustomToolLoop(initial: OAMessage[], model?: string): Promise<
   let answer = '';
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const body: Record<string, unknown> = { model: useModel, messages, stream: false };
+    onProgress?.(`Querying your org… step ${round + 1} of ${MAX_TOOL_ROUNDS}`);
+    const body: Record<string, unknown> = { model: cfg.model, messages, stream: false };
     if (allowTools) { body.tools = tools; body.tool_choice = 'auto'; }
 
-    const resp = await fetch(`${custom.baseUrl}/chat/completions`, {
+    const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
       method: 'POST', headers, body: JSON.stringify(body),
     });
     if (!resp.ok) {
       const txt = await resp.text().catch(() => '');
       if (allowTools) {
-        logWarning(`Local/custom endpoint rejected tool calling (${resp.status}) — retrying without tools`);
+        logWarning(`${cfg.baseUrl} rejected tool calling (${resp.status}) — retrying without tools`);
         allowTools = false;
         continue;
       }
-      throw new Error(`Local/custom endpoint error ${resp.status}: ${txt.slice(0, 200)}`);
+      throw new Error(`${cfg.baseUrl} error ${resp.status}: ${txt.slice(0, 200)}`);
     }
 
     const json = await resp.json() as { choices?: Array<{ message?: OAMessage }> };
@@ -884,6 +1121,8 @@ async function runCustomToolLoop(initial: OAMessage[], model?: string): Promise<
 
 const MAX_TOOL_ROUNDS = 5;
 const TOOL_RESULT_MAX_CHARS = 6000;
+/** Upper bound on how long "Ask the Architect" will wait before failing with a clear timeout error. */
+const ASK_ARCHITECT_TIMEOUT_MS = 45_000;
 
 const ARCHITECT_TOOLS: vscode.LanguageModelChatTool[] = [
   {
@@ -973,7 +1212,7 @@ type AnthropicContentBlock =
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string };
 
-async function runAnthropicToolLoop(system: string, question: string, model?: string): Promise<string> {
+async function runAnthropicToolLoop(system: string, question: string, model?: string, onProgress?: (msg: string) => void): Promise<string> {
   const key = anthropicKeyCache;
   if (!key) {
     throw new Error('Claude is not authorized. Click "Authorize Claude" in the CTA tab and paste an Anthropic API key.');
@@ -987,6 +1226,7 @@ async function runAnthropicToolLoop(system: string, question: string, model?: st
   let answer = '';
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    onProgress?.(`Querying your org… step ${round + 1} of ${MAX_TOOL_ROUNDS}`);
     const resp = await fetch(`${ANTHROPIC_API_BASE}/v1/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION },
@@ -1075,6 +1315,8 @@ export class AIService {
     this.assessmentContextService   = assessmentContextService ?? AssessmentContextService.createDefault();
     this.futureReadinessService     = futureReadinessService ?? FutureReadinessService.createDefault();
     void this.loadAnthropicKey();
+    void this.loadOpenAIKey();
+    void this.loadGeminiKey();
   }
 
   // ---------------------------------------------------------------------------
@@ -1141,6 +1383,132 @@ export class AIService {
   }
 
   // ---------------------------------------------------------------------------
+  // ChatGPT (OpenAI API key) authorization
+  // ---------------------------------------------------------------------------
+
+  /** Load any stored OpenAI key from Secret Storage into the module cache. */
+  private async loadOpenAIKey(): Promise<void> {
+    try {
+      const key = await this.context.secrets.get(OPENAI_SECRET_KEY);
+      openaiKeyCache = key || undefined;
+      if (openaiKeyCache && !openaiModelsCache.length) {
+        try { openaiModelsCache = await listOpenAIModels(openaiKeyCache); } catch { /* offline / invalid */ }
+      }
+    } catch { /* secrets unavailable */ }
+  }
+
+  /** Whether an OpenAI (ChatGPT) API key is currently connected. */
+  public isOpenAIAuthorized(): boolean {
+    return !!openaiKeyCache;
+  }
+
+  /**
+   * Authorize ChatGPT by validating and storing an OpenAI API key. If no key
+   * is passed, prompts the user for one (stored securely in Secret Storage).
+   * Returns the number of chat models discovered on success.
+   */
+  public async authorizeOpenAI(apiKey?: string): Promise<{ ok: boolean; count?: number; error?: string }> {
+    let key = (apiKey || '').trim();
+    if (!key) {
+      key = ((await vscode.window.showInputBox({
+        title: 'Authorize ChatGPT — OpenAI API key',
+        prompt: 'Paste your OpenAI API key (sk-…). Stored securely in VS Code Secret Storage; never written to settings or synced.',
+        placeHolder: 'sk-...',
+        password: true,
+        ignoreFocusOut: true,
+      })) || '').trim();
+    }
+    if (!key) { return { ok: false, error: 'No API key entered.' }; }
+
+    let models: SimpleModel[];
+    try {
+      models = await listOpenAIModels(key);
+    } catch (e) {
+      return { ok: false, error: `Could not validate the key: ${getErrorMessage(e)}` };
+    }
+    if (!models.length) {
+      return { ok: false, error: 'Key accepted but no chat models were returned for this account.' };
+    }
+
+    await this.context.secrets.store(OPENAI_SECRET_KEY, key);
+    openaiKeyCache = key;
+    openaiModelsCache = models;
+    logInfo(`AI: ChatGPT (OpenAI) authorized — ${models.length} model(s) available.`);
+    return { ok: true, count: models.length };
+  }
+
+  /** Remove the stored OpenAI key (disconnect ChatGPT). */
+  public async disconnectOpenAI(): Promise<void> {
+    try { await this.context.secrets.delete(OPENAI_SECRET_KEY); } catch { /* ignore */ }
+    openaiKeyCache = undefined;
+    openaiModelsCache = [];
+    logInfo('AI: ChatGPT (OpenAI) disconnected.');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Gemini (Google AI API key) authorization
+  // ---------------------------------------------------------------------------
+
+  /** Load any stored Gemini key from Secret Storage into the module cache. */
+  private async loadGeminiKey(): Promise<void> {
+    try {
+      const key = await this.context.secrets.get(GEMINI_SECRET_KEY);
+      geminiKeyCache = key || undefined;
+      if (geminiKeyCache && !geminiModelsCache.length) {
+        try { geminiModelsCache = await listGeminiModels(geminiKeyCache); } catch { /* offline / invalid */ }
+      }
+    } catch { /* secrets unavailable */ }
+  }
+
+  /** Whether a Gemini API key is currently connected. */
+  public isGeminiAuthorized(): boolean {
+    return !!geminiKeyCache;
+  }
+
+  /**
+   * Authorize Gemini by validating and storing a Google AI API key. If no key
+   * is passed, prompts the user for one (stored securely in Secret Storage).
+   * Returns the number of chat models discovered on success.
+   */
+  public async authorizeGemini(apiKey?: string): Promise<{ ok: boolean; count?: number; error?: string }> {
+    let key = (apiKey || '').trim();
+    if (!key) {
+      key = ((await vscode.window.showInputBox({
+        title: 'Authorize Gemini — Google AI API key',
+        prompt: 'Paste your Google AI API key (AIza…). Stored securely in VS Code Secret Storage; never written to settings or synced.',
+        placeHolder: 'AIza...',
+        password: true,
+        ignoreFocusOut: true,
+      })) || '').trim();
+    }
+    if (!key) { return { ok: false, error: 'No API key entered.' }; }
+
+    let models: SimpleModel[];
+    try {
+      models = await listGeminiModels(key);
+    } catch (e) {
+      return { ok: false, error: `Could not validate the key: ${getErrorMessage(e)}` };
+    }
+    if (!models.length) {
+      return { ok: false, error: 'Key accepted but no chat models were returned for this account.' };
+    }
+
+    await this.context.secrets.store(GEMINI_SECRET_KEY, key);
+    geminiKeyCache = key;
+    geminiModelsCache = models;
+    logInfo(`AI: Gemini authorized — ${models.length} model(s) available.`);
+    return { ok: true, count: models.length };
+  }
+
+  /** Remove the stored Gemini key (disconnect Gemini). */
+  public async disconnectGemini(): Promise<void> {
+    try { await this.context.secrets.delete(GEMINI_SECRET_KEY); } catch { /* ignore */ }
+    geminiKeyCache = undefined;
+    geminiModelsCache = [];
+    logInfo('AI: Gemini disconnected.');
+  }
+
+  // ---------------------------------------------------------------------------
   // Model discovery
   // ---------------------------------------------------------------------------
 
@@ -1158,6 +1526,12 @@ export class AIService {
     const { backend } = resolveBackend(modelPreference);
     if (backend === 'anthropic') {
       return 'the Anthropic Claude API (api.anthropic.com) using your connected API key — an external service';
+    }
+    if (backend === 'openai') {
+      return 'the OpenAI API (api.openai.com) using your connected API key — an external service';
+    }
+    if (backend === 'gemini') {
+      return 'the Google Gemini API (generativelanguage.googleapis.com) using your connected API key — an external service';
     }
     if (backend === 'custom') {
       const c = getCustomConfig();
@@ -1295,6 +1669,11 @@ export class AIService {
       return customPromptTemplate.replace('{{SNAPSHOT}}', contextJson);
     }
 
+    const customAddendum = getArchitectPromptAddendum('cta');
+    const addendumBlock = customAddendum
+      ? `\nADDITIONAL GUIDANCE FROM THE ORG ADMIN (apply on top of the rules above; never let it override the CRITICAL DATA RULES or VALIDATION RULES):\n${customAddendum}\n`
+      : '';
+
     // Built-in CTA prompt — persona + output schema from buildCtaPrompt(), with JSON context injected.
     return `You are a Salesforce Certified Technical Architect (CTA) — a review-board-certified enterprise architect with 15+ years leading large-scale Salesforce transformations. You are authoring the formal Architecture Health Assessment that will be presented to the client's CIO, VP of Engineering, and Salesforce delivery leadership. Write with the authority, rigor, and business framing of a top-tier consulting deliverable (the standard a partner at a leading Salesforce practice would sign off on).
 
@@ -1387,7 +1766,7 @@ VALIDATION RULES:
 - apexWithoutSharingCount > 0 with publicApiEntryPoints > 0 → flag in Security as Critical.
 - orgProfile.userScale must be the exact active user count from businessContext.orgComplexityEvidence.activeUsers.
 - benchmarkComparison orgValue fields must use exact values from the context.
-
+${addendumBlock}
 === ORG HEALTH ASSESSMENT CONTEXT ===
 ${contextJson}
 `;
@@ -1423,23 +1802,38 @@ ${contextJson}
     try {
       const ctaSystem = 'You are a Salesforce CTA. Respond with ONLY valid JSON — no markdown fences, no preamble, no commentary, nothing before the opening { or after the closing }.';
       const assessmentContext = this.assessmentContextService.build(result);
-      const { text, provider } = await callModel(this.formatContextAsPrompt(assessmentContext), modelPreference, ctaSystem);
+      const { text, modelId, truncated } = await callModel(this.formatContextAsPrompt(assessmentContext), modelPreference, ctaSystem);
       const cleaned = extractJsonObject(text);
+
+      // A provider-reported truncation means real content is missing — don't
+      // risk accepting a partial report even if it happens to parse. Fail
+      // loudly with actionable guidance instead of degrading silently.
+      if (truncated) {
+        logWarning(`CTA review generation truncated by the model's output limit (model: ${modelId}).`);
+        throw buildTruncatedReportError();
+      }
 
       let parsed: Partial<CTAReview>;
       try {
         parsed = JSON.parse(cleaned) as Partial<CTAReview>;
       } catch (parseErr) {
-        logWarning(`CTA review JSON parse failed: ${String(parseErr)}\nRaw: ${cleaned.slice(0, 300)}`);
-        const minimalReview: CTAReview = {
-          verdict: 'Conditional Go',
-          executiveSummary: cleaned.slice(0, 600),
-          domainFindings: [],
-          modelUsed: provider,
-          generatedAt: new Date().toISOString(),
-        };
-        ctaCache.set(cacheKey, minimalReview);
-        return minimalReview;
+        logWarning(`CTA review JSON parse failed, attempting repair: ${String(parseErr)}\nRaw: ${cleaned.slice(0, 300)}`);
+        let repaired: Partial<CTAReview>;
+        try {
+          repaired = JSON.parse(repairTruncatedJson(cleaned)) as Partial<CTAReview>;
+        } catch (repairErr) {
+          logError('CTA review JSON repair also failed', repairErr as Error);
+          throw buildTruncatedReportError();
+        }
+        const looksComplete = typeof repaired.verdict === 'string'
+          && typeof repaired.executiveSummary === 'string' && repaired.executiveSummary.length > 20
+          && Array.isArray(repaired.domainFindings);
+        if (!looksComplete) {
+          logWarning('CTA review repair recovered JSON but core fields are missing — treating as truncated.');
+          throw buildTruncatedReportError();
+        }
+        logInfo('CTA review recovered via truncated-JSON repair.');
+        parsed = repaired;
       }
 
       // Normalise domain findings — ensure all 5 domains exist
@@ -1498,12 +1892,12 @@ ${contextJson}
         criticalRisks:             parsed.criticalRisks,
         configFirstOpportunities:  parsed.configFirstOpportunities,
         quickWins:                 parsed.quickWins,
-        modelUsed:                 provider,
+        modelUsed:                 modelId,
         generatedAt:               new Date().toISOString(),
       };
 
       ctaCache.set(cacheKey, review);
-      logInfo(`CTA review complete — verdict: ${review.verdict}, sections: ${review.architectureMaturity ? '12-section v1.9.2' : 'legacy'}, model: ${provider}`);
+      logInfo(`CTA review complete — verdict: ${review.verdict}, sections: ${review.architectureMaturity ? '12-section v1.9.2' : 'legacy'}, model: ${modelId}`);
       return review;
     } catch (err) {
       logError('CTA review generation failed', err as Error);
@@ -1521,8 +1915,9 @@ ${contextJson}
   /**
    * Enriches the deterministic Future Readiness result with an AI-authored
    * narrative. Scores, grades, gaps, and the roadmap are computed entirely by
-   * OrgPulse and passed through verbatim — the model only writes prose. Degrades
-   * to the score-only report if parsing fails.
+   * OrgPulse and passed through verbatim — the model only writes prose. Throws
+   * a clear, actionable error (see `buildTruncatedReportError`) rather than
+   * silently returning the score-only report if the narrative can't be parsed.
    */
   public async synthesizeFutureReadiness(
     result: AnalysisResult,
@@ -1558,21 +1953,43 @@ ${contextJson}
       const context = this.futureReadinessService.buildContext(base, result);
       // Defence-in-depth: strip any residual PII before the context leaves the machine.
       const safeContext = new PiiSanitizer().sanitize(context);
-      const { text, provider } = await callModel(this.formatFutureReadinessPrompt(safeContext), modelPreference, system);
+      const { text, modelId, truncated } = await callModel(this.formatFutureReadinessPrompt(safeContext), modelPreference, system);
       const cleaned = extractJsonObject(text);
+
+      // Same policy as the CTA review: a truncated/unparseable response never
+      // silently stands in as the finished narrative — fail with guidance to
+      // pick a model with a larger output limit instead.
+      if (truncated) {
+        logWarning(`Future Readiness narrative truncated by the model's output limit (model: ${modelId}).`);
+        throw buildTruncatedReportError();
+      }
 
       let parsed: {
         executiveSummary?: string;
         overallMaturity?: string;
-        packs?: Array<{ packId?: string; currentMaturity?: string; businessImpact?: string; summary?: string }>;
+        packs?: Array<{
+          packId?: string;
+          currentMaturity?: string;
+          businessImpact?: string;
+          summary?: string;
+          sections?: unknown;
+        }>;
       };
       try {
         parsed = JSON.parse(cleaned);
       } catch (parseErr) {
-        logWarning(`Future Readiness narrative JSON parse failed: ${String(parseErr)}`);
-        const fallback: FutureReadinessReport = { ...base, modelUsed: provider };
-        futureReadinessCache.set(cacheKey, fallback);
-        return fallback;
+        logWarning(`Future Readiness narrative JSON parse failed, attempting repair: ${String(parseErr)}`);
+        try {
+          parsed = JSON.parse(repairTruncatedJson(cleaned));
+        } catch (repairErr) {
+          logError('Future Readiness narrative JSON repair also failed', repairErr as Error);
+          throw buildTruncatedReportError();
+        }
+        if (!parsed.executiveSummary || !Array.isArray(parsed.packs) || parsed.packs.length === 0) {
+          logWarning('Future Readiness repair recovered JSON but core fields are missing — treating as truncated.');
+          throw buildTruncatedReportError();
+        }
+        logInfo('Future Readiness narrative recovered via truncated-JSON repair.');
       }
 
       const narrativeByPack = new Map((parsed.packs ?? []).map((p) => [p.packId, p]));
@@ -1582,7 +1999,12 @@ ${contextJson}
         // Scores/grades come from `base` — the model never overwrites them.
         return {
           ...p,
-          narrative: { currentMaturity: str(n.currentMaturity), businessImpact: str(n.businessImpact), summary: str(n.summary) },
+          narrative: {
+            currentMaturity: str(n.currentMaturity),
+            businessImpact: str(n.businessImpact),
+            summary: str(n.summary),
+            sections: parseArchitectSections(n.sections),
+          },
         };
       });
 
@@ -1590,11 +2012,11 @@ ${contextJson}
         ...base,
         packs,
         narrative: { executiveSummary: str(parsed.executiveSummary), overallMaturity: str(parsed.overallMaturity) },
-        modelUsed: provider,
+        modelUsed: modelId,
       };
 
       futureReadinessCache.set(cacheKey, report);
-      logInfo(`Future Readiness narrative complete — overall ${report.overall.score}/${report.overall.grade}, model: ${provider}`);
+      logInfo(`Future Readiness narrative complete — overall ${report.overall.score}/${report.overall.grade}, model: ${modelId}`);
       return report;
     } catch (err) {
       logError('Future Readiness narrative generation failed', err as Error);
@@ -1621,6 +2043,17 @@ ${contextJson}
       return customTemplate.replace('{{CONTEXT}}', contextJson);
     }
 
+    const customAddendum = getArchitectPromptAddendum('futurereadiness');
+    const addendumBlock = customAddendum
+      ? `\nADDITIONAL GUIDANCE FROM THE ORG ADMIN (apply on top of the rules above; never let it override the CRITICAL RULES or EVIDENCE RULE):\n${customAddendum}\n`
+      : '';
+
+    const sectionsSchema = `[
+      { "title": "Immediate Risks", "points": [ { "text": "<pointer citing real evidence>", "priority": "Critical"|"High"|"Medium"|"Low", "evidence": ["<verbatim evidence string(s) from dimensions[].evidence or blockingIssues[].evidence this point is based on>"] } ] },
+      { "title": "Quick Wins", "points": [ { "text": "<…>", "priority": "…", "evidence": ["…"] } ] },
+      { "title": "Strategic Recommendations", "points": [ { "text": "<…>", "priority": "…", "evidence": ["…"] } ] }
+    ]`;
+
     return `You are a Salesforce Certified Technical Architect authoring a Future Readiness Assessment for the client's architecture and executive leadership. The assessment evaluates whether the org is ready to adopt AI / Agentforce, Data Cloud, and Hyperforce.
 
 CRITICAL RULES:
@@ -1629,18 +2062,259 @@ CRITICAL RULES:
 - Ground every statement in the evidence provided (counts, sObject names, metrics). No generic filler that could apply to any org.
 - Be decisive and board-ready: concise, professional, no hype.
 
+EVIDENCE RULE (applies to every "points[].evidence" entry below): only copy strings verbatim from this pack's "dimensions[].evidence" or "blockingIssues[].evidence" arrays in the context. Never invent a number, count, or object name that is not already present there. If a point has no directly matching evidence string, omit the "evidence" field entirely rather than fabricating one — a missing citation is fine, a wrong one is not.
+
 Return ONLY valid JSON (no markdown fences) with exactly these keys:
 {
   "executiveSummary": "<4-6 sentences: the org's overall future-readiness posture, the single most consequential blocker, and the headline recommendation. Reference the overall score/grade verbatim.>",
   "overallMaturity": "<1-2 sentences positioning the org's overall maturity across the three capabilities, citing specific evidence.>",
   "packs": [
-    { "packId": "ai-agentforce", "currentMaturity": "<1-2 sentences on current AI/Agentforce readiness, citing the pack score and weakest dimension.>", "businessImpact": "<1-2 sentences on the business consequence of the gaps.>", "summary": "<1 sentence headline recommendation for this pack.>" },
-    { "packId": "data-cloud", "currentMaturity": "<…>", "businessImpact": "<…>", "summary": "<…>" },
-    { "packId": "hyperforce", "currentMaturity": "<…>", "businessImpact": "<…>", "summary": "<…>" }
+    { "packId": "ai-agentforce", "currentMaturity": "<1-2 sentences on current AI/Agentforce readiness, citing the pack score and weakest dimension.>", "businessImpact": "<1-2 sentences on the business consequence of the gaps.>", "summary": "<1 sentence headline recommendation for this pack.>", "sections": ${sectionsSchema} },
+    { "packId": "data-cloud", "currentMaturity": "<…>", "businessImpact": "<…>", "summary": "<…>", "sections": ${sectionsSchema} },
+    { "packId": "hyperforce", "currentMaturity": "<…>", "businessImpact": "<…>", "summary": "<…>", "sections": ${sectionsSchema} }
   ]
 }
-
+${addendumBlock}
 === FUTURE READINESS CONTEXT ===
+${contextJson}
+`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // License Recommendations — AI narrative over the deterministic cards
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Enriches the deterministic License Recommendations cards (Org Info →
+   * Clouds & Licenses) with AI-authored evidence bullets. Values (counts,
+   * impact) are computed entirely by OrgPulse and passed through verbatim —
+   * the model only writes narrative `evidencePoints` per card.
+   */
+  public async synthesizeLicenseRecommendations(
+    result: AnalysisResult,
+    modelPreference?: string,
+    force = false,
+  ): Promise<LicenseRecommendationsReport | null> {
+    const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
+    if (!cfg.get<boolean>('enabled', true)) {
+      throw new Error('AI features are disabled. Enable them in Settings → sfHealthAnalyzer.ai.enabled.');
+    }
+
+    const base: LicenseRecommendationsReport =
+      result.licenseRecommendations ?? buildLicenseRecommendationsBase(result);
+
+    const cacheKey = `${base.generatedAt}::${modelPreference || 'auto'}`;
+    const cached = force ? undefined : licenseRecommendationsCache.get(cacheKey);
+    if (cached) {
+      logInfo('AI: returning cached License Recommendations narrative');
+      return cached;
+    }
+
+    const consented = await this.ensureCtaConsent(modelPreference);
+    if (!consented) {
+      throw new Error('License Recommendations narrative cancelled — you declined to send license data to the AI model.');
+    }
+
+    try {
+      const system = 'You are a Salesforce licensing consultant. Respond with ONLY valid JSON — no markdown fences, no preamble, nothing before the opening { or after the closing }.';
+      const context = {
+        orgEdition: result.orgDetails?.orgType ?? 'unknown',
+        cards: base.cards.map((c) => ({ id: c.id, title: c.title, value: c.value, valueLabel: c.valueLabel, impact: c.impact })),
+      };
+      const safeContext = new PiiSanitizer().sanitize(context);
+      const { text, modelId, truncated } = await callModel(this.formatLicenseRecommendationsPrompt(safeContext), modelPreference, system);
+      const cleaned = extractJsonObject(text);
+
+      if (truncated) {
+        logWarning(`License Recommendations narrative truncated by the model's output limit (model: ${modelId}).`);
+        throw buildTruncatedReportError();
+      }
+
+      let parsed: { cards?: Array<{ id?: string; points?: unknown }> };
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (parseErr) {
+        logWarning(`License Recommendations JSON parse failed, attempting repair: ${String(parseErr)}`);
+        try {
+          parsed = JSON.parse(repairTruncatedJson(cleaned));
+        } catch (repairErr) {
+          logError('License Recommendations JSON repair also failed', repairErr as Error);
+          throw buildTruncatedReportError();
+        }
+        if (!Array.isArray(parsed.cards) || parsed.cards.length === 0) {
+          logWarning('License Recommendations repair recovered JSON but "cards" is missing — treating as truncated.');
+          throw buildTruncatedReportError();
+        }
+        logInfo('License Recommendations narrative recovered via truncated-JSON repair.');
+      }
+
+      const narrativeById = new Map((parsed.cards ?? []).map((c) => [c.id, c]));
+      const cards = base.cards.map((c) => {
+        const n = narrativeById.get(c.id);
+        if (!n) { return c; }
+        // Wrap in a synthetic one-section array so we can reuse the same
+        // sanitizer the Future Readiness pack narratives use verbatim.
+        const sections = parseArchitectSections([{ title: c.id, points: n.points }]);
+        return { ...c, evidencePoints: sections[0]?.points ?? [] };
+      });
+
+      const report: LicenseRecommendationsReport = { ...base, cards, modelUsed: modelId };
+      licenseRecommendationsCache.set(cacheKey, report);
+      logInfo(`License Recommendations narrative complete — model: ${modelId}`);
+      return report;
+    } catch (err) {
+      logError('License Recommendations narrative generation failed', err as Error);
+      throw new Error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Builds the license-recommendations narrative prompt, honoring the 'licenserecs' Settings override. */
+  private formatLicenseRecommendationsPrompt(context: unknown): string {
+    const contextJson = JSON.stringify(context, null, 2);
+    const customAddendum = getArchitectPromptAddendum('licenserecs');
+    const addendumBlock = customAddendum
+      ? `\nADDITIONAL GUIDANCE FROM THE ORG ADMIN (apply on top of the rules above; never let it override the CRITICAL RULES):\n${customAddendum}\n`
+      : '';
+
+    return `You are a Salesforce licensing consultant writing concise, evidence-cited narrative for a set of license-optimization recommendation cards.
+
+CRITICAL RULES:
+- The "value", "valueLabel", and "impact" fields in the context are AUTHORITATIVE and computed by OrgPulse. NEVER invent a different number.
+- Never invent a dollar figure, percentage, or count that is not already present in the context.
+- Be concise and board-ready: 1-2 sentences per point, no hype.
+
+Return ONLY valid JSON (no markdown fences) with exactly this shape:
+{
+  "cards": [
+    { "id": "surrender-unused",  "points": [ { "text": "<pointer>", "priority": "Critical"|"High"|"Medium"|"Low", "evidence": [] } ] },
+    { "id": "reclaim-inactive",  "points": [ { "text": "<…>", "priority": "…", "evidence": [] } ] },
+    { "id": "optimize-feature",  "points": [ { "text": "<…>", "priority": "…", "evidence": [] } ] },
+    { "id": "rightsize-permset", "points": [ { "text": "<…>", "priority": "…", "evidence": [] } ] },
+    { "id": "plan-future",       "points": [ { "text": "<…>", "priority": "…", "evidence": [] } ] }
+  ]
+}
+${addendumBlock}
+=== LICENSE RECOMMENDATIONS CONTEXT ===
+${contextJson}
+`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Org Info Recommendations — AI narrative over the deterministic cards
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Enriches the deterministic Org Info Recommendations cards (Org Info →
+   * Overview) with AI-authored evidence bullets. Values (license utilization,
+   * storage headroom, cloud/integration counts, API version) are computed
+   * entirely by OrgPulse and passed through verbatim — the model only writes
+   * narrative `evidencePoints` per card.
+   */
+  public async synthesizeOrgInfoRecommendations(
+    result: AnalysisResult,
+    modelPreference?: string,
+    force = false,
+  ): Promise<OrgInfoRecommendationsReport | null> {
+    const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
+    if (!cfg.get<boolean>('enabled', true)) {
+      throw new Error('AI features are disabled. Enable them in Settings → sfHealthAnalyzer.ai.enabled.');
+    }
+
+    const base: OrgInfoRecommendationsReport =
+      result.orgInfoRecommendations ?? buildOrgInfoRecommendationsBase(result);
+
+    const cacheKey = `${base.generatedAt}::${modelPreference || 'auto'}`;
+    const cached = force ? undefined : orgInfoRecommendationsCache.get(cacheKey);
+    if (cached) {
+      logInfo('AI: returning cached Org Info Recommendations narrative');
+      return cached;
+    }
+
+    const consented = await this.ensureCtaConsent(modelPreference);
+    if (!consented) {
+      throw new Error('Org Info Recommendations narrative cancelled — you declined to send org profile data to the AI model.');
+    }
+
+    try {
+      const system = 'You are a Salesforce Certified Technical Architect. Respond with ONLY valid JSON — no markdown fences, no preamble, nothing before the opening { or after the closing }.';
+      const context = {
+        orgEdition: result.orgDetails?.orgType ?? 'unknown',
+        cards: base.cards.map((c) => ({ id: c.id, title: c.title, value: c.value, valueLabel: c.valueLabel, impact: c.impact })),
+      };
+      const safeContext = new PiiSanitizer().sanitize(context);
+      const { text, modelId, truncated } = await callModel(this.formatOrgInfoRecommendationsPrompt(safeContext), modelPreference, system);
+      const cleaned = extractJsonObject(text);
+
+      if (truncated) {
+        logWarning(`Org Info Recommendations narrative truncated by the model's output limit (model: ${modelId}).`);
+        throw buildTruncatedReportError();
+      }
+
+      let parsed: { cards?: Array<{ id?: string; points?: unknown }> };
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (parseErr) {
+        logWarning(`Org Info Recommendations JSON parse failed, attempting repair: ${String(parseErr)}`);
+        try {
+          parsed = JSON.parse(repairTruncatedJson(cleaned));
+        } catch (repairErr) {
+          logError('Org Info Recommendations JSON repair also failed', repairErr as Error);
+          throw buildTruncatedReportError();
+        }
+        if (!Array.isArray(parsed.cards) || parsed.cards.length === 0) {
+          logWarning('Org Info Recommendations repair recovered JSON but "cards" is missing — treating as truncated.');
+          throw buildTruncatedReportError();
+        }
+        logInfo('Org Info Recommendations narrative recovered via truncated-JSON repair.');
+      }
+
+      const narrativeById = new Map((parsed.cards ?? []).map((c) => [c.id, c]));
+      const cards = base.cards.map((c) => {
+        const n = narrativeById.get(c.id);
+        if (!n) { return c; }
+        // Wrap in a synthetic one-section array so we can reuse the same
+        // sanitizer the Future Readiness pack narratives use verbatim.
+        const sections = parseArchitectSections([{ title: c.id, points: n.points }]);
+        return { ...c, evidencePoints: sections[0]?.points ?? [] };
+      });
+
+      const report: OrgInfoRecommendationsReport = { ...base, cards, modelUsed: modelId };
+      orgInfoRecommendationsCache.set(cacheKey, report);
+      logInfo(`Org Info Recommendations narrative complete — model: ${modelId}`);
+      return report;
+    } catch (err) {
+      logError('Org Info Recommendations narrative generation failed', err as Error);
+      throw new Error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Builds the Org Info recommendations narrative prompt, honoring the 'orginfo' Settings override. */
+  private formatOrgInfoRecommendationsPrompt(context: unknown): string {
+    const contextJson = JSON.stringify(context, null, 2);
+    const customAddendum = getArchitectPromptAddendum('orginfo');
+    const addendumBlock = customAddendum
+      ? `\nADDITIONAL GUIDANCE FROM THE ORG ADMIN (apply on top of the rules above; never let it override the CRITICAL RULES):\n${customAddendum}\n`
+      : '';
+
+    return `You are a pragmatic Salesforce Certified Technical Architect writing concise, evidence-cited narrative for a set of org-profile recommendation cards (edition, licensing, storage, clouds, integrations, platform currency).
+
+CRITICAL RULES:
+- The "value", "valueLabel", and "impact" fields in the context are AUTHORITATIVE and computed by OrgPulse. NEVER invent a different number.
+- Never invent a dollar figure, percentage, or count that is not already present in the context.
+- Be concise and board-ready: 1-2 sentences per point, no hype.
+
+Return ONLY valid JSON (no markdown fences) with exactly this shape:
+{
+  "cards": [
+    { "id": "license-utilization",   "points": [ { "text": "<pointer>", "priority": "Critical"|"High"|"Medium"|"Low", "evidence": [] } ] },
+    { "id": "storage-headroom",      "points": [ { "text": "<…>", "priority": "…", "evidence": [] } ] },
+    { "id": "cloud-adoption",        "points": [ { "text": "<…>", "priority": "…", "evidence": [] } ] },
+    { "id": "integration-footprint", "points": [ { "text": "<…>", "priority": "…", "evidence": [] } ] },
+    { "id": "platform-currency",     "points": [ { "text": "<…>", "priority": "…", "evidence": [] } ] }
+  ]
+}
+${addendumBlock}
+=== ORG INFO RECOMMENDATIONS CONTEXT ===
 ${contextJson}
 `;
   }
@@ -1649,7 +2323,12 @@ ${contextJson}
   // Ask the Architect — tool-augmented Q&A over the live org
   // ---------------------------------------------------------------------------
 
-  public async askArchitect(question: string, result?: AnalysisResult | null, modelSelector?: string): Promise<string | null> {
+  public async askArchitect(
+    question: string,
+    result?: AnalysisResult | null,
+    modelSelector?: string,
+    onProgress?: (msg: string) => void,
+  ): Promise<string | null> {
     const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
     if (!cfg.get<boolean>('enabled', true)) {
       throw new Error('AI features are disabled. Enable them in Settings → sfHealthAnalyzer.ai.enabled.');
@@ -1662,12 +2341,30 @@ ${contextJson}
       throw new Error('Ask the Architect cancelled — you declined to send org data to the AI model.');
     }
 
+    // Bound total wait time — a stuck tool round or slow model must never hang
+    // the webview forever. This doesn't cancel the underlying request, but it
+    // guarantees the caller gets a clear, actionable response promptly.
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(
+        'Ask the Architect is taking longer than expected — try a more specific question or a faster/different model.'
+      )), ASK_ARCHITECT_TIMEOUT_MS);
+    });
+
+    return Promise.race([this.runAskArchitectBackend(question, result, modelSelector, onProgress), timeout]);
+  }
+
+  private async runAskArchitectBackend(
+    question: string,
+    result: AnalysisResult | null | undefined,
+    modelSelector: string | undefined,
+    onProgress?: (msg: string) => void,
+  ): Promise<string | null> {
     const { backend, customModel } = resolveBackend(modelSelector);
 
     // ── Direct Anthropic Claude backend (API key + tool use) ─────────────────
     if (backend === 'anthropic') {
       try {
-        const answer = await runAnthropicToolLoop(buildArchitectSystemPrompt(result), question.trim(), customModel);
+        const answer = await runAnthropicToolLoop(buildArchitectSystemPrompt(result), question.trim(), customModel, onProgress);
         logInfo('Ask the Architect answered (backend: anthropic)');
         return answer.trim();
       } catch (err) {
@@ -1676,16 +2373,44 @@ ${contextJson}
       }
     }
 
+    // ── Direct ChatGPT (OpenAI) backend (API key + tool use) ─────────────────
+    if (backend === 'openai') {
+      try {
+        const answer = await runCustomToolLoop(openAIConfig(customModel), [
+          { role: 'system', content: buildArchitectSystemPrompt(result) },
+          { role: 'user', content: question.trim() },
+        ], onProgress);
+        logInfo('Ask the Architect answered (backend: openai)');
+        return answer.trim();
+      } catch (err) {
+        logError('Ask the Architect (openai backend) failed', err as Error);
+        throw new Error(err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    // ── Direct Gemini backend (API key + tool use) ───────────────────────────
+    if (backend === 'gemini') {
+      try {
+        const answer = await runCustomToolLoop(geminiConfig(customModel), [
+          { role: 'system', content: buildArchitectSystemPrompt(result) },
+          { role: 'user', content: question.trim() },
+        ], onProgress);
+        logInfo('Ask the Architect answered (backend: gemini)');
+        return answer.trim();
+      } catch (err) {
+        logError('Ask the Architect (gemini backend) failed', err as Error);
+        throw new Error(err instanceof Error ? err.message : String(err));
+      }
+    }
+
     // ── Local / custom backend (OpenAI-compatible tool calling) ──────────────
     if (backend === 'custom') {
       try {
-        const answer = await runCustomToolLoop(
-          [
-            { role: 'system', content: buildArchitectSystemPrompt(result) },
-            { role: 'user', content: question.trim() },
-          ],
-          customModel,
-        );
+        const cfg = { ...getCustomConfig(), model: customModel || getCustomConfig().model };
+        const answer = await runCustomToolLoop(cfg, [
+          { role: 'system', content: buildArchitectSystemPrompt(result) },
+          { role: 'user', content: question.trim() },
+        ], onProgress);
         logInfo('Ask the Architect answered (backend: custom)');
         return answer.trim();
       } catch (err) {
@@ -1704,6 +2429,7 @@ ${contextJson}
 
       let answer = '';
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        onProgress?.(`Querying your org… step ${round + 1} of ${MAX_TOOL_ROUNDS}`);
         const response = await model.sendRequest(
           messages,
           { tools: ARCHITECT_TOOLS, justification: 'OrgPulse — answering an architecture question using read-only org queries.' }
@@ -1742,7 +2468,7 @@ ${contextJson}
       logError('Ask the Architect failed', err as Error);
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(
-        `${msg}. Tip: connect Claude (🔑 Authorize Claude), sign in to GitHub Copilot, or configure a Custom (API key) endpoint, then pick that model.`,
+        `${msg}. Tip: connect Claude, ChatGPT, or Gemini in Settings, sign in to GitHub Copilot, or configure a Custom (API key) endpoint, then pick that model.`,
       );
     }
   }
@@ -1759,6 +2485,8 @@ ${contextJson}
     aiCache.clear();
     ctaCache.clear();
     futureReadinessCache.clear();
+    licenseRecommendationsCache.clear();
+    orgInfoRecommendationsCache.clear();
     vscode.window.showInformationMessage('AI consent revoked. All cached AI results cleared.');
   }
 }

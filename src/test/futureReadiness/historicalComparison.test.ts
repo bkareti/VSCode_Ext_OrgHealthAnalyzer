@@ -5,7 +5,7 @@ import { FutureReadinessResult } from '../../types/futureReadiness';
 function makeResult(overall: number, aiScore: number): FutureReadinessResult {
   return {
     packs: [
-      { packId: 'ai-agentforce', packName: 'AI', overallScore: aiScore, grade: 'C', confidence: 'high', maturityLevel: 3, dimensions: [], strengths: [], blockingIssues: [], quickWins: [], strategicInitiatives: [] },
+      { packId: 'ai-agentforce', packName: 'AI', overallScore: aiScore, grade: 'C', confidence: 'high', maturityLevel: 3, dimensions: [], strengths: [], blockingIssues: [], quickWins: [], strategicInitiatives: [], signals: [] },
     ],
     overall: { score: overall, grade: 'C' },
     roadmap: [],

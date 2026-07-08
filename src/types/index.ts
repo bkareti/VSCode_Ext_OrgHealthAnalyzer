@@ -3,9 +3,17 @@
  */
 
 import type { FutureReadinessReport } from './futureReadiness';
+import type { LicenseRecommendationsReport } from './licenseRecommendations';
+import type { OrgInfoRecommendationsReport } from './orgInfoRecommendations';
 
 // Re-export Future Readiness types so consumers (incl. the webview) can import from '@/types'.
 export * from './futureReadiness';
+
+// Re-export License Recommendations types so consumers (incl. the webview) can import from '@/types'.
+export * from './licenseRecommendations';
+
+// Re-export Org Info Recommendations types so consumers (incl. the webview) can import from '@/types'.
+export * from './orgInfoRecommendations';
 
 // ============================================================================
 // Issue & Severity Types
@@ -192,6 +200,10 @@ export interface AnalysisResult {
   ctaReview?: CTAReview;
   /** Future Readiness assessment (AI/Agentforce, Data Cloud, Hyperforce) — deterministic scores + optional AI narrative */
   futureReadiness?: FutureReadinessReport;
+  /** License optimization cards for Org Info → Clouds & Licenses — deterministic values + optional AI evidence narrative */
+  licenseRecommendations?: LicenseRecommendationsReport;
+  /** Org profile recommendation cards for Org Info → Overview — deterministic values + optional AI evidence narrative */
+  orgInfoRecommendations?: OrgInfoRecommendationsReport;
   /** License usage summary from UserLicense */
   licenseSummary?: LicenseSummary[];
   /** Feature license summary from FeatureLicense object */
@@ -716,6 +728,8 @@ export type DashboardMessageType =
   | 'filterBySeverity'
   | 'runCtaReview'
   | 'runFutureReadiness'
+  | 'runLicenseRecommendations'
+  | 'runOrgInfoRecommendations'
   | 'setSecurityMode'
   | 'cancelAnalysis'
   | 'refresh'
@@ -726,6 +740,13 @@ export type DashboardMessageType =
   | 'getModels'
   | 'authorizeClaude'
   | 'disconnectClaude'
+  | 'authorizeOpenAI'
+  | 'disconnectOpenAI'
+  | 'authorizeGemini'
+  | 'disconnectGemini'
+  | 'setPreferredModel'
+  | 'getArchitectPrompts'
+  | 'saveArchitectPrompt'
   | 'ready';
 
 export interface DashboardMessage {

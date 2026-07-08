@@ -3,10 +3,11 @@ import { useOrgStore } from '@/store/slices/orgStore';
 import GlassCard from '@/components/common/GlassCard';
 import DonutChart from '@/components/charts/DonutChart';
 import ColumnChart from '@/components/charts/ColumnChart';
+import CloudsLicensesTab from './orgInfo/CloudsLicensesTab';
+import OrgInfoRecommendations from './orgInfo/OrgInfoRecommendations';
 import type {
   LicenseSummary,
   CloudStatus,
-  FeatureLicenseSummary,
   OrgExtendedDetails,
 } from '@/types';
 
@@ -30,6 +31,12 @@ function instanceRegion(name: string): string | null {
 function fmt(n: number | null | undefined): string {
   if (n == null) return 'N/A';
   return Number(n).toLocaleString();
+}
+
+// Auto-scales a storage size in MB to GB or TB — 1024 MB = 1 GB, 1024 GB = 1 TB.
+function formatStorage(mb: number): string {
+  const gb = mb / 1024;
+  return gb >= 1024 ? `${(gb / 1024).toFixed(1)} TB` : `${gb.toFixed(1)} GB`;
 }
 
 // ─── Pagination ────────────────────────────────────────────────────────────────
@@ -86,7 +93,7 @@ interface KpiCardProps {
 }
 function KpiCard({ iconBg, value, label, sub }: KpiCardProps) {
   return (
-    <div className="relative overflow-hidden flex flex-col gap-1.5 p-3.5 rounded-xl border border-sf-border bg-white/[0.03] min-w-0">
+    <div className="relative overflow-hidden flex flex-col gap-1.5 p-3.5 rounded-xl border border-sf-border bg-sf-glass min-w-0">
       <span className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: iconBg.replace(',.15)', ',1)') }} />
       <span className="text-[10px] font-semibold uppercase tracking-wider text-sf-muted">{label}</span>
       <span className="text-[22px] font-bold text-sf-text tabular-nums leading-tight truncate w-full">
@@ -157,14 +164,6 @@ const DEMO_CLOUDS: CloudStatus[] = [
   { name: 'Agentforce',         key: 'agentforce',   enabled: true  },
 ];
 
-const DEMO_FEATURE_LICENSES: FeatureLicenseSummary[] = [
-  { name: 'Einstein GPT',         status: 'Active',   totalLicenses: 50,  usedLicenses: 32 },
-  { name: 'Agentforce',           status: 'Active',   totalLicenses: 100, usedLicenses: 64 },
-  { name: 'Data Cloud',           status: 'Inactive', totalLicenses: 0,   usedLicenses: 0  },
-  { name: 'Revenue Intelligence', status: 'Active',   totalLicenses: 25,  usedLicenses: 18 },
-  { name: 'Field Service',        status: 'Active',   totalLicenses: 200, usedLicenses: 145},
-];
-
 // ─── Main component ────────────────────────────────────────────────────────────
 export default function OrgInfo() {
   const [subTab, setSubTab] = useState<SubTab>('Overview');
@@ -198,7 +197,7 @@ export default function OrgInfo() {
   const storageLimitMB = ext.storageLimitMB ?? (isDemo ? 1048576 : 0);
   const storagePct     = storageLimitMB ? Math.round(storageUsedMB / storageLimitMB * 100) : 0;
   const storageLabel   = storageLimitMB > 0
-    ? `${(storageUsedMB / 1024).toFixed(1)} GB of ${Math.round(storageLimitMB / 1024)} TB (${storagePct}%)`
+    ? `${formatStorage(storageUsedMB)} of ${formatStorage(storageLimitMB)} (${storagePct}%)`
     : null;
   const trustStatus    = od?.trustStatus;
 
@@ -209,7 +208,6 @@ export default function OrgInfo() {
   const envSum    = results?.orgInfoData?.environments    ?? (isDemo ? { production: 1, fullSandboxes: 2, partialSandboxes: 3, developerSandboxes: 8, scratchOrgs: 12, total: 26 } : null);
   const intSum    = results?.orgInfoData?.integrations    ?? (isDemo ? { namedCredentials: 23, connectedApps: 18, externalCredentials: 6, remoteSites: 31, authProviders: 4, certificates: 9, total: 38 } : null);
   const qf        = results?.orgInfoData?.quickFacts      ?? (isDemo ? { customObjects: 286, users: 4250, roles: 98, profiles: 42, permissionSets: 118, permissionSetGroups: 16, publicGroups: 24, queues: 37, flows: 1842, apexClasses: 1842, triggers: 354, lwcComponents: 412 } : null);
-  const featLics: FeatureLicenseSummary[] = od?.featureLicenses ?? (isDemo ? DEMO_FEATURE_LICENSES : []);
   const pkgList   = results?.orgInventory?.installedPackages ?? [];
   const appList   = od?.apps ?? [];
   const stdObjs   = inv?.standardObjectCount ?? (isDemo ? 212 : null);
@@ -263,8 +261,6 @@ export default function OrgInfo() {
   ] : [];
 
   // ── Paginated tables ─────────────────────────────────────────────────────────
-  const licPager  = usePagination(licenses);
-  const featPager = usePagination(featLics);
   const pkgPager  = usePagination(pkgList);
   const appPager  = usePagination(appList);
 
@@ -341,12 +337,12 @@ export default function OrgInfo() {
               value={usedLic ? usedLic.toLocaleString() : '—'}
               label="Licenses Used" sub={totalLic ? `of ${totalLic.toLocaleString()} · ${licUtilPct}%` : null} />
             <KpiCard iconBg="rgba(236,72,153,.15)"
-              value={storageLabel ? `${(storageUsedMB / 1024).toFixed(1)} GB` : '—'}
-              label="Data Storage" sub={storageLimitMB ? `of ${Math.round(storageLimitMB / 1024)} TB · ${storagePct}%` : null} />
+              value={storageLabel ? formatStorage(storageUsedMB) : '—'}
+              label="Data Storage" sub={storageLimitMB ? `of ${formatStorage(storageLimitMB)} · ${storagePct}%` : null} />
           </div>
 
           {/* Row 1: Org Details | Clouds Overview | License Summary */}
-          <div className="grid gap-4 items-start"
+          <div className="grid gap-4"
             style={{ gridTemplateColumns: 'minmax(0,1.3fr) minmax(0,1fr) minmax(0,1fr)' }}>
 
             {/* Organization Details */}
@@ -480,7 +476,7 @@ export default function OrgInfo() {
           </div>
 
           {/* Row 2: Packages | Apps | Environments | Integrations */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 items-start">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
 
             {/* Installed Packages by Type */}
             <GlassCard>
@@ -507,7 +503,7 @@ export default function OrgInfo() {
                 {appSum && <span className="text-[10px] text-sf-muted">Total: {appSum.total}</span>}
               </div>
               {appBarData.length > 0
-                ? <ColumnChart data={appBarData} height={140} multiColor />
+                ? <ColumnChart data={appBarData} height={140} multiColor showLegend />
                 : <p className="text-xs text-sf-muted py-4 text-center">No app data</p>}
               <button type="button" className="w-full text-center text-[11px] font-semibold mt-2"
                 style={{ color: 'var(--sf-accent, #0176d3)' }}
@@ -584,126 +580,15 @@ export default function OrgInfo() {
               </div>
             </GlassCard>
           )}
+
+          {/* AI Recommendations */}
+          <OrgInfoRecommendations results={results} />
         </div>
       )}
 
       {/* ════ CLOUDS & LICENSES ══════════════════════════════════════════════════ */}
       {subTab === 'Clouds & Licenses' && (
-        <div className="space-y-4">
-          <GlassCard title="Clouds Overview">
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-              {clouds.map(c => (
-                <div key={c.key}
-                  className="flex items-center justify-between px-3 py-2 rounded-lg text-xs"
-                  style={{
-                    background: c.enabled ? 'rgba(34,197,94,.07)' : 'rgba(239,68,68,.05)',
-                    border: `1px solid ${c.enabled ? 'rgba(34,197,94,.25)' : 'rgba(239,68,68,.18)'}`,
-                  }}>
-                  <span className="text-sf-text font-medium">{c.name}</span>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
-                    style={{
-                      background: c.enabled ? 'rgba(34,197,94,.15)' : 'rgba(239,68,68,.12)',
-                      color: c.enabled ? '#22c55e' : '#ef4444',
-                    }}>
-                    {c.enabled ? 'Enabled' : 'Disabled'}
-                  </span>
-                </div>
-              ))}
-            </div>
-            {clouds.length > 0 && (
-              <div className="flex gap-6 mt-4 text-xs">
-                <span style={{ color: '#22c55e', fontWeight: 600 }}>● Enabled ({cloudsEnabled})</span>
-                <span style={{ color: '#ef4444', fontWeight: 600 }}>● Disabled ({cloudsDisabled})</span>
-              </div>
-            )}
-          </GlassCard>
-
-          <GlassCard title={`License Summary (${licenses.length} types)`}>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-xs">
-                <thead>
-                  <tr className="border-b border-sf-border">
-                    {['License Type', 'Assigned', 'Available', 'Total', 'Utilization'].map(h => (
-                      <th key={h} className="text-left py-2 px-2 text-sf-muted font-medium">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {licPager.pageItems.map((l, i) => {
-                    const pct = l.totalLicenses > 0 ? Math.round(l.usedLicenses / l.totalLicenses * 100) : 0;
-                    const clr = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#22c55e';
-                    return (
-                      <tr key={l.name} className={`border-b border-sf-border/40 ${i % 2 ? 'bg-sf-bg-3/30' : ''}`}>
-                        <td className="py-1.5 px-2 text-sf-text">{l.name}</td>
-                        <td className="py-1.5 px-2 text-sf-muted tabular-nums">{l.usedLicenses.toLocaleString()}</td>
-                        <td className="py-1.5 px-2 text-sf-muted tabular-nums">{Math.max(l.totalLicenses - l.usedLicenses, 0).toLocaleString()}</td>
-                        <td className="py-1.5 px-2 text-sf-muted tabular-nums">{l.totalLicenses.toLocaleString()}</td>
-                        <td className="py-1.5 px-2 min-w-[100px]">
-                          <div className="flex items-center gap-2">
-                            <div className="flex-1 h-1.5 rounded-full bg-sf-border overflow-hidden">
-                              <div className="h-full rounded-full" style={{ width: `${pct}%`, background: clr }} />
-                            </div>
-                            <span className="text-[10px] text-sf-muted w-8 text-right">{pct}%</span>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <Pager {...licPager} />
-          </GlassCard>
-
-          {/* Feature licenses (merged from former "Feature Usage" sub-tab) */}
-          {featLics.length > 0 && (
-            <GlassCard title={`Feature Licenses (${featLics.length})`}>
-              <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-sf-border">
-                      {['Feature', 'Status', 'Used / Total', 'Utilization'].map(h => (
-                        <th key={h} className="text-left py-2 px-2 text-sf-muted font-medium">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {featPager.pageItems.map((fl, i) => {
-                      const fPct = fl.totalLicenses > 0 ? Math.round(fl.usedLicenses / fl.totalLicenses * 100) : 0;
-                      const fClr = fPct > 90 ? '#ef4444' : fPct > 70 ? '#f59e0b' : '#22c55e';
-                      return (
-                        <tr key={fl.name} className={`border-b border-sf-border/40 ${i % 2 ? 'bg-sf-bg-3/30' : ''}`}>
-                          <td className="py-2 px-2 text-sf-text font-medium">{fl.name}</td>
-                          <td className="py-2 px-2">
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold"
-                              style={{
-                                background: fl.status === 'Active' ? 'rgba(34,197,94,.15)' : 'rgba(107,114,128,.15)',
-                                color:      fl.status === 'Active' ? '#22c55e' : '#6b7280',
-                              }}>
-                              {fl.status}
-                            </span>
-                          </td>
-                          <td className="py-2 px-2 text-sf-muted tabular-nums">
-                            {fl.usedLicenses} / {fl.totalLicenses}
-                          </td>
-                          <td className="py-2 px-2 min-w-[120px]">
-                            <div className="flex items-center gap-2">
-                              <div className="flex-1 h-1.5 rounded-full bg-sf-border overflow-hidden">
-                                <div className="h-full rounded-full" style={{ width: `${fPct}%`, background: fClr }} />
-                              </div>
-                              <span className="text-[10px] text-sf-muted w-8 text-right">{fPct}%</span>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <Pager {...featPager} />
-            </GlassCard>
-          )}
-        </div>
+        <CloudsLicensesTab results={results} isDemo={isDemo} />
       )}
 
       {/* ════ INSTALLED PACKAGES ═════════════════════════════════════════════════ */}

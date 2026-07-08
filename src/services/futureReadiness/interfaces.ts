@@ -43,6 +43,10 @@ export interface ReadinessCheck {
   dimension: string;
   /** Relative weight of this check within its dimension. */
   weight: number;
+  /** Short human-readable title for UI display, e.g. "Duplicate Rules on key objects". */
+  label?: string;
+  /** Evergreen, static one-sentence explanation shown regardless of pass/fail status. */
+  whyItMatters?: string;
   evaluate(input: ReadinessInput): ReadinessCheckOutcome;
 }
 

@@ -71,6 +71,7 @@ export class FutureReadinessService implements IFutureReadinessService {
         severity: g.severity,
         area: g.area,
         whyItMatters: g.whyItMatters,
+        evidence: g.evidence,
       })),
       strengths: p.strengths,
     }));

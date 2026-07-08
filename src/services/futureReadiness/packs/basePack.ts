@@ -51,6 +51,7 @@ export abstract class BaseReadinessPack implements IReadinessPack {
       blockingIssues,
       quickWins,
       strategicInitiatives,
+      signals,
     };
   }
 }

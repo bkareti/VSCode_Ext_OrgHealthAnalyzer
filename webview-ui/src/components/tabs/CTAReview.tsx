@@ -4,22 +4,32 @@ import { useDashboardStore } from '@/store/dashboardStore';
 import { useAIStore } from '@/store/slices/aiStore';
 import { useVSCode } from '@/hooks/useVSCode';
 import GlassCard from '@/components/common/GlassCard';
-import InfoCard from '@/components/common/InfoCard';
 import Badge from '@/components/common/Badge';
 import Button from '@/components/common/Button';
 import EmptyState from '@/components/common/EmptyState';
+import ModelLimitErrorBanner from '@/components/common/ModelLimitErrorBanner';
 import CTALoadingScene from '@/components/loading/CTALoadingScene';
+import RadarChart from '@/components/charts/RadarChart';
+import RiskMatrix from '@/components/charts/RiskMatrix';
+import DependencyDiagram from '@/components/charts/DependencyDiagram';
 import type { CTAReview as CTAReviewType } from '@/types';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const SUBTABS = ['Risk Summary', 'Findings', 'Recommendations', 'Verdict'] as const;
+const SUBTABS = ['Risk Summary', 'Findings', 'Architecture', 'Recommendations', 'Verdict'] as const;
 type SubTab = (typeof SUBTABS)[number];
 
 const VERDICT_COLOR: Record<string, string> = {
   Go: 'text-score-good border-score-good bg-score-good/10',
   'Conditional Go': 'text-score-fair border-score-fair bg-score-fair/10',
   'No-Go': 'text-sev-error border-sev-error bg-sev-error/10',
+};
+
+const SWOT_STYLE: Record<'Strength' | 'Weakness' | 'Opportunity' | 'Threat', { border: string; bg: string; text: string }> = {
+  Strength: { border: 'border-score-good/30', bg: 'bg-score-good/5', text: 'text-score-good' },
+  Weakness: { border: 'border-sev-error/30', bg: 'bg-sev-error/5', text: 'text-sev-error' },
+  Opportunity: { border: 'border-sf-accent/30', bg: 'bg-sf-accent/5', text: 'text-sf-accent' },
+  Threat: { border: 'border-sev-warning/30', bg: 'bg-sev-warning/5', text: 'text-sev-warning' },
 };
 
 const HIGHLIGHTS = [
@@ -829,6 +839,37 @@ export default function CTAReview() {
     const dateStr = new Date().toISOString().slice(0, 10);
     postMessage({ command: 'exportCtaHtml', html, fileName: `OrgPulse_Advisory_${dateStr}.html` });
   };
+  const handleDownloadPdf = () => {
+    if (!review) return;
+    const orgAlias =
+      (results?.orgDetails as Record<string, string> | undefined)?.alias ??
+      (results?.orgDetails as Record<string, string> | undefined)?.username ??
+      'Salesforce-Org';
+    const html = generateCtaReportHtml(review, orgAlias);
+
+    // Hidden srcdoc iframe + contentWindow.print() — opens the native OS print
+    // dialog pre-loaded with the styled report so the user can "Save as PDF".
+    // No PDF library needed (see requires `frame-src 'self'` in the webview CSP).
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.style.visibility = 'hidden';
+    document.body.appendChild(iframe);
+
+    const cleanup = () => {
+      if (iframe.parentNode) { document.body.removeChild(iframe); }
+    };
+    iframe.onload = () => {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+      // print() blocks until the dialog closes in Chromium; this is a safety
+      // net in case a host implements it asynchronously instead.
+      setTimeout(cleanup, 1000);
+    };
+    iframe.srcdoc = html;
+  };
 
   // ── Derived scan metadata ─────────────────────────────────────────────────
 
@@ -969,7 +1010,10 @@ export default function CTAReview() {
                       👁 View
                     </Button>
                     <Button size="sm" variant="ghost" onClick={handleDownload}>
-                      ⬇ Download
+                      ⬇ HTML
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={handleDownloadPdf}>
+                      🖨 PDF
                     </Button>
                   </div>
                 </td>
@@ -993,7 +1037,7 @@ export default function CTAReview() {
       <div className="space-y-5 p-6">
         {renderPageHeader(false)}
 
-        {ctaError && <InfoCard variant="error">{ctaError}</InfoCard>}
+        {ctaError && <ModelLimitErrorBanner message={ctaError} onRetry={() => handleRun(false)} />}
 
         {/* Feature highlights — 20:80 icon/content layout */}
         <div className="grid grid-cols-3 gap-3">
@@ -1205,6 +1249,8 @@ export default function CTAReview() {
     <div className="space-y-5 p-6">
       {renderPageHeader(true)}
 
+      {ctaError && <ModelLimitErrorBanner message={ctaError} onRetry={() => handleRun(true)} />}
+
       {/* Sub-tab nav */}
       <div className="flex gap-1 border-b border-sf-border">
         {SUBTABS.map((t) => (
@@ -1229,6 +1275,49 @@ export default function CTAReview() {
           <GlassCard title="Executive Summary">
             <p className="text-xs leading-relaxed text-sf-text-2">{review.executiveSummary}</p>
           </GlassCard>
+
+          {(review.healthScoreBreakdown?.length ?? 0) > 0 && (
+            <GlassCard title="Health Score Breakdown">
+              <div className="flex flex-wrap items-start gap-6">
+                <div className="min-w-60 flex-1 space-y-3">
+                  {review.healthScoreBreakdown!.map((item) => {
+                    const pct = Math.round((item.score / item.maxScore) * 100);
+                    const barColor =
+                      pct >= 80 ? 'bg-score-good' : pct >= 60 ? 'bg-score-fair' : 'bg-sev-error';
+                    const textColor =
+                      pct >= 80 ? 'text-score-good' : pct >= 60 ? 'text-score-fair' : 'text-sev-error';
+                    const trendIcon =
+                      item.trend === 'improving' ? '↑' : item.trend === 'declining' ? '↓' : '→';
+                    return (
+                      <div key={item.area}>
+                        <div className="mb-1 flex items-center justify-between text-xs">
+                          <span className="text-sf-text">{item.area}</span>
+                          <span className="flex items-center gap-1.5">
+                            <span className={`font-semibold ${textColor}`}>{pct}</span>
+                            <span className="text-sf-muted">{trendIcon}</span>
+                          </span>
+                        </div>
+                        <div className="h-1.5 overflow-hidden rounded-full bg-sf-bg-3">
+                          <div className={`h-full rounded-full ${barColor}`} style={{ width: `${pct}%` }} />
+                        </div>
+                        <p className="mt-1 text-[10px] leading-snug text-sf-muted">{item.keyFinding}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="w-60 shrink-0">
+                  <RadarChart
+                    data={review.healthScoreBreakdown!.map((i) => ({
+                      subject: i.area,
+                      value: Math.round((i.score / i.maxScore) * 100),
+                      fullMark: 100,
+                    }))}
+                    height={220}
+                  />
+                </div>
+              </div>
+            </GlassCard>
+          )}
 
           {review.architectureMaturity && (
             <GlassCard title="Architecture Maturity">
@@ -1271,17 +1360,7 @@ export default function CTAReview() {
                     <p className="mb-2 text-[10px] tracking-wider text-sf-muted uppercase">
                       Risk Heatmap
                     </p>
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      {review.riskAnalysis.riskHeatmap.map((cell, i) => (
-                        <div key={i} className="rounded border border-sf-border bg-sf-bg-3 p-2">
-                          <p className="text-[11px] font-medium text-sf-text">{cell.domain}</p>
-                          <p className="mt-0.5 text-[10px] text-sf-muted">
-                            L: <span className="capitalize">{cell.likelihood}</span> · I:{' '}
-                            <span className="capitalize">{cell.impact}</span>
-                          </p>
-                        </div>
-                      ))}
-                    </div>
+                    <RiskMatrix cells={review.riskAnalysis.riskHeatmap} />
                   </div>
                 )}
               </div>
@@ -1359,6 +1438,117 @@ export default function CTAReview() {
               )}
             </GlassCard>
           ))}
+        </div>
+      )}
+
+      {/* Architecture */}
+      {subTab === 'Architecture' && (
+        <div className="space-y-4">
+          {review.orgProfile && (
+            <GlassCard title="Org Profile">
+              <dl className="grid grid-cols-2 gap-4 text-xs sm:grid-cols-4">
+                {[
+                  { label: 'Complexity', value: review.orgProfile.complexity },
+                  { label: 'User Scale', value: review.orgProfile.userScale },
+                  { label: 'Integration', value: review.orgProfile.integrationFootprint },
+                  { label: 'Customization', value: review.orgProfile.customizationLevel },
+                ].map(({ label, value }) => (
+                  <div key={label}>
+                    <dt className="mb-0.5 text-[10px] tracking-wider text-sf-muted uppercase">{label}</dt>
+                    <dd className="text-sm leading-snug font-medium text-sf-text">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </GlassCard>
+          )}
+
+          {(review.benchmarkComparison?.length ?? 0) > 0 && (
+            <GlassCard title="Benchmark Comparison">
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-sf-border">
+                      {['Metric', 'Your Org', 'Industry Avg', 'Top Quartile', 'Status'].map((h) => (
+                        <th
+                          key={h}
+                          className="py-2 pr-4 text-left text-[10px] font-medium tracking-wider text-sf-muted uppercase"
+                        >
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {review.benchmarkComparison!.map((b, i) => {
+                      const statusColor =
+                        b.status === 'Above'
+                          ? 'text-score-good'
+                          : b.status === 'At'
+                            ? 'text-sf-accent'
+                            : 'text-sev-error';
+                      const statusLabel =
+                        b.status === 'Above' ? '↑ Above' : b.status === 'At' ? '= At' : '↓ Below';
+                      return (
+                        <tr key={i} className="border-b border-sf-border/50">
+                          <td className="py-2 pr-4 text-sf-text">{b.metric}</td>
+                          <td className="py-2 pr-4 font-semibold text-sf-text">{b.orgValue}</td>
+                          <td className="py-2 pr-4 text-sf-muted">{b.industryAvg}</td>
+                          <td className="py-2 pr-4 text-sf-muted">{b.topQuartile}</td>
+                          <td className={`py-2 pr-4 font-medium ${statusColor}`}>{statusLabel}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </GlassCard>
+          )}
+
+          {(review.architectureObservations?.length ?? 0) > 0 && (
+            <GlassCard title="Architecture Observations">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {(['Strength', 'Weakness', 'Opportunity', 'Threat'] as const).map((cls) => {
+                  const items = review.architectureObservations!.filter((o) => o.classification === cls);
+                  if (items.length === 0) { return null; }
+                  const style = SWOT_STYLE[cls];
+                  return (
+                    <div key={cls} className={`rounded-lg border p-3 ${style.border} ${style.bg}`}>
+                      <p className={`mb-2 text-[10px] font-semibold tracking-wider uppercase ${style.text}`}>
+                        {cls}
+                      </p>
+                      <ul className="space-y-1.5">
+                        {items.map((o, i) => (
+                          <li key={i} className="flex gap-1.5 text-xs text-sf-text-2">
+                            <span className={style.text}>•</span>
+                            {o.observation}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  );
+                })}
+              </div>
+            </GlassCard>
+          )}
+
+          {(results?.dependencyGraph?.nodes.length ?? 0) > 0 && (
+            <GlassCard title="Architecture Map">
+              <p className="mb-3 text-[10px] text-sf-muted">
+                Top connected components by dependency fan-in/fan-out — Automation → Logic → Data.
+              </p>
+              <DependencyDiagram graph={results!.dependencyGraph!} />
+            </GlassCard>
+          )}
+
+          {!review.orgProfile &&
+            (review.benchmarkComparison?.length ?? 0) === 0 &&
+            (review.architectureObservations?.length ?? 0) === 0 &&
+            (results?.dependencyGraph?.nodes.length ?? 0) === 0 && (
+              <EmptyState
+                title="No architecture details available"
+                description="This section populates when the AI report includes org profile, benchmark, or observation data."
+              />
+            )}
         </div>
       )}
 

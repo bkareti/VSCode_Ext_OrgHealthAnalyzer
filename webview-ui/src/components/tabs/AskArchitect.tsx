@@ -9,6 +9,7 @@ export default function AskArchitect() {
 
   const architectAnswer = useAIStore((s) => s.architectAnswer);
   const architectAnswerLoading = useAIStore((s) => s.architectAnswerLoading);
+  const architectAnswerProgress = useAIStore((s) => s.architectAnswerProgress);
   const copilotAvailable = useAIStore((s) => s.copilotAvailable);
   const claudeAuthorized = useAIStore((s) => s.claudeAuthorized);
 
@@ -80,7 +81,7 @@ export default function AskArchitect() {
       {architectAnswerLoading && (
         <div className="flex items-center gap-2 text-xs text-sf-muted">
           <span className="h-3 w-3 animate-spin rounded-full border border-sf-accent border-t-transparent" />
-          Querying your org…
+          {architectAnswerProgress ?? 'Querying your org…'}
         </div>
       )}
 

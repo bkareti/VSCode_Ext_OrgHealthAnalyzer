@@ -1,20 +1,32 @@
 @import "tailwindcss";
 
-/* ─── Tailwind v4 theme — maps to VS Code CSS variables ─────────────────── */
+/* ─── Tailwind v4 theme tokens — dark is the default palette; see the
+   `[data-theme="light"]` override block below for the light palette. Theme is
+   applied by the app (ThemeToggle → themeStore) setting `data-theme` on
+   `<html>`, independent of VS Code's own editor theme. ─────────────────── */
 @theme {
   /* Backgrounds */
-  --color-sf-bg:       var(--sf-bg-primary, #1e1e1e);
-  --color-sf-bg-2:     var(--sf-bg-secondary, #252526);
-  --color-sf-bg-3:     var(--sf-bg-tertiary, #2d2d30);
+  --color-sf-bg:       #1e1e1e;
+  --color-sf-bg-2:     #252526;
+  --color-sf-bg-3:     #2d2d30;
 
   /* Text */
-  --color-sf-text:     var(--sf-text-primary, #cccccc);
-  --color-sf-text-2:   var(--sf-text-secondary, #9d9d9d);
-  --color-sf-muted:    var(--sf-text-muted, #6b6b6b);
+  --color-sf-text:     #cccccc;
+  --color-sf-text-2:   #9d9d9d;
+  --color-sf-muted:    #6b6b6b;
 
   /* Accent */
-  --color-sf-accent:   var(--vscode-focusBorder, #007fd4);
+  --color-sf-accent:   #007fd4;
   --color-sf-border:   rgba(255, 255, 255, 0.08);
+
+  /* Glass surfaces — used by GlassCard and table row/section stripes */
+  --color-sf-glass:        rgba(255, 255, 255, 0.03);
+  --color-sf-glass-soft:   rgba(255, 255, 255, 0.02);
+  --color-sf-glass-stripe: rgba(255, 255, 255, 0.015);
+
+  /* Scrollbar */
+  --color-sf-scrollbar:       rgba(255, 255, 255, 0.15);
+  --color-sf-scrollbar-hover: rgba(255, 255, 255, 0.25);
 
   /* Score colours */
   --color-score-excellent: #22c55e;
@@ -45,6 +57,29 @@
   --duration-base:  0.25s;
   --duration-slow:  0.5s;
   --duration-xslow: 0.8s;
+}
+
+/* ─── Light theme overrides ──────────────────────────────────────────────── */
+:root[data-theme="light"] {
+  --color-sf-bg:       #ffffff;
+  --color-sf-bg-2:     #f4f4f5;
+  --color-sf-bg-3:     #e9e9ec;
+
+  --color-sf-text:     #1c1c1e;
+  --color-sf-text-2:   #47474d;
+  --color-sf-muted:    #6d6d75;
+
+  --color-sf-accent:   #0068b5;
+  --color-sf-border:   rgba(0, 0, 0, 0.1);
+
+  --color-sf-glass:        rgba(15, 23, 42, 0.035);
+  --color-sf-glass-soft:   rgba(15, 23, 42, 0.025);
+  --color-sf-glass-stripe: rgba(15, 23, 42, 0.02);
+
+  --color-sf-scrollbar:       rgba(0, 0, 0, 0.15);
+  --color-sf-scrollbar-hover: rgba(0, 0, 0, 0.25);
+
+  --shadow-glass: 0 8px 32px rgba(15, 23, 42, 0.1);
 }
 
 /* ─── Animations ─────────────────────────────────────────────────────────── */
@@ -94,8 +129,8 @@ html, body, #root {
 /* ─── Scrollbar ──────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar       { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
+::-webkit-scrollbar-thumb { background: var(--color-sf-scrollbar); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-sf-scrollbar-hover); }
 
 /* ─── Focus visible ──────────────────────────────────────────────────────── */
 :focus-visible { outline: 1px solid var(--color-sf-accent); outline-offset: 2px; }
