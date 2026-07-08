@@ -47,6 +47,39 @@ interface DataModelAnalysisResult {
     validationRules: number;
     /** Apex triggers on this object (from EntityDefinition aggregate) */
     triggers: number;
+    /** Approximate record count (fetched after main field stats) */
+    recordCount?: number;
+    recordTypeCount?: number;
+    pageLayoutCount?: number;
+    recordPageCount?: number;
+  }>;
+  /** Summary counts of special object types (external, big, CMT, custom settings, events) */
+  dataModelSummary?: {
+    customObjectCount?: number;
+    standardObjectCount?: number;
+    externalObjectCount?: number;
+    bigObjectCount?: number;
+    customMetadataTypeCount?: number;
+    customSettingCount?: number;
+    platformEventCount?: number;
+  };
+  dataModelRecordTypeDetails?: Array<{
+    objectName: string;
+    objectLabel?: string;
+    recordTypes: Array<{ id: string; name: string; isActive: boolean }>;
+  }>;
+  dataModelPageLayoutDetails?: Array<{
+    objectName: string;
+    pageLayouts: Array<{ id: string; name: string }>;
+  }>;
+  dataModelValidationRuleDetails?: Array<{
+    objectName: string;
+    validationRules: Array<{ id: string; name: string; active: boolean; errorMessage: string; description?: string }>;
+  }>;
+  dataModelRecordPageDetails?: Array<{
+    objectName: string;
+    objectLabel?: string;
+    recordPages: Array<{ id: string; name: string; pageType: string }>;
   }>;
 }
 
@@ -85,13 +118,83 @@ export class DataModelAnalyzer {
       // Step 1: scan workspace for custom field references (Object.Field__c)
       await this.scanWorkspaceForFieldReferences();
 
-      // Step 2: object-first aggregate fetch (all 7 queries run in parallel)
-      const objectCounts = await this.salesforceService.getObjectDataModelCounts();
+      // Step 2: object-first aggregate fetch + type counts + metadata detail fetches in parallel
+      const [objectCounts, typeCounts, rawRecordTypes, rawPageLayouts, rawFlexiPages, rawValidationRules] = await Promise.all([
+        this.salesforceService.getObjectDataModelCounts(),
+        this.salesforceService.getDataModelTypeCounts().catch(() => null),
+        this.salesforceService.getRecordTypes().catch(() => []),
+        this.salesforceService.getPageLayouts().catch(() => []),
+        this.salesforceService.getFlexiPages().catch(() => []),
+        this.salesforceService.getValidationRules().catch(() => []),
+      ]);
       logInfo(`Found ${objectCounts.length} customizable objects via EntityDefinition`);
 
       result.objectsAnalyzed = objectCounts.length;
+      result.dataModelSummary = {
+        customObjectCount: objectCounts.filter(o => o.objectName.endsWith('__c')).length,
+        standardObjectCount: objectCounts.filter(o =>
+          !o.objectName.endsWith('__c') &&
+          !o.objectName.endsWith('__e') &&
+          !o.objectName.endsWith('__b') &&
+          !o.objectName.endsWith('__mdt') &&
+          !o.objectName.endsWith('__ka')
+        ).length,
+        ...(typeCounts ?? {}),
+      };
 
-      // Step 2b: accurate unused-field detection via the Dependency API
+      // Step 2b: build DurableId → objectName map from objectCounts (used for FlexiPage resolution)
+      const durableIdToObjName = new Map<string, string>();
+      for (const obj of objectCounts) {
+        durableIdToObjName.set(obj.durableId, obj.objectName);
+        // Tooling API EntityDefinitionId fields sometimes store the 15-char prefix
+        if (obj.durableId.length > 15) { durableIdToObjName.set(obj.durableId.slice(0, 15), obj.objectName); }
+      }
+
+      // Step 2c: group metadata detail fetches by object for per-object counts and detail views
+      // Record Types: keyed by SobjectType
+      const recordTypesByObj = new Map<string, Array<{ id: string; name: string; isActive: boolean }>>();
+      for (const rt of rawRecordTypes) {
+        const key = rt.SobjectType;
+        if (!recordTypesByObj.has(key)) { recordTypesByObj.set(key, []); }
+        recordTypesByObj.get(key)!.push({ id: rt.Id, name: rt.Name, isActive: rt.IsActive });
+      }
+
+      // Page Layouts: keyed by TableEnumOrId (object API name or KeyPrefix)
+      const pageLayoutsByObj = new Map<string, Array<{ id: string; name: string }>>();
+      for (const pl of rawPageLayouts) {
+        const key = pl.TableEnumOrId;
+        if (!pageLayoutsByObj.has(key)) { pageLayoutsByObj.set(key, []); }
+        pageLayoutsByObj.get(key)!.push({ id: pl.Id, name: pl.Name });
+      }
+
+      // Validation Rules: keyed by EntityDefinition.QualifiedApiName (available via Tooling API join)
+      const validationRulesByObj = new Map<string, Array<{ id: string; name: string; active: boolean; errorMessage: string; description?: string }>>();
+      for (const vr of rawValidationRules) {
+        const objName = vr.EntityDefinition?.QualifiedApiName ?? vr.EntityDefinitionId;
+        if (!validationRulesByObj.has(objName)) { validationRulesByObj.set(objName, []); }
+        validationRulesByObj.get(objName)!.push({
+          id: vr.Id,
+          name: vr.ValidationName,
+          active: vr.Active,
+          errorMessage: vr.ErrorMessage ?? '',
+          description: vr.Description,
+        });
+      }
+
+      // Lightning Record Pages: filter to RecordPage type, key by resolved object name
+      const recordPagesByObj = new Map<string, Array<{ id: string; name: string; pageType: string }>>();
+      for (const fp of rawFlexiPages) {
+        if (fp.PageType && fp.PageType !== 'RecordPage') { continue; }
+        if (!fp.EntityDefinitionId) { continue; }
+        const objName = durableIdToObjName.get(fp.EntityDefinitionId) ?? durableIdToObjName.get(fp.EntityDefinitionId.slice(0, 15)) ?? '';
+        if (!objName) { continue; }
+        if (!recordPagesByObj.has(objName)) { recordPagesByObj.set(objName, []); }
+        recordPagesByObj.get(objName)!.push({ id: fp.Id, name: fp.MasterLabel, pageType: fp.PageType ?? 'RecordPage' });
+      }
+
+      logInfo(`Metadata groups: ${recordTypesByObj.size} objects with record types, ${pageLayoutsByObj.size} with layouts, ${validationRulesByObj.size} with validation rules, ${recordPagesByObj.size} with record pages`);
+
+      // Step 2c: accurate unused-field detection via the Dependency API
       // (MetadataComponentDependency). Falls back to workspace-reference
       // estimation per object when the Dependency API is unavailable/empty.
       const unusedInfo = await this.computeUnusedFieldsFromDependencies();
@@ -121,13 +224,19 @@ export class DataModelAnalyzer {
           customFields: obj.customFields,
           unusedFields: unusedCount,
           fieldsWithoutDescription: 0, // not available from aggregate queries
-          fieldTypes: {},               // not available from aggregate queries
+          fieldTypes: {
+            ...(obj.formulaFields   > 0 ? { Formula: obj.formulaFields }       : {}),
+            ...(obj.encryptedFields > 0 ? { EncryptedText: obj.encryptedFields } : {}),
+          },
           relationshipCount: obj.lookupFields + obj.masterDetailFields,
           lookupFields: obj.lookupFields,
           masterDetailFields: obj.masterDetailFields,
           fieldLimitPct: obj.fieldLimitPct,
           validationRules: obj.validationRules,
           triggers: obj.triggers,
+          recordTypeCount: recordTypesByObj.get(obj.objectName)?.length ?? 0,
+          pageLayoutCount: pageLayoutsByObj.get(obj.objectName)?.length ?? 0,
+          recordPageCount: recordPagesByObj.get(obj.objectName)?.length ?? 0,
         });
 
         // Step 5: emit data-model issues
@@ -196,6 +305,20 @@ export class DataModelAnalyzer {
         }
       }
 
+      // Fetch record counts in parallel batches of 20 (one COUNT(Id) query per object).
+      // Done after the main loop so it does not block objectFieldStats construction.
+      try {
+        const names = result.objectFieldStats.map(o => o.objectName);
+        const countMap = await this.salesforceService.getObjectRecordCountsBatch(names);
+        for (const stat of result.objectFieldStats) {
+          const c = countMap.get(stat.objectName);
+          if (c !== undefined && c >= 0) { stat.recordCount = c; }
+        }
+        logInfo(`Record counts fetched for ${countMap.size} objects`);
+      } catch (e) {
+        logWarning(`Record count fetch failed, skipping: ${getErrorMessage(e)}`);
+      }
+
       // Filter: keep ALL custom objects; standard objects only if they have
       // custom fields, triggers, or validation rules (flows are merged in the dashboard).
       result.objectFieldStats = result.objectFieldStats.filter(o =>
@@ -211,6 +334,27 @@ export class DataModelAnalyzer {
         const bCustom = b.objectName.endsWith('__c') ? 1 : 0;
         if (aCustom !== bCustom) { return bCustom - aCustom; }
         return b.customFields - a.customFields;
+      });
+
+      // Populate detail arrays for sub-tab views
+      result.dataModelRecordTypeDetails = Array.from(recordTypesByObj.entries()).map(([objectName, recordTypes]) => {
+        const stat = result.objectFieldStats.find(s => s.objectName === objectName);
+        return { objectName, objectLabel: stat?.objectLabel, recordTypes };
+      });
+
+      result.dataModelPageLayoutDetails = Array.from(pageLayoutsByObj.entries()).map(([objectName, pageLayouts]) => ({
+        objectName,
+        pageLayouts,
+      }));
+
+      result.dataModelValidationRuleDetails = Array.from(validationRulesByObj.entries()).map(([objectName, validationRules]) => ({
+        objectName,
+        validationRules,
+      }));
+
+      result.dataModelRecordPageDetails = Array.from(recordPagesByObj.entries()).map(([objectName, recordPages]) => {
+        const stat = result.objectFieldStats.find(s => s.objectName === objectName);
+        return { objectName, objectLabel: stat?.objectLabel, recordPages };
       });
 
       logInfo(`Data model: ${result.objectsAnalyzed} objects, ${result.fieldsAnalyzed} custom fields analysed`);

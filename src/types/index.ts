@@ -2,6 +2,19 @@
  * Core types for the Salesforce Org Health Analyzer
  */
 
+import type { FutureReadinessReport } from './futureReadiness';
+import type { LicenseRecommendationsReport } from './licenseRecommendations';
+import type { OrgInfoRecommendationsReport } from './orgInfoRecommendations';
+
+// Re-export Future Readiness types so consumers (incl. the webview) can import from '@/types'.
+export * from './futureReadiness';
+
+// Re-export License Recommendations types so consumers (incl. the webview) can import from '@/types'.
+export * from './licenseRecommendations';
+
+// Re-export Org Info Recommendations types so consumers (incl. the webview) can import from '@/types'.
+export * from './orgInfoRecommendations';
+
 // ============================================================================
 // Issue & Severity Types
 // ============================================================================
@@ -100,7 +113,45 @@ export interface AnalysisResult {
     triggers?: number;
     /** Validation rules on this object (from EntityDefinition aggregate) */
     validationRules?: number;
+    /** Active record types on this object */
+    recordTypeCount?: number;
+    /** Page layouts assigned to this object */
+    pageLayoutCount?: number;
+    /** Lightning Record Pages (FlexiPages) for this object */
+    recordPageCount?: number;
   }>;
+  /** Per-object record type details for the Record Types sub-tab */
+  dataModelRecordTypeDetails?: Array<{
+    objectName: string;
+    objectLabel?: string;
+    recordTypes: Array<{ id: string; name: string; isActive: boolean }>;
+  }>;
+  /** Per-object page layout details for the Page Layouts sub-tab */
+  dataModelPageLayoutDetails?: Array<{
+    objectName: string;
+    pageLayouts: Array<{ id: string; name: string }>;
+  }>;
+  /** Per-object validation rule details for the Validation Rules sub-tab */
+  dataModelValidationRuleDetails?: Array<{
+    objectName: string;
+    validationRules: Array<{ id: string; name: string; active: boolean; errorMessage: string; description?: string }>;
+  }>;
+  /** Per-object Lightning Record Page details for the Record Pages sub-tab */
+  dataModelRecordPageDetails?: Array<{
+    objectName: string;
+    objectLabel?: string;
+    recordPages: Array<{ id: string; name: string; pageType: string }>;
+  }>;
+  /** Summary of special org object types (external, big objects, CMTs, custom settings) */
+  dataModelSummary?: {
+    customObjectCount?: number;
+    standardObjectCount?: number;
+    externalObjectCount?: number;
+    bigObjectCount?: number;
+    customMetadataTypeCount?: number;
+    customSettingCount?: number;
+    platformEventCount?: number;
+  };
   /** Per-object automation counts (triggers, flows, validations) */
   automationSummary?: {
     objectMap: Record<string, { triggers: number; flows: number; validations: number; total: number }>;
@@ -128,6 +179,8 @@ export interface AnalysisResult {
     totalClasses: number;
     classesBelow75: number;
     zeroCoverageCount: number;
+    /** Per-class coverage breakdown, sorted worst-first */
+    classCoverageDetails?: Array<{ name: string; pct: number; type: 'Class' | 'Trigger' }>;
   };
   /** Apex code inventory: component counts + code-size usage */
   codeInventory?: {
@@ -145,6 +198,12 @@ export interface AnalysisResult {
   };
   /** CTA-level AI architectural review — populated by synthesizeCtaReview() */
   ctaReview?: CTAReview;
+  /** Future Readiness assessment (AI/Agentforce, Data Cloud, Hyperforce) — deterministic scores + optional AI narrative */
+  futureReadiness?: FutureReadinessReport;
+  /** License optimization cards for Org Info → Clouds & Licenses — deterministic values + optional AI evidence narrative */
+  licenseRecommendations?: LicenseRecommendationsReport;
+  /** Org profile recommendation cards for Org Info → Overview — deterministic values + optional AI evidence narrative */
+  orgInfoRecommendations?: OrgInfoRecommendationsReport;
   /** License usage summary from UserLicense */
   licenseSummary?: LicenseSummary[];
   /** Feature license summary from FeatureLicense object */
@@ -153,6 +212,8 @@ export interface AnalysisResult {
   queryExplainResults?: QueryExplainResult[];
   /** Extended org details: edition, instance, trust status, release, apps */
   orgDetails?: OrgDetailsInfo;
+  /** Rich org info data for the Org Info dashboard tab */
+  orgInfoData?: OrgInfoData;
   /** Live record counts per sObject from LDV analysis */
   objectRecordCounts?: Record<string, number>;
   /** Public API entry points detected in Apex (RestResource, InboundEmail) */
@@ -313,6 +374,8 @@ export interface ValidationRule {
   Description?: string;
   ErrorMessage?: string;
   ErrorDisplayField?: string;
+  /** Populated when the query joins EntityDefinition (Tooling API relationship) */
+  EntityDefinition?: { QualifiedApiName: string };
 }
 
 export interface CustomField {
@@ -544,6 +607,7 @@ export interface OrgInventorySummary {
   apexTriggerCount: number;
   flowCount: number;
   customObjectCount: number;
+  standardObjectCount: number;
   customFieldCount: number;
   permissionSetCount: number;
   validationRuleCount: number;
@@ -663,15 +727,27 @@ export type DashboardMessageType =
   | 'filterByCategory'
   | 'filterBySeverity'
   | 'runCtaReview'
+  | 'runFutureReadiness'
+  | 'runLicenseRecommendations'
+  | 'runOrgInfoRecommendations'
   | 'setSecurityMode'
   | 'cancelAnalysis'
   | 'refresh'
   | 'exportDataModelCsv'
   | 'exportCtaHtml'
+  | 'exportCodeQualityCsv'
   | 'askArchitect'
   | 'getModels'
   | 'authorizeClaude'
-  | 'disconnectClaude';
+  | 'disconnectClaude'
+  | 'authorizeOpenAI'
+  | 'disconnectOpenAI'
+  | 'authorizeGemini'
+  | 'disconnectGemini'
+  | 'setPreferredModel'
+  | 'getArchitectPrompts'
+  | 'saveArchitectPrompt'
+  | 'ready';
 
 export interface DashboardMessage {
   command: DashboardMessageType;
@@ -810,6 +886,24 @@ export interface SlowQuery {
 }
 
 // ============================================================================
+// Scan History Types
+// ============================================================================
+
+export interface ScanHistoryEntry {
+  timestamp: string;
+  orgId: string;
+  orgName: string;
+  scores: HealthScores;
+  issueSummary: {
+    total: number;
+    error: number;
+    warning: number;
+    info: number;
+  };
+  duration: number;
+}
+
+// ============================================================================
 // Trend Data Types
 // ============================================================================
 
@@ -870,6 +964,10 @@ export interface LwcSummary {
   componentsWithTests: number;
   componentsWithA11yIssues: number;
   componentList: LwcComponentInfo[];
+  /** LWC component count fetched directly from the org (when workspace scan finds nothing) */
+  orgComponentCount?: number;
+  /** Aura component count fetched from the org */
+  orgAuraComponentCount?: number;
 }
 
 // ============================================================================
@@ -1159,4 +1257,107 @@ export interface OrgDetailsInfo {
   apps: AppSummaryItem[];
   consoleAppCount: number;
   standardAppCount: number;
+}
+
+// ============================================================================
+// Org Info Extended Types (rich Org Info dashboard tab)
+// ============================================================================
+
+export interface OrgExtendedDetails {
+  createdDate?: string;
+  myDomain?: string;
+  loginUrl?: string;
+  timezone?: string;
+  language?: string;
+  currency?: string;
+  isHyperforce?: boolean;
+  isSandbox?: boolean;
+  buildVersion?: string;
+  defaultLocale?: string;
+  division?: string;
+  primaryContact?: string;
+  phone?: string;
+  fax?: string;
+  address?: string;
+  fiscalYearStartMonth?: string;
+  namespacePrefix?: string;
+  monthlyPageViewsUsed?: number;
+  monthlyPageViewsEntitlement?: number;
+  dataCenter?: string;
+  storageUsedMB?: number;
+  storageLimitMB?: number;
+  storageUsedPct?: number;
+  currentRelease?: string;
+}
+
+export interface CloudStatus {
+  name: string;
+  key: string;
+  enabled: boolean;
+}
+
+export interface PackageTypeSummary {
+  managed: number;
+  unlocked: number;
+  local: number;
+  total: number;
+}
+
+export interface AppTypeSummary {
+  lightningApps: number;
+  experienceSites: number;
+  consoleApps: number;
+  connectedApps: number;
+  mobileApps: number;
+  omniStudioApps: number;
+  total: number;
+}
+
+export interface EnvironmentsSummary {
+  production: number;
+  fullSandboxes: number;
+  partialSandboxes: number;
+  developerSandboxes: number;
+  scratchOrgs: number;
+  total: number;
+}
+
+export interface IntegrationsSummary {
+  namedCredentials: number;
+  connectedApps: number;
+  externalCredentials: number;
+  remoteSites: number;
+  authProviders: number;
+  certificates: number;
+  total: number;
+}
+
+export interface OrgQuickFacts {
+  /** null ⇒ the connected org did not return this metric (shown as N/A) */
+  customObjects: number | null;
+  users: number;
+  roles: number;
+  profiles: number;
+  permissionSets: number;
+  permissionSetGroups: number;
+  publicGroups: number;
+  queues: number;
+  /** null ⇒ the connected org did not return this metric (shown as N/A) */
+  flows: number | null;
+  apexClasses: number;
+  triggers: number;
+  lwcComponents: number;
+}
+
+export interface OrgInfoData {
+  extended?: OrgExtendedDetails;
+  clouds?: CloudStatus[];
+  packagesByType?: PackageTypeSummary;
+  appsByType?: AppTypeSummary;
+  environments?: EnvironmentsSummary;
+  integrations?: IntegrationsSummary;
+  quickFacts?: OrgQuickFacts;
+  activeUsers?: number;
+  activeLicenses?: number;
+  totalLicenses?: number;
 }

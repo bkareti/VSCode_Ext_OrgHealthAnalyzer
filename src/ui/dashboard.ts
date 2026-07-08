@@ -1,17 +1,18 @@
 /**
- * Health Dashboard — Webview panel (Phase 3)
+ * Health Dashboard — Webview panel
  *
  * The TypeScript layer is a thin shell:
  *   - Creates / reveals the WebviewPanel
- *   - Injects CSP-compliant nonces and media-file URIs
+ *   - Serves the Vite React build from webview-ui/dist/
+ *   - Injects CSP nonce and icon URI into the built index.html
  *   - Proxies messages between the extension and the webview
- *   - All UI logic lives in media/dashboard.js + media/dashboard.css
  */
 
 import * as vscode from 'vscode';
-import { AnalysisResult, Issue, DashboardMessage } from '../types';
+import { AnalysisResult, Issue, DashboardMessage, ScanHistoryEntry } from '../types';
 import { reportGenerator } from '../reports/reportGenerator';
-import { getAIService, AIExplanation } from '../services/aiService';
+import { getAIService, AIExplanation, getPreferredModelSelector } from '../services/aiService';
+import { ARCHITECT_PROMPT_SCOPES, loadArchitectPrompts, saveArchitectPrompt } from '../services/architectPrompts';
 
 // ============================================================================
 // Dashboard Panel
@@ -25,6 +26,7 @@ export class HealthDashboardPanel {
   private readonly extensionUri: vscode.Uri;
   private disposables: vscode.Disposable[] = [];
   private currentResult: AnalysisResult | null = null;
+  private orgHistory: Record<string, ScanHistoryEntry[]> | null = null;
   private securityMode: 'safe' | 'standard' | 'advanced' | null = null;
 
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
@@ -62,6 +64,7 @@ export class HealthDashboardPanel {
         localResourceRoots: [
           vscode.Uri.joinPath(extensionUri, 'media'),
           vscode.Uri.joinPath(extensionUri, 'dist'),
+          vscode.Uri.joinPath(extensionUri, 'webview-ui', 'dist'),
         ],
       }
     );
@@ -77,11 +80,20 @@ export class HealthDashboardPanel {
     void this.pushAvailableModels();
   }
 
+  /** Push per-org scan history to the webview. */
+  public updateOrgHistory(orgHistory: Record<string, ScanHistoryEntry[]>): void {
+    this.orgHistory = orgHistory;
+    this.postMessage({ type: 'orgHistory', data: orgHistory });
+  }
+
   /** Enumerate the user's available AI models and send them to the webview. */
   public async pushAvailableModels(): Promise<void> {
+    this.postMessage({ type: 'preferredModel', data: getPreferredModelSelector() });
+
     const ai = getAIService();
     if (!ai) {
       this.postMessage({ type: 'availableModels', data: [{ id: 'auto', label: 'Auto (best available)', backend: 'vscode-lm' }] });
+      this.postMessage({ type: 'copilotStatus', available: false, count: 0 });
       return;
     }
     try {
@@ -91,6 +103,16 @@ export class HealthDashboardPanel {
       this.postMessage({ type: 'availableModels', data: [{ id: 'auto', label: 'Auto (best available)', backend: 'vscode-lm' }] });
     }
     this.postMessage({ type: 'claudeAuthStatus', authorized: ai.isClaudeAuthorized() });
+    this.postMessage({ type: 'openaiAuthStatus', authorized: ai.isOpenAIAuthorized() });
+    this.postMessage({ type: 'geminiAuthStatus', authorized: ai.isGeminiAuthorized() });
+
+    // Explicitly check GitHub Copilot extension availability via the LM API.
+    try {
+      const copilotModels = vscode.lm ? await vscode.lm.selectChatModels({ vendor: 'copilot' }) : [];
+      this.postMessage({ type: 'copilotStatus', available: copilotModels.length > 0, count: copilotModels.length });
+    } catch {
+      this.postMessage({ type: 'copilotStatus', available: false, count: 0 });
+    }
   }
 
   /** Show the spinner / progress screen. */
@@ -117,6 +139,12 @@ export class HealthDashboardPanel {
 
   private async handleMessage(message: DashboardMessage): Promise<void> {
     switch (message.command) {
+      case 'ready':
+        if (this.currentResult) { this.updateResults(this.currentResult); }
+        if (this.orgHistory)    { this.updateOrgHistory(this.orgHistory); }
+        void this.pushAvailableModels();
+        break;
+
       case 'setSecurityMode': {
         const mode = (message.data as { mode: string })?.mode;
         if (mode === 'safe' || mode === 'standard' || mode === 'advanced') {
@@ -261,8 +289,27 @@ export class HealthDashboardPanel {
         break;
       }
 
+      case 'exportCodeQualityCsv': {
+        const { csv: cqCsv, fileName: cqFileName } = message.data as { csv: string; fileName: string };
+        const cqDefaultUri = vscode.Uri.joinPath(
+          vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(require('os').homedir()),
+          cqFileName || 'code-quality-issues.csv'
+        );
+        const cqUri = await vscode.window.showSaveDialog({
+          defaultUri: cqDefaultUri,
+          filters: { 'CSV Files': ['csv'] },
+          title: 'Export Code Quality Issues',
+        });
+        if (cqUri) {
+          await vscode.workspace.fs.writeFile(cqUri, Buffer.from(cqCsv, 'utf8'));
+          vscode.window.showInformationMessage(`Code quality issues exported to ${cqUri.fsPath}`);
+        }
+        break;
+      }
+
       case 'exportCtaHtml': {
-        const { html, fileName } = message.data as { html: string; fileName: string };
+        // Sent flat (not nested under `data`) — see OutboundMessage in useVSCode.ts.
+        const { html, fileName } = message as unknown as { html: string; fileName: string };
         const defaultUri = vscode.Uri.joinPath(
           vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(require('os').homedir()),
           fileName || 'OrgPulse_CTA_Review.html'
@@ -285,12 +332,52 @@ export class HealthDashboardPanel {
           break; // CTA review disabled in Safe mode — webview handles UI
         }
         const force = (message as { force?: boolean }).force ?? false;
-        await vscode.commands.executeCommand('sfHealthAnalyzer.runCtaReview', message.model ?? 'auto', force);
+        // Pass the override through as-is (undefined when not sent) so the
+        // command falls back to the persisted sfHealthAnalyzer.ai.preferredModel
+        // setting instead of being force-fed the literal string 'auto', which
+        // would silently bypass that setting.
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runCtaReview', message.model, force);
+        break;
+      }
+
+      case 'runFutureReadiness': {
+        if (this.securityMode === 'safe') {
+          break; // AI narrative disabled in Safe mode — deterministic scores still render
+        }
+        const force = (message as { force?: boolean }).force ?? false;
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runFutureReadiness', message.model, force);
+        break;
+      }
+
+      case 'runLicenseRecommendations': {
+        if (this.securityMode === 'safe') {
+          break; // AI narrative disabled in Safe mode — deterministic card values still render
+        }
+        const force = (message as { force?: boolean }).force ?? false;
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runLicenseRecommendations', message.model, force);
+        break;
+      }
+
+      case 'runOrgInfoRecommendations': {
+        if (this.securityMode === 'safe') {
+          break; // AI narrative disabled in Safe mode — deterministic card values still render
+        }
+        const force = (message as { force?: boolean }).force ?? false;
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runOrgInfoRecommendations', message.model, force);
         break;
       }
 
       case 'getModels': {
         await this.pushAvailableModels();
+        break;
+      }
+
+      case 'setPreferredModel': {
+        const { modelId, label } = (message.data as { modelId?: string; label?: string }) ?? {};
+        if (!modelId) { break; }
+        await vscode.workspace.getConfiguration('sfHealthAnalyzer.ai').update('preferredModel', modelId, vscode.ConfigurationTarget.Global);
+        await this.pushAvailableModels();
+        void vscode.window.showInformationMessage(`Active AI model set to: ${label ?? modelId}`);
         break;
       }
 
@@ -325,6 +412,86 @@ export class HealthDashboardPanel {
         break;
       }
 
+      case 'authorizeOpenAI': {
+        const ai = getAIService();
+        if (!ai) {
+          this.postMessage({ type: 'openaiAuthStatus', authorized: false, error: 'AI service not initialised. Run an analysis first.' });
+          break;
+        }
+        const result = await ai.authorizeOpenAI();
+        // Refresh the picker (now includes ChatGPT models) then report status.
+        await this.pushAvailableModels();
+        this.postMessage({
+          type: 'openaiAuthStatus',
+          authorized: ai.isOpenAIAuthorized(),
+          count: result.count,
+          error: result.ok ? undefined : result.error,
+        });
+        if (result.ok) {
+          void vscode.window.showInformationMessage(`ChatGPT connected — ${result.count} model(s) available.`);
+        } else if (result.error && result.error !== 'No API key entered.') {
+          void vscode.window.showWarningMessage(`Could not connect ChatGPT: ${result.error}`);
+        }
+        break;
+      }
+
+      case 'disconnectOpenAI': {
+        const ai = getAIService();
+        if (ai) { await ai.disconnectOpenAI(); }
+        await this.pushAvailableModels();
+        this.postMessage({ type: 'openaiAuthStatus', authorized: false });
+        break;
+      }
+
+      case 'authorizeGemini': {
+        const ai = getAIService();
+        if (!ai) {
+          this.postMessage({ type: 'geminiAuthStatus', authorized: false, error: 'AI service not initialised. Run an analysis first.' });
+          break;
+        }
+        const result = await ai.authorizeGemini();
+        // Refresh the picker (now includes Gemini models) then report status.
+        await this.pushAvailableModels();
+        this.postMessage({
+          type: 'geminiAuthStatus',
+          authorized: ai.isGeminiAuthorized(),
+          count: result.count,
+          error: result.ok ? undefined : result.error,
+        });
+        if (result.ok) {
+          void vscode.window.showInformationMessage(`Gemini connected — ${result.count} model(s) available.`);
+        } else if (result.error && result.error !== 'No API key entered.') {
+          void vscode.window.showWarningMessage(`Could not connect Gemini: ${result.error}`);
+        }
+        break;
+      }
+
+      case 'disconnectGemini': {
+        const ai = getAIService();
+        if (ai) { await ai.disconnectGemini(); }
+        await this.pushAvailableModels();
+        this.postMessage({ type: 'geminiAuthStatus', authorized: false });
+        break;
+      }
+
+      case 'getArchitectPrompts': {
+        this.postMessage({ type: 'architectPrompts', data: { scopes: ARCHITECT_PROMPT_SCOPES, overrides: loadArchitectPrompts() } });
+        break;
+      }
+
+      case 'saveArchitectPrompt': {
+        const { scopeId, text } = (message.data as { scopeId?: string; text?: string }) ?? {};
+        try {
+          if (!scopeId) { throw new Error('Missing scopeId.'); }
+          saveArchitectPrompt(scopeId, text ?? '');
+          this.postMessage({ type: 'architectPrompts', data: { scopes: ARCHITECT_PROMPT_SCOPES, overrides: loadArchitectPrompts() } });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          void vscode.window.showWarningMessage(`Failed to save recommendation prompt: ${msg}`);
+        }
+        break;
+      }
+
       case 'askArchitect': {
         const question = (message.data as { question?: string })?.question ?? '';
         const model = (message.data as { model?: string })?.model;
@@ -347,7 +514,9 @@ export class HealthDashboardPanel {
         }
         this.panel.webview.postMessage({ type: 'architectAnswerLoading', data: true });
         try {
-          const answer = await ai.askArchitect(question, this.currentResult, model);
+          const answer = await ai.askArchitect(question, this.currentResult, model, (progress) => {
+            this.panel.webview.postMessage({ type: 'architectAnswerProgress', data: progress });
+          });
           this.panel.webview.postMessage({ type: 'architectAnswer', data: answer });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -441,56 +610,57 @@ export class HealthDashboardPanel {
   private buildHtml(): string {
     const webview = this.panel.webview;
     const nonce   = this.getNonce();
-    const assetVersion = Date.now().toString();
 
-    const cssUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.css')
-    ).with({ query: `v=${assetVersion}` });
+    const distDir   = vscode.Uri.joinPath(this.extensionUri, 'webview-ui', 'dist');
+    const indexPath = vscode.Uri.joinPath(distDir, 'index.html').fsPath;
 
-    // Read CSS content from disk so it can be embedded in the exported PDF HTML
-    // (webview CSP blocks fetch() to vscode-resource URIs from JS)
-    let dashboardCssText = '';
+    let html: string;
     try {
-      const cssBytes = require('fs').readFileSync(
-        vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.css').fsPath, 'utf8'
-      );
-      dashboardCssText = cssBytes;
-    } catch (_) { /* non-fatal: PDF will be unstyled */ }
-    const jsUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'media', 'dashboard.js')
-    ).with({ query: `v=${assetVersion}` });
-    const iconUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.png')
-    ).with({ query: `v=${assetVersion}` });
+      html = require('fs').readFileSync(indexPath, 'utf8') as string;
+    } catch {
+      // webview-ui hasn't been built yet — show a helpful placeholder
+      return [
+        '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">',
+        `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">`,
+        '<style>body{background:#1e1e1e;color:#ccc;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}</style>',
+        '</head><body><div style="text-align:center">',
+        '<p style="font-size:1.2rem">OrgPulse UI not built.</p>',
+        '<p>Run <code style="background:#333;padding:2px 6px;border-radius:3px">npm run build:webview</code> then reload VS Code.</p>',
+        '</div></body></html>',
+      ].join('\n');
+    }
 
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy"
-    content="default-src 'none';
-             style-src ${webview.cspSource} 'unsafe-inline';
-             script-src 'nonce-${nonce}';
-             img-src ${webview.cspSource} data:;">
-  <title>OrgPulse — Salesforce Architecture Health</title>
-  <link rel="stylesheet" href="${cssUri}">
-</head>
-<body>
-  <div id="app"></div>
-  <div class="drill-down-overlay" id="drill-overlay"></div>
-  <aside class="drill-down-panel" id="drill-panel">
-    <div class="ddp-header">
-      <span class="ddp-title" id="ddp-title">Issue Detail</span>
-      <button class="btn btn-icon" data-action="close-drill" title="Close">&#x2715;</button>
-    </div>
-    <div class="ddp-body" id="ddp-body"></div>
-    <div class="ddp-footer" id="ddp-footer"></div>
-  </aside>
-  <script nonce="${nonce}">window.ORGPULSE_ICON_URI = "${iconUri}"; window.DASHBOARD_CSS = ${JSON.stringify(dashboardCssText)};</script>
-  <script nonce="${nonce}" src="${jsUri}"></script>
-</body>
-</html>`;
+    // Rewrite ./assets/ paths (Vite base:'./') so static refs resolve inside the webview
+    const assetsUri = webview.asWebviewUri(vscode.Uri.joinPath(distDir, 'assets')).toString();
+    html = html.replace(/src="\.?\/assets\//g,  `src="${assetsUri}/`);
+    html = html.replace(/href="\.?\/assets\//g, `href="${assetsUri}/`);
+
+    // Add nonce to every <script> tag (Vite emits one <script type="module"> entry)
+    html = html.replace(/<script /g,  `<script nonce="${nonce}" `);
+    html = html.replace(/<script>/g,  `<script nonce="${nonce}">`);
+
+    // Inject CSP meta right after <head>
+    const csp = [
+      `default-src 'none';`,
+      `style-src ${webview.cspSource} 'unsafe-inline';`,
+      // cspSource allows dynamically-imported Vite chunks (import('./OrgInfo.js') etc.)
+      `script-src 'nonce-${nonce}' ${webview.cspSource};`,
+      `img-src ${webview.cspSource} data:;`,
+      `font-src ${webview.cspSource};`,
+      // Needed for the CTA Review "Download PDF" flow — a hidden srcdoc iframe
+      // renders the report so the native print dialog can be triggered on it.
+      `frame-src 'self';`,
+    ].join(' ');
+    html = html.replace('<head>', `<head>\n  <meta http-equiv="Content-Security-Policy" content="${csp}">`);
+
+    // Inject icon URI global before </head>
+    const iconUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.png'));
+    html = html.replace(
+      '</head>',
+      `<script nonce="${nonce}">window.ORGPULSE_ICON_URI="${iconUri}";</script>\n</head>`
+    );
+
+    return html;
   }
 
   // ── Private: nonce ─────────────────────────────────────────────────────────

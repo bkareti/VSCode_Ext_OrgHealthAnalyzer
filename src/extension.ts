@@ -14,6 +14,16 @@ import * as fs from 'fs';
 import { getSalesforceService, ensureSfCli, ensureCodeAnalyzer } from './services/salesforceService';
 import { runCodeAnalyzer } from './services/codeAnalyzerService';
 import { initAIService, getAIService } from './services/aiService';
+import { AssessmentContextService } from './services/assessmentContext';
+import {
+  FutureReadinessService,
+  IFutureReadinessService,
+  IReadinessSnapshotStore,
+  FutureReadinessSnapshot,
+} from './services/futureReadiness';
+import { collectReadinessData } from './services/futureReadiness/collectors';
+import { buildLicenseRecommendationsBase } from './services/licenseRecommendations';
+import { buildOrgInfoRecommendationsBase } from './services/orgInfoRecommendations';
 
 // Analyzers
 import { createApexAnalyzer } from './analyzers/apexAnalyzer';
@@ -65,7 +75,54 @@ import { initCache, createApexFileWatcher } from './utils/cache';
 import { pluginLoader } from './rules/plugin';
 
 // Types
-import { AnalysisResult, Issue, UserGovernanceSummary, ProfileSecuritySummary, StaleMetadataSummary, OrgInventorySummary, OrgDetailsInfo, TrendPoint } from './types';
+import { AnalysisResult, Issue, UserGovernanceSummary, ProfileSecuritySummary, StaleMetadataSummary, OrgInventorySummary, OrgDetailsInfo, TrendPoint, OrgInfoData, OrgExtendedDetails, CloudStatus, FeatureLicenseSummary, LicenseSummary, ScanHistoryEntry } from './types';
+
+// ============================================================================
+// Cloud Detection (pure function — no network, heuristic based on feature licenses)
+// ============================================================================
+
+const CLOUD_DEFINITIONS: Array<{ name: string; key: string; keywords: string[] }> = [
+  { name: 'Sales Cloud',        key: 'sales',        keywords: ['SalesUser', 'SalesCloud', 'Sales Cloud', 'Salesforce'] },
+  { name: 'Service Cloud',      key: 'service',      keywords: ['ServiceCloud', 'Service Cloud', 'Service User', 'Service Agent'] },
+  { name: 'Experience Cloud',   key: 'experience',   keywords: ['ExperienceCloud', 'Experience Cloud', 'Communities', 'PortalLicenses', 'Partner Community', 'Customer Community', 'Customer Portal', 'Partner', 'External Apps'] },
+  { name: 'Revenue Cloud',      key: 'revenue',      keywords: ['RevenueCloud', 'Revenue Cloud', 'CPQ', 'Billing'] },
+  { name: 'Field Service',      key: 'fieldservice', keywords: ['FieldService', 'Field Service', 'FieldServiceMobile'] },
+  { name: 'Marketing Cloud',    key: 'marketing',    keywords: ['Marketing Cloud', 'MarketingCloud', 'PardotPermissionSet', 'Pardot', 'Account Engagement'] },
+  { name: 'Data Cloud',         key: 'data',         keywords: ['DataCloud', 'Data Cloud', 'CustomerDataPlatform', 'CDP'] },
+  { name: 'Industries (PSS)',   key: 'industries',   keywords: ['Industries', 'Omnistudio', 'Vlocity', 'IndustriesCloud', 'Public Sector'] },
+  { name: 'Health Cloud',       key: 'health',       keywords: ['HealthCloud', 'Health Cloud'] },
+  { name: 'Financial Services', key: 'financial',    keywords: ['FinancialServices', 'Financial Services Cloud', 'FinServ', 'FSC'] },
+  { name: 'Einstein Analytics', key: 'einstein',     keywords: ['EinsteinAnalytics', 'Einstein Analytics', 'Analytics Cloud', 'CRM Analytics', 'Tableau CRM', 'Wave'] },
+  { name: 'Agentforce',         key: 'agentforce',   keywords: ['Agentforce', 'AgentUser', 'Einstein Copilot', 'GenerativeAI', 'Einstein Bot'] },
+];
+
+/**
+ * Heuristically detect enabled clouds from the org's licenses. There is no
+ * Salesforce API that enumerates "clouds", so we match cloud keywords against
+ * both feature-license names and user-license names (e.g. a `Salesforce` user
+ * license implies Sales Cloud). A cloud is enabled when a matching license
+ * exists with any allocation.
+ */
+function detectClouds(
+  featureLicenses: FeatureLicenseSummary[],
+  userLicenses: LicenseSummary[] = []
+): CloudStatus[] {
+  return CLOUD_DEFINITIONS.map(cloud => {
+    const kws = cloud.keywords.map(k => k.toLowerCase());
+    const featMatch = featureLicenses.find(fl =>
+      kws.some(kw => fl.name.toLowerCase().includes(kw)) &&
+      (fl.status === 'Active' || fl.totalLicenses > 0)
+    );
+    const userMatch = userLicenses.find(ul =>
+      kws.some(kw => ul.name.toLowerCase().includes(kw)) && ul.totalLicenses > 0
+    );
+    return {
+      name: cloud.name,
+      key: cloud.key,
+      enabled: !!featMatch || !!userMatch,
+    };
+  });
+}
 
 // ============================================================================
 // Extension State
@@ -73,12 +130,32 @@ import { AnalysisResult, Issue, UserGovernanceSummary, ProfileSecuritySummary, S
 
 let currentResult: AnalysisResult | null = null;
 let activeAnalysisCts: vscode.CancellationTokenSource | null = null;
+/** Deterministic Future Readiness engine (shared with the AI service). */
+let futureReadinessService: IFutureReadinessService;
 const RESULT_STORAGE_KEY = 'sfHealthAnalyzer.lastResult';
+/** Last Future Readiness scores, used for run-over-run readiness trend deltas. */
+const READINESS_SNAPSHOT_KEY = 'sfHealthAnalyzer.futureReadinessSnapshot';
 /** Ring buffer of recent run scores, used to render run-over-run trend deltas. */
 const HISTORY_STORAGE_KEY = 'sfHealthAnalyzer.scoreHistory';
 const HISTORY_MAX_POINTS = 10;
+/** Per-org ring buffer of lightweight scan history entries (max 10 per org). */
+const ORG_HISTORY_KEY = 'sfHealthAnalyzer.orgHistory';
 const CACHE_FOLDER = '.orgpulse';
 const CACHE_FILE = 'cache.json';
+
+// ============================================================================
+// Schema Validation Helpers
+// ============================================================================
+
+/** Check if a FutureReadinessReport has the new-schema `signals` field on every pack.
+ *  Stale reports from before this redesign will have `dimensions`/`blockingIssues` but
+ *  missing `signals`, causing crashes when the new UI tries to read `.signals.length`. */
+function isFutureReadinessSchemaValid(report: any): boolean {
+  if (!report?.packs || !Array.isArray(report.packs)) {
+    return true; // no packs data, skip validation
+  }
+  return report.packs.every((p: any) => Array.isArray(p.signals));
+}
 
 // ============================================================================
 // File-based Cache Helpers
@@ -118,6 +195,11 @@ function loadCacheFromFile(): AnalysisResult | null {
     const data = JSON.parse(raw) as AnalysisResult;
     // Restore Date objects from JSON
     if (data.timestamp) { data.timestamp = new Date(data.timestamp); }
+    // Drop stale futureReadiness that predates the signals field to avoid crashes
+    if (data.futureReadiness && !isFutureReadinessSchemaValid(data.futureReadiness)) {
+      logWarning('Stale Future Readiness data detected (predates signals field) — will be regenerated on next analysis');
+      data.futureReadiness = undefined;
+    }
     logInfo(`Loaded cached analysis from ${filePath} (${new Date(data.timestamp).toLocaleString()})`);
     return data;
   } catch (e) {
@@ -137,8 +219,14 @@ export function activate(context: vscode.ExtensionContext) {
   // Register all built-in rules
   registerBuiltInRules();
 
-  // Phase 4 — AI Service
-  initAIService(context);
+  // Phase 4 — AI Service + Future Readiness engine (shared instance so the
+  // deterministic assessment and the AI narrative use the same historical store).
+  const readinessStore: IReadinessSnapshotStore = {
+    load: () => context.globalState.get<FutureReadinessSnapshot>(READINESS_SNAPSHOT_KEY),
+    save: (snapshot) => { void context.globalState.update(READINESS_SNAPSHOT_KEY, snapshot); },
+  };
+  futureReadinessService = FutureReadinessService.createDefault(readinessStore);
+  initAIService(context, AssessmentContextService.createDefault(), futureReadinessService);
 
   // Phase 5 — Cache + file watcher
   const cache = initCache(context.globalState);
@@ -182,6 +270,11 @@ export function activate(context: vscode.ExtensionContext) {
     try {
       // Restore dates from JSON serialization
       stored.timestamp = new Date(stored.timestamp);
+      // Drop stale futureReadiness that predates the signals field to avoid crashes
+      if (stored.futureReadiness && !isFutureReadinessSchemaValid(stored.futureReadiness)) {
+        logWarning('Stale Future Readiness data detected (predates signals field) — will be regenerated on next analysis');
+        stored.futureReadiness = undefined;
+      }
       currentResult = stored;
       healthResultsProvider.setResults(currentResult);
       vscode.commands.executeCommand('setContext', 'sfHealthAnalyzer.hasResults', true);
@@ -216,6 +309,10 @@ function registerCommands(context: vscode.ExtensionContext): void {
       const panel = getDashboardPanel(context.extensionUri);
       if (currentResult) {
         panel.updateResults(currentResult);
+      }
+      const storedOrgHistory = context.globalState.get<Record<string, ScanHistoryEntry[]>>(ORG_HISTORY_KEY);
+      if (storedOrgHistory) {
+        panel.updateOrgHistory(storedOrgHistory);
       }
     })
   );
@@ -286,6 +383,96 @@ function registerCommands(context: vscode.ExtensionContext): void {
         const msg = e instanceof Error ? e.message : String(e);
         // Always unblock the webview spinner with a terminal error message (#11).
         panel.postMessage({ type: 'ctaReviewError', message: msg });
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sfHealthAnalyzer.runFutureReadiness', async (modelPreference?: string, force?: boolean) => {
+      const ai = getAIService();
+      if (!ai) {
+        vscode.window.showWarningMessage('AI Service not initialised. Run a full analysis first.');
+        return;
+      }
+      if (!currentResult) {
+        vscode.window.showWarningMessage('No analysis data available. Run Salesforce: Run Org Health Analyzer first.');
+        return;
+      }
+      const panel = getDashboardPanel(context.extensionUri);
+      panel.postMessage({ type: 'futureReadinessLoading' });
+      try {
+        const report = await ai.synthesizeFutureReadiness(currentResult, modelPreference, !!force);
+        if (report) {
+          currentResult.futureReadiness = report;
+          panel.postMessage({ type: 'futureReadiness', data: report });
+          context.globalState.update(RESULT_STORAGE_KEY, currentResult);
+          saveCacheToFile(currentResult);
+        } else {
+          panel.postMessage({ type: 'futureReadinessError', message: 'No narrative was generated. Try another model or configure an API key in Settings → sfHealthAnalyzer.ai.' });
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        panel.postMessage({ type: 'futureReadinessError', message: msg });
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sfHealthAnalyzer.runLicenseRecommendations', async (modelPreference?: string, force?: boolean) => {
+      const ai = getAIService();
+      if (!ai) {
+        vscode.window.showWarningMessage('AI Service not initialised. Run a full analysis first.');
+        return;
+      }
+      if (!currentResult) {
+        vscode.window.showWarningMessage('No analysis data available. Run Salesforce: Run Org Health Analyzer first.');
+        return;
+      }
+      const panel = getDashboardPanel(context.extensionUri);
+      panel.postMessage({ type: 'licenseRecommendationsLoading' });
+      try {
+        const report = await ai.synthesizeLicenseRecommendations(currentResult, modelPreference, !!force);
+        if (report) {
+          currentResult.licenseRecommendations = report;
+          panel.postMessage({ type: 'licenseRecommendations', data: report });
+          context.globalState.update(RESULT_STORAGE_KEY, currentResult);
+          saveCacheToFile(currentResult);
+        } else {
+          panel.postMessage({ type: 'licenseRecommendationsError', message: 'No narrative was generated. Try another model or configure an API key in Settings → sfHealthAnalyzer.ai.' });
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        panel.postMessage({ type: 'licenseRecommendationsError', message: msg });
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sfHealthAnalyzer.runOrgInfoRecommendations', async (modelPreference?: string, force?: boolean) => {
+      const ai = getAIService();
+      if (!ai) {
+        vscode.window.showWarningMessage('AI Service not initialised. Run a full analysis first.');
+        return;
+      }
+      if (!currentResult) {
+        vscode.window.showWarningMessage('No analysis data available. Run Salesforce: Run Org Health Analyzer first.');
+        return;
+      }
+      const panel = getDashboardPanel(context.extensionUri);
+      panel.postMessage({ type: 'orgInfoRecommendationsLoading' });
+      try {
+        const report = await ai.synthesizeOrgInfoRecommendations(currentResult, modelPreference, !!force);
+        if (report) {
+          currentResult.orgInfoRecommendations = report;
+          panel.postMessage({ type: 'orgInfoRecommendations', data: report });
+          context.globalState.update(RESULT_STORAGE_KEY, currentResult);
+          saveCacheToFile(currentResult);
+        } else {
+          panel.postMessage({ type: 'orgInfoRecommendationsError', message: 'No narrative was generated. Try another model or configure an API key in Settings → sfHealthAnalyzer.ai.' });
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        panel.postMessage({ type: 'orgInfoRecommendationsError', message: msg });
       }
     })
   );
@@ -492,6 +679,11 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
         let analyzedObjects = 0;
         let analyzedFlows = 0;
         let capturedDataModelStats: AnalysisResult['dataModelStats'] = [];
+        let capturedDataModelSummary: AnalysisResult['dataModelSummary'] | undefined;
+        let capturedDataModelRecordTypeDetails: AnalysisResult['dataModelRecordTypeDetails'];
+        let capturedDataModelPageLayoutDetails: AnalysisResult['dataModelPageLayoutDetails'];
+        let capturedDataModelValidationRuleDetails: AnalysisResult['dataModelValidationRuleDetails'];
+        let capturedDataModelRecordPageDetails: AnalysisResult['dataModelRecordPageDetails'];
         let capturedAutomationSummary: AnalysisResult['automationSummary'] | undefined;
 
         ruleEngine.reset();
@@ -514,6 +706,8 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
         const sfService = getSalesforceService();
         let orgInfo: { alias?: string; id?: string; username?: string; instanceUrl?: string } = {};
         let orgDetails: OrgDetailsInfo | undefined;
+        let capturedOrgExtended: OrgExtendedDetails | undefined;
+        let capturedFeatureLicenses: FeatureLicenseSummary[] = [];
 
         try {
           const orgData = await sfService.connect();
@@ -523,10 +717,11 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
           // Fetch extended org details in parallel (non-blocking if any fail)
           try {
             const [orgEdition, featureLicenses, apps] = await Promise.all([
-              sfService.getOrgEdition(),
+              sfService.getOrgExtendedDetails(),
               sfService.getFeatureLicenses(),
               sfService.getInstalledApps(),
             ]);
+            capturedFeatureLicenses = featureLicenses;
             const instanceName = orgEdition.instanceName || '';
             const [trustData, nextRelease] = await Promise.all([
               instanceName ? sfService.getTrustInstanceStatus(instanceName) : Promise.resolve({ status: 'Unknown' as const, incidents: [] }),
@@ -550,6 +745,35 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
               apps,
               consoleAppCount,
               standardAppCount: apps.length - consoleAppCount,
+            };
+            // Derive myDomain from instanceUrl
+            let myDomain: string | undefined;
+            try {
+              const host = new URL(orgData.instanceUrl || '').hostname;
+              myDomain = host.split('.')[0];
+            } catch { /* ok */ }
+            capturedOrgExtended = {
+              createdDate: orgEdition.createdDate,
+              timezone: orgEdition.timezone,
+              language: orgEdition.language,
+              currency: orgEdition.currency,
+              defaultLocale: orgEdition.defaultLocale,
+              division: orgEdition.division,
+              primaryContact: orgEdition.primaryContact,
+              phone: orgEdition.phone,
+              fax: orgEdition.fax,
+              address: orgEdition.address,
+              fiscalYearStartMonth: orgEdition.fiscalYearStartMonth,
+              namespacePrefix: orgEdition.namespacePrefix,
+              monthlyPageViewsUsed: orgEdition.monthlyPageViewsUsed,
+              monthlyPageViewsEntitlement: orgEdition.monthlyPageViewsEntitlement,
+              isHyperforce: orgEdition.isHyperforce,
+              isSandbox: orgEdition.isSandbox,
+              buildVersion: 'releaseNumber' in trustData ? trustData.releaseNumber : undefined,
+              dataCenter: instanceName,
+              myDomain,
+              loginUrl: orgData.instanceUrl || undefined,
+              currentRelease: nextRelease?.name,
             };
           } catch (detailErr) {
             logWarning(`Could not fetch extended org details: ${getErrorMessage(detailErr)}`);
@@ -599,269 +823,245 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
           }
         }
 
-        const apexAnalyzer = !scaActive ? createApexAnalyzer() : null;
-        if (apexAnalyzer) {
-          // Analyze org source via Tooling API bodies
-          const orgApexResult = await apexAnalyzer.analyzeFromOrg(apexClasses, apexTriggers);
-          issues.push(...orgApexResult.issues);
+        const vscConfig = vscode.workspace.getConfiguration('sfHealthAnalyzer');
 
-          // Also scan local workspace files for rules that need full body (method length etc.)
-          const localApexResult = await apexAnalyzer.analyzeWorkspace();
-          // Merge avoiding duplicates (local files may overlap with org)
-          const orgPaths = new Set(orgApexResult.issues.map(i => i.file));
-          for (const issue of localApexResult.issues) {
-            if (!issue.file || !orgPaths.has(issue.file)) {
-              issues.push(issue);
-              analyzedFiles++;
-            }
-          }
-        }
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 3: SOQL Query Analysis (local workspace) ───────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 2, label: 'Analyzing SOQL queries…', total: 20, meta: { classCount: analyzedClasses, triggerCount: analyzedTriggers } });
-        progress.report({ message: 'Analyzing SOQL queries…', increment: 10 });
-
-        const queryAnalyzer = createQueryAnalyzer(sfService);
-        if (queryAnalyzer) {
-          const queryResult = await queryAnalyzer.analyzeWithOrgContext();
-          issues.push(...queryResult.issues);
-        }
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 4: Automation Complexity ───────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 3, label: 'Analyzing automation complexity…', total: 20 });
-        progress.report({ message: 'Analyzing automation complexity…', increment: 15 });
-
-        const automationAnalyzer = createAutomationAnalyzer(sfService);
-        const automationResult = await automationAnalyzer.analyzeOrg();
-        issues.push(...automationResult.issues);
-        analyzedObjects = automationResult.summaries.length;
-        analyzedFlows = automationResult.totalFlows;
-        // Build per-object map for dashboard
-        const autoObjectMap: Record<string, { triggers: number; flows: number; validations: number; total: number }> = {};
-        for (const s of automationResult.summaries) {
-          autoObjectMap[s.objectName] = {
-            triggers: s.triggers || 0,
-            flows: s.flows || 0,
-            validations: s.validationRules || 0,
-            total: (s.triggers || 0) + (s.flows || 0) + (s.validationRules || 0),
-          };
-        }
-        // Classic Workflow Rules are a separate metadata type (not flows) — fetch
-        // them so the Automation tab can show the full inventory.
-        let workflowRules: Array<{ name: string; objectApiName: string }> = [];
-        try {
-          workflowRules = await sfService.getWorkflowRules();
-        } catch (e) {
-          failStep('Workflow Rules', e);
-        }
-
-        const flowInventory = (automationResult.flowInventory || []).map(f => ({
-          name: f.name,
-          processType: f.processType,
-          objectApiName: f.objectApiName ?? '',
-          isActive: f.isActive,
-        }));
-
-        capturedAutomationSummary = {
-          objectMap: autoObjectMap,
-          totalFlows: automationResult.totalFlows,
-          totalTriggers: automationResult.totalTriggers,
-          totalValidationRules: automationResult.totalValidationRules,
-          totalScreenFlows: automationResult.totalScreenFlows,
-          totalScheduledFlows: automationResult.totalScheduledFlows,
-          totalEventFlows: automationResult.totalEventFlows,
-          totalProcessBuilders: automationResult.totalProcessBuilders,
-          totalWorkflowRules: workflowRules.length,
-          flowInventory,
-          workflowInventory: workflowRules.map(w => ({ name: w.name, objectApiName: w.objectApiName })),
+        // Counter-based progress: analyzers below run concurrently, so fixed
+        // step numbers no longer apply — advance the bar as each one settles.
+        let scanStep = 1;
+        const TOTAL_SCAN_STEPS = 20;
+        const tick = (label: string) => {
+          const step = Math.min(++scanStep, TOTAL_SCAN_STEPS - 1);
+          dashPanel.postMessage({ type: 'analysisProgress', step, label, total: TOTAL_SCAN_STEPS });
+          progress.report({ message: label });
         };
 
-        // Canonical flow count = all real flows (every process type EXCEPT
-        // Process Builders, which are counted separately). Overview and the
-        // Automation tab both read this so the numbers always agree.
-        analyzedFlows = flowInventory.filter(f => f.processType !== 'Workflow').length;
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 5: Data Model ───────────────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 4, label: 'Analyzing data model…', total: 20, meta: { flowCount: automationResult.totalFlows, totalTriggers: automationResult.totalTriggers, totalValidationRules: automationResult.totalValidationRules } });
-        progress.report({ message: 'Analyzing data model…', increment: 10 });
-
-        const dataModelAnalyzer = createDataModelAnalyzer(sfService);
-        if (dataModelAnalyzer) {
-          const dataModelResult = await dataModelAnalyzer.analyze();
-          issues.push(...dataModelResult.issues);
-          capturedDataModelStats = dataModelResult.objectFieldStats || [];
-        }
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 6: Test Coverage ────────────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 5, label: 'Fetching test coverage…', total: 20, meta: { objectCount: capturedDataModelStats.length } });
-        progress.report({ message: 'Fetching test coverage…', increment: 10 });
-
-        const coverageAnalyzer = createTestCoverageAnalyzer(sfService);
-        const coverageResult = await coverageAnalyzer.analyze();
-        issues.push(...coverageResult.issues);
-        const testCoverageSummary = {
-          averageCoverage: coverageResult.averageCoverage,
-          totalClasses: coverageResult.totalClasses,
-          classesBelow75: coverageResult.classesBelow75,
-          zeroCoverageCount: coverageResult.zeroCoverageCount,
-        };
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 7: Security (Permissions) ──────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 6, label: 'Analyzing permissions & security…', total: 20, meta: { coverageIssues: coverageResult.issues.length } });
-        progress.report({ message: 'Analyzing permissions & security…', increment: 10 });
-
-        const permAnalyzer = createPermissionAnalyzer(sfService);
-        const permResult = await permAnalyzer.analyze();
-        issues.push(...permResult.issues);
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 8: Integration ──────────────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 7, label: 'Analyzing integrations…', total: 20 });
-        progress.report({ message: 'Analyzing integrations…', increment: 10 });
-
-        const integrationAnalyzer = createIntegrationAnalyzer(sfService);
-        const integrationResult = await integrationAnalyzer.analyze();
-        issues.push(...integrationResult.issues);
-
-        // ─── Step 9: Third-party plugins ─────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 8, label: 'Running plugins…', total: 20 });
-        progress.report({ message: 'Running plugins…', increment: 5 });
-
-        const pluginIssues = await pluginLoader.runAll({
-          apexClasses,
-          apexTriggers,
-          orgUsername: orgInfo.username ?? '',
-          workspacePath: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-        });
-        issues.push(...pluginIssues);
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 10: Governor Limits ─────────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 9, label: 'Scanning governor limit risks…', total: 20 });
-        progress.report({ message: 'Scanning governor limit risks…', increment: 3 });
-
+        // ─── Batch 1 — independent analyzers (run concurrently) ──────────────
+        // Each isolates its failure via failStep and stashes issues in `bag`,
+        // which is merged in a fixed order afterwards so output stays
+        // deterministic regardless of which analyzer finishes first.
+        const bag: Record<string, Issue[]> = {};
+        let testCoverageSummary: AnalysisResult['testCoverageSummary'] | undefined;
         let governorRisks: AnalysisResult['governorRisks'];
         let limitsSimulatorData: AnalysisResult['limitsSimulatorData'];
-        try {
-          const govAnalyzer = createGovernorLimitsAnalyzer();
-          const govResult   = govAnalyzer.analyze(apexClasses, apexTriggers);
-          issues.push(...govResult.issues);
-          governorRisks       = govResult.governorRisks;
-          limitsSimulatorData = govResult.limitsSimulatorData;
-        } catch (e) {
-          failStep('Governor Limits', e);
-        }
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 11: LWC Quality ─────────────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 10, label: 'Analysing LWC components…', total: 20, meta: { governorRiskCount: governorRisks ? governorRisks.length : 0 } });
-        progress.report({ message: 'Analysing LWC components…', increment: 3 });
-
         let lwcSummary: AnalysisResult['lwcSummary'];
         let analyzedLwcComponents = 0;
-        const vscConfig = vscode.workspace.getConfiguration('sfHealthAnalyzer');
-        if (vscConfig.get<boolean>('lwc.enabled', true)) {
-          try {
-            const lwcAnalyzer = createLwcAnalyzer();
-            if (lwcAnalyzer) {
-              const lwcResult = await lwcAnalyzer.analyze();
-              // When Code Analyzer is active it covers LWC/Aura (ESLint), so we
-              // keep the component inventory summary but skip the built-in LWC
-              // issues to avoid duplicate findings.
-              if (!scaActive) {
-                issues.push(...lwcResult.issues);
-              }
-              lwcSummary = lwcResult.lwcSummary;
-              analyzedLwcComponents = lwcSummary?.totalComponents ?? 0;
-            }
-          } catch (e) {
-            failStep('LWC Quality', e);
-          }
-        }
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 12: Technical Debt ──────────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 11, label: 'Calculating technical debt…', total: 20, meta: { lwcComponentCount: analyzedLwcComponents } });
-        progress.report({ message: 'Calculating technical debt…', increment: 3 });
-
         let debtSummary: AnalysisResult['debtSummary'];
-        try {
-          const debtHoursPerSprint = vscConfig.get<number>('debt.sprintHoursPerCycle', 16);
-          const debtAnalyzer = createTechnicalDebtAnalyzer();
-          debtAnalyzer.setSprintHours(debtHoursPerSprint ?? 16);
-          const debtResult   = await debtAnalyzer.analyze(apexClasses, apexTriggers);
-          issues.push(...debtResult.issues);
-          debtSummary = debtResult.debtSummary;
-        } catch (e) {
-          failStep('Technical Debt', e);
-        }
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 13: Scale Center ────────────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 12, label: 'Fetching Scale Center metrics…', total: 20 });
-        progress.report({ message: 'Fetching Scale Center metrics…', increment: 3 });
-
         let scaleCenterMetrics: AnalysisResult['scaleCenterMetrics'];
-        if (vscConfig.get<boolean>('scaleCenter.enabled', true)) {
-          try {
-            const scaleAnalyzer = createScaleCenterAnalyzer(sfService);
-            const scaleResult   = await scaleAnalyzer.analyze();
-            issues.push(...scaleResult.issues);
-            scaleCenterMetrics = scaleResult.scaleCenterMetrics;
-          } catch (e) {
-            failStep('Scale Center', e);
-          }
+        let dependencyGraph: AnalysisResult['dependencyGraph'];
+
+        await Promise.all([
+          // Apex analysis (org source + local workspace)
+          (async () => {
+            const apexAnalyzer = !scaActive ? createApexAnalyzer() : null;
+            if (!apexAnalyzer) { return; }
+            try {
+              const orgApexResult = await apexAnalyzer.analyzeFromOrg(apexClasses, apexTriggers);
+              const out = [...orgApexResult.issues];
+              try {
+                const localApexResult = await apexAnalyzer.analyzeWorkspace();
+                const orgPaths = new Set(orgApexResult.issues.map(i => i.file));
+                for (const issue of localApexResult.issues) {
+                  if (!issue.file || !orgPaths.has(issue.file)) { out.push(issue); analyzedFiles++; }
+                }
+              } catch (e) { failStep('Local Apex scan', e); }
+              bag.apex = out;
+            } catch (e) { failStep('Apex Analysis', e); }
+            tick('Analyzing Apex…');
+          })(),
+
+          // SOQL query analysis
+          (async () => {
+            const queryAnalyzer = createQueryAnalyzer(sfService);
+            if (!queryAnalyzer) { return; }
+            try {
+              const queryResult = await queryAnalyzer.analyzeWithOrgContext();
+              bag.query = queryResult.issues;
+            } catch (e) { failStep('Query Analysis', e); }
+            tick('Analyzing SOQL queries…');
+          })(),
+
+          // Automation complexity
+          (async () => {
+            try {
+              const automationAnalyzer = createAutomationAnalyzer(sfService);
+              const automationResult = await automationAnalyzer.analyzeOrg();
+              bag.automation = automationResult.issues;
+              analyzedObjects = automationResult.summaries.length;
+              const autoObjectMap: Record<string, { triggers: number; flows: number; validations: number; total: number }> = {};
+              for (const s of automationResult.summaries) {
+                autoObjectMap[s.objectName] = {
+                  triggers: s.triggers || 0,
+                  flows: s.flows || 0,
+                  validations: s.validationRules || 0,
+                  total: (s.triggers || 0) + (s.flows || 0) + (s.validationRules || 0),
+                };
+              }
+              let workflowRules: Array<{ name: string; objectApiName: string }> = [];
+              try { workflowRules = await sfService.getWorkflowRules(); } catch (e) { failStep('Workflow Rules', e); }
+              const flowInventory = (automationResult.flowInventory || []).map(f => ({
+                name: f.name, processType: f.processType, objectApiName: f.objectApiName ?? '', isActive: f.isActive,
+              }));
+              capturedAutomationSummary = {
+                objectMap: autoObjectMap,
+                totalFlows: automationResult.totalFlows,
+                totalTriggers: automationResult.totalTriggers,
+                totalValidationRules: automationResult.totalValidationRules,
+                totalScreenFlows: automationResult.totalScreenFlows,
+                totalScheduledFlows: automationResult.totalScheduledFlows,
+                totalEventFlows: automationResult.totalEventFlows,
+                totalProcessBuilders: automationResult.totalProcessBuilders,
+                totalWorkflowRules: workflowRules.length,
+                flowInventory,
+                workflowInventory: workflowRules.map(w => ({ name: w.name, objectApiName: w.objectApiName })),
+              };
+              analyzedFlows = flowInventory.filter(f => f.processType !== 'Workflow').length;
+            } catch (e) { failStep('Automation', e); }
+            tick('Analyzing automation complexity…');
+          })(),
+
+          // Data model
+          (async () => {
+            const dataModelAnalyzer = createDataModelAnalyzer(sfService);
+            if (!dataModelAnalyzer) { return; }
+            try {
+              const dataModelResult = await dataModelAnalyzer.analyze();
+              bag.dataModel = dataModelResult.issues;
+              capturedDataModelStats                  = dataModelResult.objectFieldStats || [];
+              capturedDataModelSummary               = dataModelResult.dataModelSummary;
+              capturedDataModelRecordTypeDetails     = dataModelResult.dataModelRecordTypeDetails;
+              capturedDataModelPageLayoutDetails     = dataModelResult.dataModelPageLayoutDetails;
+              capturedDataModelValidationRuleDetails = dataModelResult.dataModelValidationRuleDetails;
+              capturedDataModelRecordPageDetails     = dataModelResult.dataModelRecordPageDetails;
+            } catch (e) { failStep('Data Model', e); }
+            tick('Analyzing data model…');
+          })(),
+
+          // Test coverage
+          (async () => {
+            try {
+              const coverageAnalyzer = createTestCoverageAnalyzer(sfService);
+              const coverageResult = await coverageAnalyzer.analyze();
+              bag.testCoverage = coverageResult.issues;
+              testCoverageSummary = {
+                averageCoverage: coverageResult.averageCoverage,
+                totalClasses: coverageResult.totalClasses,
+                classesBelow75: coverageResult.classesBelow75,
+                zeroCoverageCount: coverageResult.zeroCoverageCount,
+                classCoverageDetails: coverageResult.classCoverageDetails,
+              };
+            } catch (e) { failStep('Test Coverage', e); }
+            tick('Fetching test coverage…');
+          })(),
+
+          // Permissions / security
+          (async () => {
+            try {
+              const permResult = await createPermissionAnalyzer(sfService).analyze();
+              bag.permission = permResult.issues;
+            } catch (e) { failStep('Permissions', e); }
+            tick('Analyzing permissions & security…');
+          })(),
+
+          // Integration
+          (async () => {
+            try {
+              const integrationResult = await createIntegrationAnalyzer(sfService).analyze();
+              bag.integration = integrationResult.issues;
+            } catch (e) { failStep('Integration', e); }
+            tick('Analyzing integrations…');
+          })(),
+
+          // Governor limits (synchronous scan, wrapped for isolation)
+          (async () => {
+            try {
+              const govAnalyzer = createGovernorLimitsAnalyzer();
+              const govResult = govAnalyzer.analyze(apexClasses, apexTriggers);
+              bag.governor = govResult.issues;
+              governorRisks = govResult.governorRisks;
+              limitsSimulatorData = govResult.limitsSimulatorData;
+            } catch (e) { failStep('Governor Limits', e); }
+            tick('Scanning governor limit risks…');
+          })(),
+
+          // LWC quality
+          (async () => {
+            if (!vscConfig.get<boolean>('lwc.enabled', true)) { return; }
+            try {
+              const lwcAnalyzer = createLwcAnalyzer();
+              if (lwcAnalyzer) {
+                const lwcResult = await lwcAnalyzer.analyze();
+                // When Code Analyzer is active it covers LWC/Aura (ESLint); skip
+                // built-in LWC issues to avoid duplicate findings.
+                if (!scaActive) { bag.lwc = lwcResult.issues; }
+                lwcSummary = lwcResult.lwcSummary;
+                analyzedLwcComponents = lwcSummary?.totalComponents ?? 0;
+              }
+            } catch (e) { failStep('LWC Quality', e); }
+            tick('Analysing LWC components…');
+          })(),
+
+          // Technical debt
+          (async () => {
+            try {
+              const debtHoursPerSprint = vscConfig.get<number>('debt.sprintHoursPerCycle', 16);
+              const debtAnalyzer = createTechnicalDebtAnalyzer();
+              debtAnalyzer.setSprintHours(debtHoursPerSprint ?? 16);
+              const debtResult = await debtAnalyzer.analyze(apexClasses, apexTriggers);
+              bag.technicalDebt = debtResult.issues;
+              debtSummary = debtResult.debtSummary;
+            } catch (e) { failStep('Technical Debt', e); }
+            tick('Calculating technical debt…');
+          })(),
+
+          // Scale Center
+          (async () => {
+            if (!vscConfig.get<boolean>('scaleCenter.enabled', true)) { return; }
+            try {
+              const scaleResult = await createScaleCenterAnalyzer(sfService).analyze();
+              bag.scale = scaleResult.issues;
+              scaleCenterMetrics = scaleResult.scaleCenterMetrics;
+            } catch (e) { failStep('Scale Center', e); }
+            tick('Fetching Scale Center metrics…');
+          })(),
+
+          // Dependency graph
+          (async () => {
+            try {
+              const depResult = await createDependencyAnalyzer(sfService).analyze(apexClasses, apexTriggers);
+              bag.dependency = depResult.issues;
+              dependencyGraph = depResult.dependencyGraph;
+            } catch (e) { failStep('Dependencies', e); }
+            tick('Building dependency graph…');
+          })(),
+        ]);
+
+        // Merge batch-1 issues in a fixed analyzer order (deterministic output).
+        for (const key of ['apex', 'query', 'automation', 'dataModel', 'testCoverage', 'permission', 'integration', 'governor', 'lwc', 'technicalDebt', 'scale', 'dependency']) {
+          if (bag[key]) { issues.push(...bag[key]); }
         }
 
         if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
 
-        // ─── Step 14: Dependency Graph ────────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 13, label: 'Building dependency graph…', total: 20 });
-        progress.report({ message: 'Building dependency graph…', increment: 3 });
-
-        let dependencyGraph: AnalysisResult['dependencyGraph'];
+        // ─── Plugins (sequential — needs apexClasses, orgUsername) ───────────
+        tick('Running plugins…');
         try {
-          const depAnalyzer = createDependencyAnalyzer(sfService);
-          const depResult   = await depAnalyzer.analyze(apexClasses, apexTriggers);
-          issues.push(...depResult.issues);
-          dependencyGraph = depResult.dependencyGraph;
-        } catch (e) {
-          failStep('Dependencies', e);
-        }
+          const pluginIssues = await pluginLoader.runAll({
+            apexClasses,
+            apexTriggers,
+            orgUsername: orgInfo.username ?? '',
+            workspacePath: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+          });
+          issues.push(...pluginIssues);
+        } catch (e) { failStep('Plugins', e); }
 
-        // ─── Step 15: Calculate scores & display ──────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 14, label: 'Calculating health scores…', total: 20 });
-        progress.report({ message: 'Calculating health scores…', increment: 5 });
+        // ─── Step 15: Calculate health scores ─────────────────────────────────
+        tick('Calculating health scores…');
 
-        // Canonical object count: match the Data Model tab (all analysed objects)
-        // so Overview and Data Model never disagree.
         if (capturedDataModelStats && capturedDataModelStats.length > 0) {
           analyzedObjects = capturedDataModelStats.length;
         }
-
-        // Apex code inventory: batch/queueable/schedulable counts (from class
-        // bodies), scheduled jobs (CronTrigger), and total code-size usage.
         let scheduledJobs: Array<{ name: string; state: string; nextFireTime?: string }> = [];
-        try {
-          scheduledJobs = await sfService.getScheduledApexJobs();
-        } catch (e) {
-          failStep('Scheduled Jobs', e);
-        }
+        try { scheduledJobs = await sfService.getScheduledApexJobs(); } catch (e) { failStep('Scheduled Jobs', e); }
         const reBatch = /implements\s+[^;{]*Database\.Batchable/i;
         const reQueueable = /implements\s+[^;{]*Queueable/i;
         const reSchedulable = /implements\s+[^;{]*Schedulable/i;
@@ -877,12 +1077,9 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
         const codeInventory = {
           apexClasses: analyzedClasses,
           apexTriggers: analyzedTriggers,
-          batchClasses,
-          queueableClasses,
-          schedulableClasses,
+          batchClasses, queueableClasses, schedulableClasses,
           scheduledJobs: scheduledJobs.length,
-          apexCodeChars,
-          apexCodeCharLimit: 6000000,
+          apexCodeChars, apexCodeCharLimit: 6000000,
         };
 
         currentResult = healthScoreCalculator.createAnalysisResult(
@@ -892,168 +1089,198 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
             orgAlias: orgInfo.alias,
             orgId: orgInfo.id,
             orgUsername: orgInfo.username,
-            analyzedFiles,
-            analyzedObjects,
-            analyzedClasses,
-            analyzedTriggers,
-            analyzedFlows,
-            analyzedLwcComponents,
+            analyzedFiles, analyzedObjects, analyzedClasses, analyzedTriggers, analyzedFlows, analyzedLwcComponents,
           },
           startTime
         );
 
-        // Attach extended result fields
-        if (governorRisks)         { currentResult.governorRisks       = governorRisks; }
-        if (limitsSimulatorData)   { currentResult.limitsSimulatorData = limitsSimulatorData; }
-        if (lwcSummary)            { currentResult.lwcSummary          = lwcSummary; }
-        if (debtSummary)           { currentResult.debtSummary         = debtSummary; }
-        if (scaleCenterMetrics)    { currentResult.scaleCenterMetrics  = scaleCenterMetrics; }
-        if (dependencyGraph)       { currentResult.dependencyGraph     = dependencyGraph; }
-        if (capturedDataModelStats && capturedDataModelStats.length > 0) {
-          currentResult.dataModelStats = capturedDataModelStats;
-        }
-        if (capturedAutomationSummary) {
-          currentResult.automationSummary = capturedAutomationSummary;
-        }
-        currentResult.testCoverageSummary = testCoverageSummary;
+        if (governorRisks)       { currentResult.governorRisks       = governorRisks; }
+        if (limitsSimulatorData) { currentResult.limitsSimulatorData = limitsSimulatorData; }
+        if (lwcSummary)          { currentResult.lwcSummary          = lwcSummary; }
+        if (debtSummary)         { currentResult.debtSummary         = debtSummary; }
+        if (scaleCenterMetrics)  { currentResult.scaleCenterMetrics  = scaleCenterMetrics; }
+        if (dependencyGraph)     { currentResult.dependencyGraph     = dependencyGraph; }
+        if (capturedDataModelStats && capturedDataModelStats.length > 0) { currentResult.dataModelStats = capturedDataModelStats; }
+        if (capturedDataModelSummary) { currentResult.dataModelSummary = capturedDataModelSummary; }
+        if (capturedDataModelRecordTypeDetails?.length)     { currentResult.dataModelRecordTypeDetails     = capturedDataModelRecordTypeDetails; }
+        if (capturedDataModelPageLayoutDetails?.length)     { currentResult.dataModelPageLayoutDetails     = capturedDataModelPageLayoutDetails; }
+        if (capturedDataModelValidationRuleDetails?.length) { currentResult.dataModelValidationRuleDetails = capturedDataModelValidationRuleDetails; }
+        if (capturedDataModelRecordPageDetails?.length)     { currentResult.dataModelRecordPageDetails     = capturedDataModelRecordPageDetails; }
+        if (capturedAutomationSummary) { currentResult.automationSummary = capturedAutomationSummary; }
+        if (testCoverageSummary) { currentResult.testCoverageSummary = testCoverageSummary; }
         currentResult.codeInventory = codeInventory;
 
         if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
 
-        // ─── Step 16: User Governance ────────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 15, label: 'Analysing user governance…', total: 20 });
-        progress.report({ message: 'Analysing user governance…', increment: 3 });
-
+        // ─── Batch 2 — analyzers that read/write the assembled result ──────────
+        // Mutually independent; run concurrently. Each writes distinct result fields.
+        const bag2: Record<string, Issue[]> = {};
         let userSummary: UserGovernanceSummary | undefined;
-        let analyzedUsers = 0;
-        if (vscConfig.get<boolean>('userGovernance.enabled', true)) {
-          try {
-            const ugAnalyzer = createUserGovernanceAnalyzer(sfService);
-            const ugResult   = await ugAnalyzer.analyze();
-            issues.push(...ugResult.issues);
-            userSummary    = ugResult.userSummary;
-            analyzedUsers  = userSummary.totalActiveUsers;
-            currentResult.userSummary = userSummary;
-          } catch (e) {
-            failStep('User Governance', e);
-          }
-        }
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 17: Profile Security ───────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 16, label: 'Analysing profile security…', total: 20, meta: { activeUsers: analyzedUsers } });
-        progress.report({ message: 'Analysing profile security…', increment: 3 });
-
         let profileSummary: ProfileSecuritySummary | undefined;
-        let analyzedProfiles = 0;
-        if (vscConfig.get<boolean>('profileSecurity.enabled', true)) {
-          try {
-            const psAnalyzer = createProfileSecurityAnalyzer(sfService);
-            const psResult   = await psAnalyzer.analyze();
-            issues.push(...psResult.issues);
-            profileSummary   = psResult.profileSummary;
-            analyzedProfiles = profileSummary.totalProfiles;
-
-            // Enrich profile list with active user counts
-            try {
-              const userCounts = await sfService.getProfileUserCounts();
-              const countMap = new Map(userCounts.map(u => [u.ProfileId, u.userCount]));
-              for (const p of profileSummary.profileList) {
-                p._userCount = countMap.get(p.Id) ?? 0;
-              }
-            } catch { /* non-critical — column will show "—" */ }
-
-            // Enrich permission sets + groups with active user counts (#4)
-            try {
-              const [psgList, assignCounts] = await Promise.all([
-                sfService.getPermissionSetGroups(),
-                sfService.getPermissionSetAssignmentCounts(),
-              ]);
-              for (const ps of profileSummary.permissionSetList ?? []) {
-                ps._userCount = assignCounts.bySet.get(ps.Id) ?? 0;
-              }
-              profileSummary.permissionSetGroupList = psgList.map(g => ({
-                ...g,
-                _userCount: assignCounts.byGroup.get(g.Id) ?? 0,
-              }));
-            } catch { /* non-critical — tables will show "—" / be empty */ }
-
-            currentResult.profileSummary = profileSummary;
-          } catch (e) {
-            failStep('Profile Security', e);
-          }
-        }
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 18: Stale Metadata ─────────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 17, label: 'Scanning for stale metadata…', total: 20 });
-        progress.report({ message: 'Scanning for stale metadata…', increment: 3 });
-
         let staleMetadata: StaleMetadataSummary | undefined;
-        if (vscConfig.get<boolean>('staleMetadata.enabled', true)) {
-          try {
-            const smAnalyzer = createStaleMetadataAnalyzer(sfService);
-            const smResult   = await smAnalyzer.analyze();
-            issues.push(...smResult.issues);
-            staleMetadata    = smResult.staleMetadata;
-            currentResult.staleMetadata = staleMetadata;
-          } catch (e) {
-            failStep('Stale Metadata', e);
-          }
-        }
-
-        if (token.isCancellationRequested || (activeAnalysisCts && activeAnalysisCts.token.isCancellationRequested)) { return; }
-
-        // ─── Step 19: Org Inventory ───────────────────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 18, label: 'Building org inventory…', total: 20 });
-        progress.report({ message: 'Building org inventory…', increment: 3 });
-
         let orgInventory: OrgInventorySummary | undefined;
-        if (vscConfig.get<boolean>('orgInventory.enabled', true)) {
-          try {
-            const invAnalyzer = createOrgInventoryAnalyzer(sfService);
-            const invResult   = await invAnalyzer.analyze(analyzedClasses, analyzedTriggers, analyzedFlows);
-            issues.push(...invResult.issues);
-            orgInventory      = invResult.orgInventory;
-            currentResult.orgInventory = orgInventory;
-          } catch (e) {
-            failStep('Org Inventory', e);
-          }
+        let analyzedUsers = 0;
+        let analyzedProfiles = 0;
+
+        await Promise.all([
+          // User Governance
+          (async () => {
+            if (!vscConfig.get<boolean>('userGovernance.enabled', true)) { return; }
+            try {
+              const ugResult = await createUserGovernanceAnalyzer(sfService).analyze();
+              bag2.userGovernance = ugResult.issues;
+              userSummary = ugResult.userSummary;
+              analyzedUsers = userSummary.totalActiveUsers;
+              currentResult.userSummary = userSummary;
+            } catch (e) { failStep('User Governance', e); }
+            tick('Analysing user governance…');
+          })(),
+
+          // Profile Security
+          (async () => {
+            if (!vscConfig.get<boolean>('profileSecurity.enabled', true)) { return; }
+            try {
+              const psResult = await createProfileSecurityAnalyzer(sfService).analyze();
+              bag2.profileSecurity = psResult.issues;
+              profileSummary = psResult.profileSummary;
+              analyzedProfiles = profileSummary.totalProfiles;
+              try {
+                const userCounts = await sfService.getProfileUserCounts();
+                const countMap = new Map(userCounts.map(u => [u.ProfileId, u.userCount]));
+                for (const p of profileSummary.profileList) { p._userCount = countMap.get(p.Id) ?? 0; }
+              } catch { /* non-critical — column will show "—" */ }
+              try {
+                const [psgList, assignCounts] = await Promise.all([
+                  sfService.getPermissionSetGroups(),
+                  sfService.getPermissionSetAssignmentCounts(),
+                ]);
+                for (const ps of profileSummary.permissionSetList ?? []) { ps._userCount = assignCounts.bySet.get(ps.Id) ?? 0; }
+                profileSummary.permissionSetGroupList = psgList.map(g => ({ ...g, _userCount: assignCounts.byGroup.get(g.Id) ?? 0 }));
+              } catch { /* non-critical — tables will show "—" / be empty */ }
+              currentResult.profileSummary = profileSummary;
+            } catch (e) { failStep('Profile Security', e); }
+            tick('Analysing profile security…');
+          })(),
+
+          // Stale Metadata
+          (async () => {
+            if (!vscConfig.get<boolean>('staleMetadata.enabled', true)) { return; }
+            try {
+              const smResult = await createStaleMetadataAnalyzer(sfService).analyze();
+              bag2.staleMetadata = smResult.issues;
+              staleMetadata = smResult.staleMetadata;
+              currentResult.staleMetadata = staleMetadata;
+            } catch (e) { failStep('Stale Metadata', e); }
+            tick('Scanning for stale metadata…');
+          })(),
+
+          // Org Inventory
+          (async () => {
+            if (!vscConfig.get<boolean>('orgInventory.enabled', true)) { return; }
+            try {
+              const invResult = await createOrgInventoryAnalyzer(sfService).analyze(analyzedClasses, analyzedTriggers, analyzedFlows);
+              bag2.orgInventory = invResult.issues;
+              orgInventory = invResult.orgInventory;
+              currentResult.orgInventory = orgInventory;
+            } catch (e) { failStep('Org Inventory', e); }
+            tick('Building org inventory…');
+          })(),
+        ]);
+
+        // Merge batch-2 issues in a fixed order.
+        for (const key of ['userGovernance', 'profileSecurity', 'staleMetadata', 'orgInventory']) {
+          if (bag2[key]) { issues.push(...bag2[key]); }
         }
 
-        // Attach extended org details fetched at Step 1
-        if (orgDetails) {
-          currentResult.orgDetails = orgDetails;
-        }
+        if (orgDetails) { currentResult.orgDetails = orgDetails; }
 
-        // ─── Step 20: CTA Architecture Analysis ──────────────────────────────
-        dashPanel.postMessage({ type: 'analysisProgress', step: 19, label: 'Running CTA architecture checks…', total: 20, meta: { totalIssues: issues.length, inventoryReady: !!orgInventory } });
-        progress.report({ message: 'Running CTA architecture checks…', increment: 2 });
-
+        // ─── CTA Architecture (needs the fully-assembled result) ──────────────
+        tick('Running CTA architecture checks…');
         if (vscConfig.get<boolean>('ctaArchitecture.enabled', true)) {
           try {
             const ctaAnalyzer = createCtaArchitectureAnalyzer(sfService);
             const queryExplainEnabled = vscConfig.get<boolean>('queryExplain.enabled', true);
             const ctaResult = await ctaAnalyzer.analyze(currentResult, queryExplainEnabled, apexClasses, apexTriggers);
             issues.push(...ctaResult.issues);
-            currentResult.licenseSummary       = ctaResult.licenseSummary;
-            currentResult.queryExplainResults  = ctaResult.queryExplainResults;
-            currentResult.objectRecordCounts   = ctaResult.objectRecordCounts;
-            currentResult.entryPoints          = ctaResult.entryPoints;
-          } catch (e) {
-            failStep('CTA Architecture', e);
-          }
+            currentResult.licenseSummary      = ctaResult.licenseSummary;
+            currentResult.queryExplainResults = ctaResult.queryExplainResults;
+            currentResult.objectRecordCounts  = ctaResult.objectRecordCounts;
+            currentResult.entryPoints         = ctaResult.entryPoints;
+          } catch (e) { failStep('CTA Architecture', e); }
         }
 
-        // ─── Live governor-limit utilisation (REST /limits) ──────────────────
+        // ─── Live governor-limit utilisation ────────────────────────────────
         try {
           const orgLimits = await sfService.getOrgLimits();
           if (orgLimits.length > 0) { currentResult.orgLimits = orgLimits; }
-        } catch (e) {
-          failStep('Org Limits', e);
-        }
+        } catch (e) { failStep('Org Limits', e); }
+
+        // ─── Org Info Extended Data (best-effort, non-blocking) ─────────────
+        try {
+          const [envSummary, integSummary, quickCounts, appTypeSummary] = await Promise.allSettled([
+            sfService.getEnvironmentsSummary(),
+            sfService.getIntegrationsSummary(),
+            sfService.getQuickFactsCounts(),
+            sfService.getAppTypeSummary(orgDetails?.apps ?? []),
+          ]);
+
+          // Detect clouds from feature licenses (pure function — no network)
+          const clouds: CloudStatus[] = detectClouds(capturedFeatureLicenses, currentResult.licenseSummary ?? []);
+
+          // Classify packages by type
+          const packagesByType = sfService.classifyPackages(orgInventory?.installedPackages ?? []);
+
+          // Storage from already-fetched orgLimits
+          const storageLimitEntry = currentResult.orgLimits?.find(l => l.name === 'DataStorageMB');
+          const extWithStorage: OrgExtendedDetails | undefined = capturedOrgExtended
+            ? {
+                ...capturedOrgExtended,
+                storageUsedMB: storageLimitEntry?.used,
+                storageLimitMB: storageLimitEntry?.max,
+                storageUsedPct: storageLimitEntry?.usedPct,
+              }
+            : undefined;
+
+          const qc = quickCounts.status === 'fulfilled' ? quickCounts.value : null;
+          const licenses: LicenseSummary[] = currentResult.licenseSummary ?? [];
+
+          currentResult.orgInfoData = {
+            extended: extWithStorage,
+            clouds,
+            packagesByType,
+            appsByType: appTypeSummary.status === 'fulfilled' ? appTypeSummary.value : undefined,
+            environments: envSummary.status === 'fulfilled' ? envSummary.value : undefined,
+            integrations: integSummary.status === 'fulfilled' ? integSummary.value : undefined,
+            quickFacts: {
+              // Prefer the dedicated all-namespace counts; fall back to inventory; null ⇒ N/A.
+              customObjects: qc?.customObjects ?? (orgInventory?.customObjectCount || null),
+              users: currentResult.userSummary?.totalActiveUsers ?? 0,
+              roles: qc?.roles ?? 0,
+              profiles: orgInventory?.profileCount ?? 0,
+              permissionSets: orgInventory?.permissionSetCount ?? 0,
+              permissionSetGroups: qc?.permissionSetGroups ?? 0,
+              publicGroups: qc?.publicGroups ?? 0,
+              queues: qc?.queues ?? 0,
+              flows: qc?.flows ?? (orgInventory?.flowCount || currentResult.automationSummary?.totalFlows || null),
+              apexClasses: orgInventory?.apexClassCount ?? 0,
+              triggers: orgInventory?.apexTriggerCount ?? 0,
+              lwcComponents: currentResult.lwcSummary?.totalComponents ?? 0,
+            },
+            activeUsers: currentResult.userSummary?.totalActiveUsers ?? 0,
+            activeLicenses: licenses.reduce((s, l) => s + l.usedLicenses, 0),
+            totalLicenses: licenses.reduce((s, l) => s + l.totalLicenses, 0),
+          };
+        } catch (e) { failStep('Org Info Extended', e); }
+
+        // ─── License Recommendations (deterministic; AI narrative added on demand) ──
+        try {
+          currentResult.licenseRecommendations = buildLicenseRecommendationsBase(currentResult);
+        } catch (e) { failStep('License Recommendations', e); }
+
+        // ─── Org Info Recommendations (deterministic; AI narrative added on demand) ─
+        try {
+          currentResult.orgInfoRecommendations = buildOrgInfoRecommendationsBase(currentResult);
+        } catch (e) { failStep('Org Info Recommendations', e); }
 
         // Update metadata with new counts
         if (currentResult.metadata) {
@@ -1063,7 +1290,7 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
           if (stepWarnings.length > 0) { currentResult.metadata.warnings = stepWarnings; }
         }
 
-        // Recompute summary with added issues from steps 16-19
+        // Recompute summary now that all batches added issues.
         currentResult.summary = healthScoreCalculator.createSummary(currentResult.issues);
 
         // ─── Run-over-run trend history ──────────────────────────────────────
@@ -1086,11 +1313,41 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
         context.globalState.update(HISTORY_STORAGE_KEY, history);
         currentResult.trends = history;
 
+        // ─── Future Readiness (deterministic; AI narrative added on demand) ──
+        tick('Assessing future readiness…');
+        try {
+          const edition = currentResult.orgDetails?.orgType ?? 'unknown';
+          const collectors = await collectReadinessData(sfService, edition);
+          currentResult.futureReadiness = futureReadinessService.assess({ result: currentResult, collectors });
+        } catch (e) { failStep('Future Readiness', e); }
+
         // Persist result for restore on reload
         context.globalState.update(RESULT_STORAGE_KEY, currentResult);
 
         // Save to project file cache (.orgpulse/cache.json)
         saveCacheToFile(currentResult);
+
+        // ─── Per-org scan history (lightweight, max 10 per org) ─────────────
+        const orgId = currentResult.orgDetails?.orgId ?? currentResult.metadata?.orgId ?? 'unknown';
+        const orgName = currentResult.orgDetails?.orgName ?? 'Unknown Org';
+        const scanEntry: ScanHistoryEntry = {
+          timestamp: currentResult.timestamp instanceof Date
+            ? currentResult.timestamp.toISOString()
+            : new Date().toISOString(),
+          orgId,
+          orgName,
+          scores: currentResult.scores,
+          issueSummary: {
+            total: currentResult.issues.length,
+            error: currentResult.issues.filter(i => i.severity === 'error').length,
+            warning: currentResult.issues.filter(i => i.severity === 'warning').length,
+            info: currentResult.issues.filter(i => i.severity === 'info').length,
+          },
+          duration: Date.now() - startTime.getTime(),
+        };
+        const allOrgHistory = context.globalState.get<Record<string, ScanHistoryEntry[]>>(ORG_HISTORY_KEY) ?? {};
+        allOrgHistory[orgId] = [...(allOrgHistory[orgId] ?? []), scanEntry].slice(-10);
+        context.globalState.update(ORG_HISTORY_KEY, allOrgHistory);
 
         // Update tree view
         healthResultsProvider.setResults(currentResult);
@@ -1099,6 +1356,7 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
         // Show/update dashboard
         const panel = getDashboardPanel(context.extensionUri);
         panel.updateResults(currentResult);
+        panel.updateOrgHistory(allOrgHistory);
 
         // Output channel summary
         const duration = Date.now() - startTime.getTime();

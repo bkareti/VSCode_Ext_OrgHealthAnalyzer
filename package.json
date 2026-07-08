@@ -2,7 +2,7 @@
   "name": "sf-health-analyzer",
   "displayName": "OrgPulse",
   "description": "Salesforce Architecture Health & Insights — Built with security-first AI. No sensitive data ever leaves your org. Enterprise-grade analysis of Apex quality, automation complexity, data model health, test coverage, security, and performance.",
-  "version": "1.14.0",
+  "version": "1.16.0",
   "publisher": "babukareti",
   "license": "MIT",
   "homepage": "https://github.com/bkareti/VSCode_Ext_OrgHealthAnalyzer#readme",
@@ -99,6 +99,16 @@
       {
         "command": "sfHealthAnalyzer.runCtaReview",
         "title": "Run CTA Architecture Review",
+        "category": "OrgPulse"
+      },
+      {
+        "command": "sfHealthAnalyzer.runFutureReadiness",
+        "title": "Run Future Readiness Assessment (AI narrative)",
+        "category": "OrgPulse"
+      },
+      {
+        "command": "sfHealthAnalyzer.runLicenseRecommendations",
+        "title": "Run License Recommendations (AI narrative)",
         "category": "OrgPulse"
       },
       {
@@ -264,7 +274,7 @@
         },
         "sfHealthAnalyzer.codeAnalyzer.enabled": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "Delegate static Apex/LWC code analysis to Salesforce Code Analyzer (sf code-analyzer run) instead of the built-in rules. Requires the 'code-analyzer' CLI plugin and a Java runtime; falls back to built-in rules when they are unavailable."
         },
         "sfHealthAnalyzer.codeAnalyzer.ruleSelector": {
@@ -391,11 +401,13 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
-    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "compile": "npm run build:webview && npm run check-types && npm run lint && node esbuild.js",
     "watch": "npm-run-all -p watch:*",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
-    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "package": "npm run build:webview && npm run check-types && npm run lint && node esbuild.js --production",
+    "build:webview": "cd webview-ui && npm install && npm run build",
+    "dev:webview": "cd webview-ui && npm run dev",
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "npm run compile-tests && npm run compile && npm run lint",

@@ -34,7 +34,13 @@ import {
   QueryExplainResult,
   OrgLimitInfo,
   MetadataDependency,
+  OrgExtendedDetails,
+  EnvironmentsSummary,
+  IntegrationsSummary,
+  PackageTypeSummary,
+  AppTypeSummary,
 } from '../types';
+import { DataCloudIdentityCounts } from '../types/futureReadiness';
 import {
   SalesforceAuthError,
   SalesforceConnectionError,
@@ -48,6 +54,11 @@ const execFileAsync = promisify(execFile);
 const API_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*$/;
 const TOOLING_QUERY_LIMIT = 2000;
 
+// Reuse TCP connections across the ~60-90 REST calls a single scan makes.
+// Without keep-alive, every query pays a fresh TLS handshake; with it, the
+// whole scan rides a handful of pooled sockets.
+const keepAliveAgent = new https.Agent({ keepAlive: true, maxSockets: 8 });
+
 /**
  * Fallback Salesforce API version used only until the org's real version is
  * resolved at connect time. Keep this current with recent Salesforce releases;
@@ -55,9 +66,27 @@ const TOOLING_QUERY_LIMIT = 2000;
  */
 const DEFAULT_API_VERSION = '63.0';
 
-async function runSfJson(args: string[]): Promise<unknown> {
-  const { stdout } = await execFileAsync('sf', args, { maxBuffer: 50 * 1024 * 1024 });
-  return JSON.parse(stdout);
+async function runSfJson(args: string[], targetOrg?: string): Promise<unknown> {
+  // Multi-org: scope the command to a specific authenticated org via the CLI's
+  // SF_TARGET_ORG env var. When unset, the CLI uses the configured default org.
+  const env = targetOrg ? { ...process.env, SF_TARGET_ORG: targetOrg } : process.env;
+  try {
+    const { stdout } = await execFileAsync('sf', args, { maxBuffer: 50 * 1024 * 1024, env });
+    return JSON.parse(stdout);
+  } catch (execErr: unknown) {
+    // The sf CLI writes structured error JSON to stdout even when it exits non-zero.
+    // Extract the Salesforce error message so logs show the real cause, not just "Command failed: sf ...".
+    const err = execErr as { stdout?: string; stderr?: string; message?: string };
+    let sfDetail = '';
+    if (err.stdout?.trim()) {
+      try {
+        const parsed = JSON.parse(err.stdout) as { message?: string; name?: string };
+        sfDetail = parsed.message || parsed.name || '';
+      } catch { sfDetail = err.stdout.slice(0, 400); }
+    }
+    if (!sfDetail && err.stderr?.trim()) { sfDetail = err.stderr.slice(0, 400); }
+    throw new Error(sfDetail || err.message || 'sf command failed');
+  }
 }
 
 function isValidApiName(value: string): boolean {
@@ -80,6 +109,179 @@ export class SalesforceService {
   private instanceUrl: string | null = null;
   /** Resolved from the connected org at connect() time; falls back to DEFAULT_API_VERSION. */
   private apiVersion: string = DEFAULT_API_VERSION;
+
+  /**
+   * @param targetOrg Username or alias of the org to target. When omitted, the
+   *   SF CLI's configured default org is used.
+   */
+  constructor(private readonly targetOrg?: string) {}
+
+  /** Run an `sf` JSON command scoped to this instance's target org. */
+  private sf(args: string[]): Promise<unknown> {
+    return runSfJson(args, this.targetOrg);
+  }
+
+  /**
+   * Per-run fetch memoization. A SalesforceService is created once per scan,
+   * so caching for the instance lifetime == caching for the run. Several
+   * analyzers independently fetch the same metadata (triggers, custom fields,
+   * permission sets, dependencies); this collapses those into a single fetch.
+   * The in-flight promise is cached, so concurrent callers also share one fetch.
+   */
+  private memoCache = new Map<string, Promise<unknown>>();
+  private memo<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const hit = this.memoCache.get(key);
+    if (hit) { return hit as Promise<T>; }
+    const p = fn();
+    this.memoCache.set(key, p);
+    return p;
+  }
+
+  /**
+   * GET a Salesforce REST resource directly over HTTPS (no `sf` CLI spawn).
+   * `path` may include a query string (e.g. `/query/?explain=...`).
+   */
+  private sfRestGet<T>(path: string): Promise<T> {
+    return this.restRequest<T>('GET', path);
+  }
+
+  /**
+   * Core direct-HTTPS request against the connected org. Replaces per-query
+   * `sf` CLI spawns — the dominant cost of a full scan. Uses the access token
+   * captured at connect() and a keep-alive socket pool.
+   *
+   * On HTTP 401 (expired token) it refreshes once via `sf org display` — which
+   * silently re-mints the access token — then retries the request a single time.
+   */
+  private async restRequest<T>(method: string, path: string, body?: unknown, retried = false): Promise<T> {
+    if (!this.accessToken || !this.instanceUrl) {
+      await this.connect();
+    }
+    const url = new URL(path, this.instanceUrl!);
+    const payload = body !== undefined ? JSON.stringify(body) : undefined;
+
+    return new Promise<T>((resolve, reject) => {
+      const req = https.request(
+        url,
+        {
+          method,
+          agent: keepAliveAgent,
+          headers: {
+            Authorization: `Bearer ${this.accessToken}`,
+            Accept: 'application/json',
+            ...(payload ? { 'Content-Type': 'application/json' } : {}),
+          },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c) => chunks.push(c as Buffer));
+          res.on('end', () => {
+            const status = res.statusCode ?? 0;
+            const text = Buffer.concat(chunks).toString('utf8');
+
+            // Expired token → refresh via the CLI once, then retry.
+            if (status === 401 && !retried) {
+              this.getOrgInfo()
+                .then((info) => {
+                  this.accessToken = info.accessToken;
+                  this.instanceUrl = info.instanceUrl;
+                  return this.restRequest<T>(method, path, body, true);
+                })
+                .then(resolve, reject);
+              return;
+            }
+
+            if (status >= 200 && status < 300) {
+              if (!text) { resolve(undefined as unknown as T); return; }
+              try { resolve(JSON.parse(text) as T); }
+              catch { reject(new Error(`Non-JSON response (${status}) from ${path}: ${text.slice(0, 300)}`)); }
+              return;
+            }
+
+            // Salesforce REST errors come back as [{ errorCode, message }].
+            let detail = text.slice(0, 400);
+            try {
+              const parsed = JSON.parse(text) as unknown;
+              if (Array.isArray(parsed) && (parsed[0] as { message?: string })?.message) {
+                const e = parsed[0] as { errorCode?: string; message?: string };
+                detail = `${e.errorCode ?? ''} ${e.message ?? ''}`.trim();
+              } else if ((parsed as { message?: string })?.message) {
+                detail = (parsed as { message: string }).message;
+              }
+            } catch { /* keep raw text */ }
+            reject(new SalesforceQueryError(`Salesforce REST ${status}: ${detail}`, path));
+          });
+        },
+      );
+      req.on('error', reject);
+      if (payload) { req.write(payload); }
+      req.end();
+    });
+  }
+
+  /**
+   * Run a SOQL/Tooling query over REST and follow `nextRecordsUrl` to collect
+   * every page. Native cursor pagination — no LIMIT/OFFSET ceiling (the old CLI
+   * path silently truncated at OFFSET 2000).
+   */
+  private async restQueryAll<T>(soql: string, tooling: boolean): Promise<T[]> {
+    if (!this.accessToken) { await this.connect(); }
+    const queryPath = tooling ? this.restPath('tooling/query') : this.restPath('query');
+    const all: T[] = [];
+    let path: string | null = `${queryPath}?q=${encodeURIComponent(soql)}`;
+    while (path) {
+      const page: { records: T[]; done?: boolean; nextRecordsUrl?: string; totalSize?: number } =
+        await this.restRequest('GET', path);
+      if (Array.isArray(page.records)) { all.push(...page.records); }
+      path = page.done === false && page.nextRecordsUrl ? page.nextRecordsUrl : null;
+    }
+    return all;
+  }
+
+  /**
+   * Run several read-only queries in ONE HTTP round-trip via the Composite
+   * Batch API. Each sub-response is returned independently so callers keep
+   * per-query resilience. Returns null in a slot whose sub-request errored.
+   */
+  private async compositeQuery(
+    soqls: string[],
+  ): Promise<Array<{ records: unknown[]; totalSize?: number } | null>> {
+    if (!this.accessToken) { await this.connect(); }
+    const v = this.apiVersion;
+    const batchRequests = soqls.map((soql) => ({
+      method: 'GET',
+      url: `/services/data/v${v}/query/?q=${encodeURIComponent(soql)}`,
+    }));
+    const res = await this.restRequest<{
+      hasErrors: boolean;
+      results: Array<{ statusCode: number; result: unknown }>;
+    }>('POST', this.restPath('composite/batch'), { batchRequests });
+    return res.results.map((r) =>
+      r.statusCode >= 200 && r.statusCode < 300
+        ? (r.result as { records: unknown[]; totalSize?: number })
+        : null,
+    );
+  }
+
+  /**
+   * Fetch the real, current access token via `sf org auth show-access-token`.
+   * Returns null if the command is unavailable (older CLI) or fails — the caller
+   * then falls back to the (possibly redacted) `org display` token.
+   * Newer `sf` CLI versions redact the access token in `org display` output.
+   */
+  private async fetchAccessToken(): Promise<string | null> {
+    try {
+      const r = await this.sf(['org', 'auth', 'show-access-token', '--json']) as {
+        status: number;
+        result?: { accessToken?: string } | string;
+      };
+      if (r.status !== 0) { return null; }
+      const tok = typeof r.result === 'string' ? r.result : r.result?.accessToken;
+      return tok || null;
+    } catch {
+      return null;
+    }
+  }
 
   /** The Salesforce API version resolved from the connected org (e.g. "62.0"). */
   getApiVersion(): string {
@@ -125,7 +327,7 @@ export class SalesforceService {
    * Get current org information from SF CLI
    */
   async getOrgInfo(): Promise<OrgInfo> {
-    const result = await runSfJson(['org', 'display', '--json']) as {
+    const result = await this.sf(['org', 'display', '--json']) as {
       status: number;
       message?: string;
       result: {
@@ -137,7 +339,7 @@ export class SalesforceService {
         apiVersion?: string;
       };
     };
-    
+
     if (result.status !== 0) {
       throw new SalesforceAuthError(result.message || 'Failed to get org info');
     }
@@ -146,9 +348,16 @@ export class SalesforceService {
     // versioned REST calls (replaces previously hardcoded version strings).
     this.apiVersion = normalizeApiVersion(result.result.apiVersion);
 
+    // Newer `sf` CLI redacts the access token in `org display` output. Fetch the
+    // real, current token via `org auth show-access-token`, which also refreshes
+    // if stale. Fall back to the display token for older CLIs that don't redact.
+    const realToken = await this.fetchAccessToken();
+    const accessToken =
+      realToken && realToken.startsWith('00D') ? realToken : result.result.accessToken;
+
     return {
       id: result.result.id,
-      accessToken: result.result.accessToken,
+      accessToken,
       instanceUrl: result.result.instanceUrl,
       username: result.result.username,
       alias: result.result.alias,
@@ -200,107 +409,24 @@ export class SalesforceService {
   }
 
   /**
-   * Execute a Tooling API query with automatic pagination
+   * Execute a Tooling API query with automatic pagination via native REST cursor.
+   * Replaces the old LIMIT/OFFSET + CLI-spawn approach — no 2000-record ceiling.
    */
   async toolingQuery<T>(query: string): Promise<T[]> {
     return withRetry(async () => {
       logDebug(`Executing Tooling API query: ${query}`);
-      const allRecords: T[] = [];
-
-      // If the caller already specified LIMIT, run one page only
-      if (query.includes('LIMIT')) {
-        const result = await runSfJson([
-          'data', 'query', '--query', query, '--use-tooling-api', '--json',
-        ]) as {
-          status: number; message?: string;
-          result: { records: T[]; totalSize?: number; done?: boolean };
-        };
-        if (result.status !== 0) {
-          throw new SalesforceQueryError(result.message || 'Query failed', query);
-        }
-        return result.result.records as T[];
-      }
-
-      // Auto-paginate using LIMIT+OFFSET (capped at 2000 per Salesforce)
-      // then fall back to smaller pages if we hit the 2000 OFFSET ceiling
-      let offset = 0;
-      const PAGE = TOOLING_QUERY_LIMIT;
-      const MAX_OFFSET = 2000;
-
-      while (offset <= MAX_OFFSET) {
-        const paginatedQuery = `${query} LIMIT ${PAGE} OFFSET ${offset}`;
-        const result = await runSfJson([
-          'data', 'query', '--query', paginatedQuery, '--use-tooling-api', '--json',
-        ]) as {
-          status: number; message?: string;
-          result: { records: T[]; totalSize?: number; done?: boolean };
-        };
-        if (result.status !== 0) {
-          throw new SalesforceQueryError(result.message || 'Query failed', query);
-        }
-        const records = result.result.records as T[];
-        allRecords.push(...records);
-
-        if (records.length < PAGE) { break; }
-        offset += PAGE;
-        if (offset > MAX_OFFSET) {
-          logWarning(`Tooling query truncated at ${allRecords.length} records (OFFSET limit). Consider adding WHERE filters.`);
-          break;
-        }
-      }
-
-      return allRecords;
+      return this.restQueryAll<T>(query, true);
     });
   }
 
   /**
-   * Execute a SOQL query with automatic pagination
+   * Execute a SOQL query with automatic pagination via native REST cursor.
+   * Replaces the old LIMIT/OFFSET + CLI-spawn approach — no 2000-record ceiling.
    */
   async query<T>(query: string): Promise<T[]> {
     return withRetry(async () => {
       logDebug(`Executing SOQL query: ${query}`);
-      const allRecords: T[] = [];
-
-      if (query.includes('LIMIT')) {
-        const result = await runSfJson([
-          'data', 'query', '--query', query, '--json',
-        ]) as {
-          status: number; message?: string;
-          result: { records: T[]; totalSize?: number; done?: boolean };
-        };
-        if (result.status !== 0) {
-          throw new SalesforceQueryError(result.message || 'Query failed', query);
-        }
-        return result.result.records as T[];
-      }
-
-      let offset = 0;
-      const PAGE = TOOLING_QUERY_LIMIT;
-      const MAX_OFFSET = 2000;
-
-      while (offset <= MAX_OFFSET) {
-        const paginatedQuery = `${query} LIMIT ${PAGE} OFFSET ${offset}`;
-        const result = await runSfJson([
-          'data', 'query', '--query', paginatedQuery, '--json',
-        ]) as {
-          status: number; message?: string;
-          result: { records: T[]; totalSize?: number; done?: boolean };
-        };
-        if (result.status !== 0) {
-          throw new SalesforceQueryError(result.message || 'Query failed', query);
-        }
-        const records = result.result.records as T[];
-        allRecords.push(...records);
-
-        if (records.length < PAGE) { break; }
-        offset += PAGE;
-        if (offset > MAX_OFFSET) {
-          logWarning(`SOQL query truncated at ${allRecords.length} records (OFFSET limit). Consider adding WHERE filters.`);
-          break;
-        }
-      }
-
-      return allRecords;
+      return this.restQueryAll<T>(query, false);
     });
   }
 
@@ -319,13 +445,13 @@ export class SalesforceService {
    * Get all active Apex triggers from the org
    */
   async getApexTriggers(): Promise<ApexTrigger[]> {
-    return this.toolingQuery<ApexTrigger>(
+    return this.memo('apexTriggers', () => this.toolingQuery<ApexTrigger>(
       `SELECT Id, Name, Body, TableEnumOrId, ApiVersion, Status,
               UsageBeforeInsert, UsageAfterInsert, UsageBeforeUpdate, UsageAfterUpdate,
               UsageBeforeDelete, UsageAfterDelete, UsageAfterUndelete
-       FROM ApexTrigger 
+       FROM ApexTrigger
        WHERE Status = 'Active' AND NamespacePrefix = null`
-    );
+    ));
   }
 
   /**
@@ -333,85 +459,47 @@ export class SalesforceService {
    */
   async getFlows(): Promise<FlowDefinition[]> {
     // Strategy: Try multiple approaches from most modern to legacy.
-    // 1) Flow (Tooling) with Status = 'Active' — available in recent API versions
-    // 2) FlowDefinition (Tooling) — deprecated but works on older orgs
-    // In both cases, resolve trigger object via FlowVersion if needed.
+    // 1) FlowDefinitionView (Data API) — multi-row queryable, no metadata-field limits
+    // 2) FlowDefinition (Tooling) — deprecated but works on older orgs;
+    //    resolve trigger object / process type via FlowVersion.
 
-    // ── Attempt 1: Modern Flow Tooling object ─────────────────────────────
-    // NOTE: IsTemplate / TriggerType fields may not exist in older API versions.
-    // Try progressively simpler queries: 1a → 1b → 1c before falling back.
-    type FlowRow = { Id: string; DeveloperName: string; Description?: string; ProcessType?: string; TriggerType?: string };
-    let flows: FlowRow[] | null = null;
-
+    // ── Attempt 1: FlowDefinitionView (Data API) ──────────────────────────
+    // FlowDefinitionView is a standard, multi-row-queryable object that exposes
+    // the flow's API name, process type, trigger type, description, and trigger
+    // object directly — no metadata/FullName fields (which are restricted to a
+    // single row) and no FlowVersion join required.
     try {
-      flows = await this.toolingQuery<FlowRow>(
-        `SELECT Id, DeveloperName, Description, ProcessType, TriggerType
-         FROM Flow
-         WHERE Status = 'Active'`
+      type FlowViewRow = {
+        DurableId: string; ApiName: string; Label?: string;
+        ProcessType?: string; TriggerType?: string; IsActive?: boolean;
+        Description?: string; TriggerObjectOrEventLabel?: string; LastModifiedDate?: string;
+      };
+      const views = await this.query<FlowViewRow>(
+        `SELECT DurableId, ApiName, Label, ProcessType, TriggerType, IsActive,
+                Description, TriggerObjectOrEventLabel, LastModifiedDate
+         FROM FlowDefinitionView
+         WHERE IsActive = true`
       );
-      logInfo(`Fetched ${flows.length} active flows via Flow (Tooling API) [1a]`);
-    } catch {
-      try {
-        flows = await this.toolingQuery<FlowRow>(
-          `SELECT Id, DeveloperName, Description, ProcessType
-           FROM Flow
-           WHERE Status = 'Active'`
-        );
-        logInfo(`Fetched ${flows.length} active flows via Flow (Tooling API) [1b]`);
-      } catch {
-        try {
-          flows = await this.toolingQuery<FlowRow>(
-            `SELECT Id, DeveloperName FROM Flow WHERE Status = 'Active'`
-          );
-          logInfo(`Fetched ${flows.length} active flows via Flow (Tooling API) [1c]`);
-        } catch (err1c) {
-          logWarning(`Flow (Tooling) query failed, trying FlowDefinition fallback: ${getErrorMessage(err1c)}`);
-        }
-      }
-    }
-
-    if (flows !== null) {
-      if (flows.length === 0) { return []; }
-      try {
-        const flowIdChunks = this.chunkArray(flows.map(f => `'${f.Id}'`), 200);
-        const versionMap = new Map<string, string>();
-        for (const chunk of flowIdChunks) {
-          const versions = await this.toolingQuery<{ Id: string; TriggerObjectOrEventReference?: string }>(
-            `SELECT Id, TriggerObjectOrEventReference
-             FROM FlowVersion
-             WHERE Id IN (${chunk.join(',')}) LIMIT ${TOOLING_QUERY_LIMIT}`
-          );
-          for (const v of versions) {
-            if (v.TriggerObjectOrEventReference) {
-              versionMap.set(v.Id, v.TriggerObjectOrEventReference);
-            }
-          }
-        }
-        return flows.map(f => ({
-          Id: f.Id,
-          DeveloperName: f.DeveloperName,
-          ActiveVersionId: f.Id,
-          Description: f.Description,
-          ProcessType: f.ProcessType,
-          TriggerType: f.TriggerType,
-          ObjectApiName: versionMap.get(f.Id) || undefined,
-        }));
-      } catch {
-        return flows.map(f => ({
-          Id: f.Id,
-          DeveloperName: f.DeveloperName,
-          ActiveVersionId: f.Id,
-          Description: f.Description,
-          ProcessType: f.ProcessType,
-          TriggerType: f.TriggerType,
-        }));
-      }
+      logInfo(`Fetched ${views.length} active flows via FlowDefinitionView`);
+      return views.map(v => ({
+        Id: v.DurableId,
+        DeveloperName: v.ApiName,
+        ActiveVersionId: v.DurableId,
+        Description: v.Description,
+        ProcessType: v.ProcessType,
+        TriggerType: v.TriggerType,
+        ObjectApiName: v.TriggerObjectOrEventLabel || undefined,
+      }));
+    } catch (viewErr) {
+      logWarning(`FlowDefinitionView query failed, trying FlowDefinition fallback: ${getErrorMessage(viewErr)}`);
     }
 
     // ── Attempt 2: Legacy FlowDefinition (deprecated but wider compat) ────
+    // NOTE: FlowDefinition has no ProcessType column (that lives on Flow), so we
+    // only select fields it actually exposes and resolve the rest via FlowVersion.
     try {
       const flowDefs = await this.toolingQuery<FlowDefinition>(
-        `SELECT Id, DeveloperName, ActiveVersionId, Description, ProcessType
+        `SELECT Id, DeveloperName, ActiveVersionId, Description
          FROM FlowDefinition
          WHERE ActiveVersionId != null`
       );
@@ -428,27 +516,31 @@ export class SalesforceService {
       if (versionIds.length > 0) {
         try {
           const versionChunks = this.chunkArray(versionIds, 200);
-          const versionMap = new Map<string, string>();
+          const versionMap = new Map<string, { object?: string; processType?: string }>();
 
           for (const chunk of versionChunks) {
             const versions = await this.toolingQuery<{
               Id: string;
               TriggerObjectOrEventReference?: string;
+              ProcessType?: string;
             }>(
-              `SELECT Id, TriggerObjectOrEventReference
+              `SELECT Id, TriggerObjectOrEventReference, ProcessType
                FROM FlowVersion
                WHERE Id IN (${chunk.join(',')}) LIMIT ${TOOLING_QUERY_LIMIT}`
             );
             for (const v of versions) {
-              if (v.TriggerObjectOrEventReference) {
-                versionMap.set(v.Id, v.TriggerObjectOrEventReference);
-              }
+              versionMap.set(v.Id, {
+                object: v.TriggerObjectOrEventReference,
+                processType: v.ProcessType,
+              });
             }
           }
 
           for (const flow of flowDefs) {
-            if (flow.ActiveVersionId && versionMap.has(flow.ActiveVersionId)) {
-              flow.ObjectApiName = versionMap.get(flow.ActiveVersionId);
+            const v = flow.ActiveVersionId ? versionMap.get(flow.ActiveVersionId) : undefined;
+            if (v) {
+              flow.ObjectApiName = v.object ?? flow.ObjectApiName;
+              flow.ProcessType = v.processType ?? flow.ProcessType;
             }
           }
         } catch (err) {
@@ -631,6 +723,8 @@ export class SalesforceService {
     lookupFields: number;
     masterDetailFields: number;
     fieldLimitPct: number;
+    formulaFields: number;
+    encryptedFields: number;
   }>> {
     // 1. Object list — all customisable objects including standard ones
     // NOTE: NamespacePrefix = null on EntityDefinition is UNRELIABLE via Tooling API
@@ -659,6 +753,8 @@ export class SalesforceService {
     const triggerQuery     = `SELECT EntityDefinitionId, COUNT(Id) NbTriggers FROM ApexTrigger WHERE NamespacePrefix = null GROUP BY EntityDefinitionId LIMIT 2000`;
     const lookupQuery      = `SELECT EntityDefinitionId, COUNT(Id) NbLookups FROM FieldDefinition WHERE DataType = 'Lookup' GROUP BY EntityDefinitionId LIMIT 2000`;
     const mdQuery          = `SELECT EntityDefinitionId, COUNT(Id) NbMD FROM FieldDefinition WHERE DataType = 'MasterDetail' GROUP BY EntityDefinitionId LIMIT 2000`;
+    const formulaQuery     = `SELECT EntityDefinitionId, COUNT(Id) NbFormula FROM FieldDefinition WHERE IsCalculated = true AND EntityDefinition.IsCustomizable = true GROUP BY EntityDefinitionId LIMIT 2000`;
+    const encryptedQuery   = `SELECT EntityDefinitionId, COUNT(Id) NbEncrypted FROM FieldDefinition WHERE DataType = 'EncryptedText' AND EntityDefinition.IsCustomizable = true GROUP BY EntityDefinitionId LIMIT 2000`;
 
     // Helper: run a query with NamespacePrefix=null filter; if the filtered query
     // returns 0 rows (some org editions reject the filter), retry without it.
@@ -676,7 +772,7 @@ export class SalesforceService {
     };
 
     try {
-      const [entities, cfRows, tfRows, vrRows, trigRows, lookupRows, mdRows] = await Promise.all([
+      const [entities, cfRows, tfRows, vrRows, trigRows, lookupRows, mdRows, formulaRows, encryptedRows] = await Promise.all([
         this.toolingQuery<{ DurableId: string; QualifiedApiName: string; Label: string; KeyPrefix: string }>(entityQuery),
         queryWithNsFallback<{ EntityDefinitionId: string; NbCustomFields: number }>(
           customFieldQuery,
@@ -696,15 +792,19 @@ export class SalesforceService {
         ),
         this.toolingQuery<{ EntityDefinitionId: string; NbLookups: number }>(lookupQuery).catch(() => [] as Array<{ EntityDefinitionId: string; NbLookups: number }>),
         this.toolingQuery<{ EntityDefinitionId: string; NbMD: number }>(mdQuery).catch(() => [] as Array<{ EntityDefinitionId: string; NbMD: number }>),
+        this.toolingQuery<{ EntityDefinitionId: string; NbFormula: number }>(formulaQuery).catch(() => [] as Array<{ EntityDefinitionId: string; NbFormula: number }>),
+        this.toolingQuery<{ EntityDefinitionId: string; NbEncrypted: number }>(encryptedQuery).catch(() => [] as Array<{ EntityDefinitionId: string; NbEncrypted: number }>),
       ]);
 
       // Build lookup maps from aggregate results (EntityDefinitionId → count)
-      const cfMap = new Map(cfRows.map(r => [r.EntityDefinitionId, Number(r.NbCustomFields)]));
-      const tfMap = new Map(tfRows.map(r => [r.EntityDefinitionId, Number(r.NbTotalFields)]));
-      const vrMap = new Map(vrRows.map(r => [r.EntityDefinitionId, Number(r.NbValidations)]));
-      const trigMap = new Map(trigRows.map(r => [r.EntityDefinitionId, Number(r.NbTriggers)]));
-      const lookMap = new Map(lookupRows.map(r => [r.EntityDefinitionId, Number(r.NbLookups)]));
-      const mdMap = new Map(mdRows.map(r => [r.EntityDefinitionId, Number(r.NbMD)]));
+      const cfMap        = new Map(cfRows.map(r => [r.EntityDefinitionId, Number(r.NbCustomFields)]));
+      const tfMap        = new Map(tfRows.map(r => [r.EntityDefinitionId, Number(r.NbTotalFields)]));
+      const vrMap        = new Map(vrRows.map(r => [r.EntityDefinitionId, Number(r.NbValidations)]));
+      const trigMap      = new Map(trigRows.map(r => [r.EntityDefinitionId, Number(r.NbTriggers)]));
+      const lookMap      = new Map(lookupRows.map(r => [r.EntityDefinitionId, Number(r.NbLookups)]));
+      const mdMap        = new Map(mdRows.map(r => [r.EntityDefinitionId, Number(r.NbMD)]));
+      const formulaMap   = new Map(formulaRows.map(r => [r.EntityDefinitionId, Number(r.NbFormula)]));
+      const encryptedMap = new Map(encryptedRows.map(r => [r.EntityDefinitionId, Number(r.NbEncrypted)]));
 
       // Filter out managed-package objects in JavaScript.
       // Managed-package custom objects have a namespace prefix: ns__ObjectName__c
@@ -754,6 +854,8 @@ export class SalesforceService {
         const trig = mapGet(trigMap, id);
         const lu = mapGet(lookMap, id);
         const md = mapGet(mdMap, id);
+        const formula    = mapGet(formulaMap, id);
+        const encrypted  = mapGet(encryptedMap, id);
         return {
           objectName: e.QualifiedApiName,
           objectLabel: e.Label,
@@ -767,6 +869,8 @@ export class SalesforceService {
           lookupFields: lu,
           masterDetailFields: md,
           fieldLimitPct: Math.round((cf / 800) * 100),
+          formulaFields: formula,
+          encryptedFields: encrypted,
         };
       });
     } catch (err) {
@@ -828,9 +932,10 @@ export class SalesforceService {
    */
   async getProfileUserCounts(): Promise<Array<{ ProfileId: string; userCount: number }>> {
     try {
-      // Use COUNT(Id) with an alias; some orgs need explicit LIMIT on aggregate queries
+      // Leave the COUNT unaliased — Salesforce returns it as the reserved `expr0`
+      // key; explicitly aliasing to `expr0` is rejected ("alias is reserved").
       const rows = await this.query<{ ProfileId: string; expr0: number }>(
-        `SELECT ProfileId, COUNT(Id) expr0
+        `SELECT ProfileId, COUNT(Id)
          FROM User
          WHERE IsActive = true AND UserType = 'Standard'
          GROUP BY ProfileId
@@ -862,12 +967,10 @@ export class SalesforceService {
   async explainQuery(soql: string): Promise<QueryExplainResult> {
     try {
       const encoded = encodeURIComponent(soql);
-      const raw = await runSfJson([
-        'api', 'request', 'rest',
-        `${this.restPath('query')}/?explain=${encoded}`,
-        '--json',
-      ]) as { status: number; result: { sforcePerformanceLevel?: string; notes?: Array<{ description: string; fields: string[]; tableEnumOrId: string }> } };
-      const r = raw.result ?? {};
+      const r = await this.sfRestGet<{
+        sforcePerformanceLevel?: string;
+        notes?: Array<{ description: string; fields: string[]; tableEnumOrId: string }>;
+      }>(`${this.restPath('query')}/?explain=${encoded}`);
       const notes = r.notes ?? [];
       return {
         soql,
@@ -888,11 +991,9 @@ export class SalesforceService {
    */
   async getOrgLimits(): Promise<OrgLimitInfo[]> {
     try {
-      const raw = await runSfJson([
-        'api', 'request', 'rest', this.restPath('limits'), '--json',
-      ]) as { status?: number; result?: Record<string, { Max?: number; Remaining?: number }> };
-
-      const result = raw.result ?? {};
+      const result = await this.sfRestGet<Record<string, { Max?: number; Remaining?: number }>>(
+        this.restPath('limits'),
+      );
       const limits: OrgLimitInfo[] = [];
       for (const [name, value] of Object.entries(result)) {
         const max = Number(value?.Max ?? 0);
@@ -988,7 +1089,7 @@ export class SalesforceService {
     const byGroup = new Map<string, number>();
     try {
       const setRows = await this.query<{ PermissionSetId: string; expr0: number }>(
-        `SELECT PermissionSetId, COUNT(AssigneeId) expr0
+        `SELECT PermissionSetId, COUNT(AssigneeId)
          FROM PermissionSetAssignment
          WHERE Assignee.IsActive = true
          GROUP BY PermissionSetId
@@ -1002,7 +1103,7 @@ export class SalesforceService {
     }
     try {
       const groupRows = await this.query<{ PermissionSetGroupId: string; expr0: number }>(
-        `SELECT PermissionSetGroupId, COUNT(AssigneeId) expr0
+        `SELECT PermissionSetGroupId, COUNT(AssigneeId)
          FROM PermissionSetAssignment
          WHERE Assignee.IsActive = true AND PermissionSetGroupId != null
          GROUP BY PermissionSetGroupId
@@ -1090,7 +1191,9 @@ export class SalesforceService {
   }
 
   /**
-   * Get record count for an object (approximate)
+   * Get record count for an object using COUNT(Id) which populates the records array.
+   * SELECT COUNT() returns totalSize in the response header (empty records[]), so we use
+   * COUNT(Id) which returns a single row with the count in the aliased column.
    */
   async getRecordCount(objectName: string): Promise<number> {
     try {
@@ -1099,13 +1202,34 @@ export class SalesforceService {
         return -1;
       }
 
-      const result = await this.query<{ expr0: number }>(
-        `SELECT COUNT() FROM ${objectName} LIMIT 1`
+      const result = await this.query<{ cnt: number }>(
+        `SELECT COUNT(Id) cnt FROM ${objectName}`
       );
-      return result.length > 0 ? result[0].expr0 : 0;
+      return result.length > 0 ? Number(result[0].cnt) : 0;
     } catch {
       return -1;
     }
+  }
+
+  /**
+   * Fetch record counts for multiple objects in parallel batches.
+   * Runs BATCH_SIZE queries concurrently, then moves to the next batch.
+   * Returns a Map of objectName → count; objects with errors are omitted.
+   */
+  async getObjectRecordCountsBatch(objectNames: string[]): Promise<Map<string, number>> {
+    const BATCH_SIZE = 20;
+    const result = new Map<string, number>();
+
+    for (let i = 0; i < objectNames.length; i += BATCH_SIZE) {
+      const batch = objectNames.slice(i, i + BATCH_SIZE);
+      const counts = await Promise.all(batch.map(name => this.getRecordCount(name)));
+      for (let j = 0; j < batch.length; j++) {
+        const c = counts[j];
+        if (c >= 0) { result.set(batch[j], c); }
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -1226,33 +1350,40 @@ export class SalesforceService {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - 180);
     const cutoff = cutoffDate.toISOString().split('T')[0];
+    // Dashboard has no `Name` field — the display name is `Title` and the API
+    // name is `DeveloperName`. Map Title → the returned `Name` for consumers.
+    type DashRow = { Id: string; Title: string; DeveloperName: string; LastModifiedDate: string; CreatedDate: string };
+    const toResult = (r: DashRow) => ({
+      Id: r.Id, Name: r.Title, DeveloperName: r.DeveloperName,
+      LastModifiedDate: r.LastModifiedDate, CreatedDate: r.CreatedDate,
+    });
     try {
-      const rows = await this.query<{ Id: string; Name: string; LastModifiedDate: string; CreatedDate: string }>(
-        `SELECT Id, Name, LastModifiedDate, CreatedDate
+      const rows = await this.query<DashRow>(
+        `SELECT Id, Title, DeveloperName, LastModifiedDate, CreatedDate
          FROM Dashboard
          WHERE LastModifiedDate < ${cutoff}T00:00:00Z
          ORDER BY LastModifiedDate ASC LIMIT 500`
       );
-      return rows.map(r => ({ ...r, DeveloperName: r.Name }));
+      return rows.map(toResult);
     } catch {
       // Fallback: try without ORDER BY (not supported on Dashboard in some editions)
       try {
-        const rows = await this.query<{ Id: string; Name: string; LastModifiedDate: string; CreatedDate: string }>(
-          `SELECT Id, Name, LastModifiedDate, CreatedDate
+        const rows = await this.query<DashRow>(
+          `SELECT Id, Title, DeveloperName, LastModifiedDate, CreatedDate
            FROM Dashboard
            WHERE LastModifiedDate < ${cutoff}T00:00:00Z LIMIT 500`
         );
-        return rows.map(r => ({ ...r, DeveloperName: r.Name }));
+        return rows.map(toResult);
       } catch {
         // Fallback 3: no WHERE clause — fetch all dashboards, filter in JS
         try {
-          const rows = await this.query<{ Id: string; Name: string; LastModifiedDate: string; CreatedDate: string }>(
-            `SELECT Id, Name, LastModifiedDate, CreatedDate FROM Dashboard LIMIT 500`
+          const rows = await this.query<DashRow>(
+            `SELECT Id, Title, DeveloperName, LastModifiedDate, CreatedDate FROM Dashboard LIMIT 500`
           );
           const cutoffIso = `${cutoff}T00:00:00Z`;
           return rows
             .filter(r => r.LastModifiedDate < cutoffIso)
-            .map(r => ({ ...r, DeveloperName: r.Name }));
+            .map(toResult);
         } catch (err3) {
           logWarning(`Could not fetch stale dashboards: ${getErrorMessage(err3)}`);
           return [];
@@ -1326,28 +1457,35 @@ export class SalesforceService {
   /**
    * Get Lightning/Flexi Pages (non-managed)
    */
-  async getFlexiPages(): Promise<Array<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string }>> {
+  async getFlexiPages(): Promise<Array<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string; EntityDefinitionId?: string }>> {
     try {
-      // Try with NamespacePrefix filter first
-      return await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string }>(
-        `SELECT Id, DeveloperName, MasterLabel, PageType FROM FlexiPage WHERE NamespacePrefix = null LIMIT ${TOOLING_QUERY_LIMIT}`
+      // Try with EntityDefinitionId + NamespacePrefix filter (best data for object association)
+      return await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string; EntityDefinitionId?: string }>(
+        `SELECT Id, DeveloperName, MasterLabel, PageType, EntityDefinitionId FROM FlexiPage WHERE NamespacePrefix = null LIMIT ${TOOLING_QUERY_LIMIT}`
       );
     } catch {
       try {
-        // Fallback 1: query without NamespacePrefix filter
-        return await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string }>(
-          `SELECT Id, DeveloperName, MasterLabel, PageType FROM FlexiPage LIMIT ${TOOLING_QUERY_LIMIT}`
+        // Fallback 1: without NamespacePrefix filter
+        return await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string; EntityDefinitionId?: string }>(
+          `SELECT Id, DeveloperName, MasterLabel, PageType, EntityDefinitionId FROM FlexiPage LIMIT ${TOOLING_QUERY_LIMIT}`
         );
       } catch {
-        // Fallback 2: minimal query — some orgs restrict MasterLabel or PageType
         try {
-          const rows = await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel?: string; PageType?: string }>(
-            `SELECT Id, DeveloperName FROM FlexiPage LIMIT ${TOOLING_QUERY_LIMIT}`
+          // Fallback 2: without EntityDefinitionId (some API versions don't expose it)
+          return await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel: string; PageType: string }>(
+            `SELECT Id, DeveloperName, MasterLabel, PageType FROM FlexiPage WHERE NamespacePrefix = null LIMIT ${TOOLING_QUERY_LIMIT}`
           );
-          return rows.map(r => ({ Id: r.Id, DeveloperName: r.DeveloperName, MasterLabel: r.MasterLabel || r.DeveloperName, PageType: r.PageType || 'Unknown' }));
-        } catch (err3) {
-          logWarning(`Could not fetch Lightning pages (FlexiPage): ${getErrorMessage(err3)}`);
-          return [];
+        } catch {
+          // Fallback 3: minimal query — some orgs restrict MasterLabel or PageType
+          try {
+            const rows = await this.toolingQuery<{ Id: string; DeveloperName: string; MasterLabel?: string; PageType?: string }>(
+              `SELECT Id, DeveloperName FROM FlexiPage LIMIT ${TOOLING_QUERY_LIMIT}`
+            );
+            return rows.map(r => ({ Id: r.Id, DeveloperName: r.DeveloperName, MasterLabel: r.MasterLabel || r.DeveloperName, PageType: r.PageType || 'Unknown' }));
+          } catch (err4) {
+            logWarning(`Could not fetch Lightning pages (FlexiPage): ${getErrorMessage(err4)}`);
+            return [];
+          }
         }
       }
     }
@@ -1418,7 +1556,7 @@ export class SalesforceService {
    * Fetch Salesforce Trust instance status from status.salesforce.com (public API, no auth needed)
    * Returns status for the specific instance this org is on.
    */
-  async getTrustInstanceStatus(instanceName: string): Promise<{ status: string; incidents: TrustIncident[] }> {
+  async getTrustInstanceStatus(instanceName: string): Promise<{ status: string; incidents: TrustIncident[]; releaseNumber?: string }> {
     return new Promise((resolve) => {
       const timeout = setTimeout(() => resolve({ status: 'Unknown', incidents: [] }), 8000);
       const key = instanceName.toUpperCase();
@@ -1431,6 +1569,8 @@ export class SalesforceService {
           try {
             const json = JSON.parse(data) as {
               status?: string;
+              releaseVersion?: string;
+              releaseNumber?: string;
               Incidents?: Array<{ id: string; message: { content: string }; severity: string; affectedComponents: Array<{ name: string }>; createdAt: string; status: string }>;
               MaintenanceWindows?: unknown[];
             };
@@ -1442,7 +1582,10 @@ export class SalesforceService {
               createdAt: inc.createdAt || '',
               status: inc.status || 'active',
             }));
-            resolve({ status: json.status || 'OK', incidents });
+            // releaseNumber is the Salesforce CD build (e.g. "246.8"); releaseVersion
+            // is the human name (e.g. "Spring '24 Patch 14.2"). Prefer the number.
+            const releaseNumber = json.releaseNumber || json.releaseVersion || undefined;
+            resolve({ status: json.status || 'OK', incidents, releaseNumber });
           } catch {
             resolve({ status: 'Unknown', incidents: [] });
           }
@@ -1520,6 +1663,292 @@ export class SalesforceService {
     this.accessToken = null;
     this.instanceUrl = null;
     logInfo('Disconnected from Salesforce org');
+  }
+
+  /** COUNT() query shorthand — returns the totalSize of a SELECT COUNT() result. */
+  async queryCount(soql: string): Promise<number> {
+    const path = `${this.restPath('query')}?q=${encodeURIComponent(soql)}`;
+    const res = await this.restRequest<{ totalSize?: number }>('GET', path);
+    return res.totalSize ?? 0;
+  }
+
+  /** Return counts of special Salesforce object types for the Data Model tab. */
+  async getDataModelTypeCounts(): Promise<{
+    externalObjectCount: number;
+    bigObjectCount: number;
+    customMetadataTypeCount: number;
+    customSettingCount: number;
+    platformEventCount: number;
+  }> {
+    const queries = [
+      'SELECT COUNT() FROM ExternalObject',
+      "SELECT COUNT() FROM EntityDefinition WHERE QualifiedApiName LIKE '%__b'",
+      "SELECT COUNT() FROM EntityDefinition WHERE QualifiedApiName LIKE '%__mdt'",
+      'SELECT COUNT() FROM EntityDefinition WHERE IsCustomSetting = true',
+      "SELECT COUNT() FROM EntityDefinition WHERE QualifiedApiName LIKE '%__e'",
+    ];
+    try {
+      const [ext, big, mdt, cs, pe] = await this.compositeQuery(queries);
+      return {
+        externalObjectCount:     ext?.totalSize ?? 0,
+        bigObjectCount:          big?.totalSize ?? 0,
+        customMetadataTypeCount: mdt?.totalSize ?? 0,
+        customSettingCount:      cs?.totalSize  ?? 0,
+        platformEventCount:      pe?.totalSize  ?? 0,
+      };
+    } catch (err) {
+      logWarning(`Composite type-count query failed, falling back: ${getErrorMessage(err)}`);
+      const [ext, big, mdt, cs, pe] = await Promise.allSettled([
+        this.queryCount('SELECT COUNT() FROM ExternalObject'),
+        this.queryCount("SELECT COUNT() FROM EntityDefinition WHERE QualifiedApiName LIKE '%__b'"),
+        this.queryCount("SELECT COUNT() FROM EntityDefinition WHERE QualifiedApiName LIKE '%__mdt'"),
+        this.queryCount('SELECT COUNT() FROM EntityDefinition WHERE IsCustomSetting = true'),
+        this.queryCount("SELECT COUNT() FROM EntityDefinition WHERE QualifiedApiName LIKE '%__e'"),
+      ]);
+      return {
+        externalObjectCount:     ext.status === 'fulfilled' ? ext.value : 0,
+        bigObjectCount:          big.status === 'fulfilled' ? big.value : 0,
+        customMetadataTypeCount: mdt.status === 'fulfilled' ? mdt.value : 0,
+        customSettingCount:      cs.status  === 'fulfilled' ? cs.value  : 0,
+        platformEventCount:      pe.status  === 'fulfilled' ? pe.value  : 0,
+      };
+    }
+  }
+
+  /** Return Data Cloud identity-graph object counts (Individual / ContactPoint* / Contact) in one composite call. */
+  async getDataCloudIdentityCounts(): Promise<DataCloudIdentityCounts> {
+    const queries = [
+      'SELECT COUNT() FROM Individual',
+      'SELECT COUNT() FROM ContactPointEmail',
+      'SELECT COUNT() FROM ContactPointPhone',
+      'SELECT COUNT() FROM ContactPointAddress',
+      'SELECT COUNT() FROM Contact',
+      'SELECT COUNT() FROM Contact WHERE Email != null',
+    ];
+    try {
+      const [ind, cpe, cpp, cpa, cTotal, cEmail] = await this.compositeQuery(queries);
+      return {
+        individualCount:          ind?.totalSize ?? 0,
+        contactPointEmailCount:   cpe?.totalSize ?? 0,
+        contactPointPhoneCount:   cpp?.totalSize ?? 0,
+        contactPointAddressCount: cpa?.totalSize ?? 0,
+        contactTotalCount:        cTotal?.totalSize ?? 0,
+        contactWithEmailCount:    cEmail?.totalSize ?? 0,
+      };
+    } catch (err) {
+      logWarning(`Composite Data Cloud identity-count query failed, falling back: ${getErrorMessage(err)}`);
+      const results = await Promise.allSettled(queries.map((q) => this.queryCount(q)));
+      const val = (r: PromiseSettledResult<number>) => (r.status === 'fulfilled' ? r.value : 0);
+      const [ind, cpe, cpp, cpa, cTotal, cEmail] = results;
+      return {
+        individualCount:          val(ind),
+        contactPointEmailCount:   val(cpe),
+        contactPointPhoneCount:   val(cpp),
+        contactPointAddressCount: val(cpa),
+        contactTotalCount:        val(cTotal),
+        contactWithEmailCount:    val(cEmail),
+      };
+    }
+  }
+
+  /** Expanded Organization sObject query — superset of getOrgEdition(). */
+  async getOrgExtendedDetails(): Promise<OrgExtendedDetails & { name: string; instanceName: string; orgType: string }> {
+    try {
+      type OrgRow = {
+        Name: string; InstanceName: string; OrganizationType: string;
+        CreatedDate?: string; IsSandbox?: boolean;
+        TimeZoneSidKey?: string; LanguageLocaleKey?: string;
+        DefaultCurrencyIsoCode?: string; DefaultLocaleSidKey?: string;
+        Division?: string; PrimaryContact?: string; Phone?: string; Fax?: string;
+        Street?: string; City?: string; State?: string; PostalCode?: string; Country?: string;
+        FiscalYearStartMonth?: number; NamespacePrefix?: string;
+        MonthlyPageViewsUsed?: number; MonthlyPageViewsEntitlement?: number;
+      };
+      // DefaultCurrencyIsoCode only exists on Organization when multi-currency is
+      // enabled. Query the always-present fields first so a single-currency org
+      // doesn't lose the entire extended-details payload; then try to enrich with
+      // the currency separately.
+      const rows = await this.query<OrgRow>(
+        `SELECT Name, InstanceName, OrganizationType, CreatedDate, IsSandbox,
+                TimeZoneSidKey, LanguageLocaleKey, DefaultLocaleSidKey,
+                Division, PrimaryContact, Phone, Fax,
+                Street, City, State, PostalCode, Country,
+                FiscalYearStartMonth, NamespacePrefix,
+                MonthlyPageViewsUsed, MonthlyPageViewsEntitlement
+         FROM Organization LIMIT 1`
+      );
+      const org = rows[0];
+      if (org && org.DefaultCurrencyIsoCode === undefined) {
+        try {
+          const currencyRows = await this.query<{ DefaultCurrencyIsoCode?: string }>(
+            `SELECT DefaultCurrencyIsoCode FROM Organization LIMIT 1`
+          );
+          if (currencyRows[0]?.DefaultCurrencyIsoCode) {
+            org.DefaultCurrencyIsoCode = currencyRows[0].DefaultCurrencyIsoCode;
+          }
+        } catch {
+          // Single-currency org: field not available, leave currency undefined.
+        }
+      }
+      const instanceName = org?.InstanceName || '';
+      const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December'];
+      const addressParts = [org?.Street, org?.City, org?.State, org?.PostalCode, org?.Country]
+        .map(p => (p || '').trim()).filter(Boolean);
+      return {
+        name: org?.Name || '',
+        instanceName,
+        orgType: org?.OrganizationType || '',
+        createdDate: org?.CreatedDate,
+        timezone: org?.TimeZoneSidKey,
+        language: org?.LanguageLocaleKey,
+        currency: org?.DefaultCurrencyIsoCode,
+        defaultLocale: org?.DefaultLocaleSidKey,
+        division: org?.Division,
+        primaryContact: org?.PrimaryContact,
+        phone: org?.Phone,
+        fax: org?.Fax,
+        address: addressParts.length ? addressParts.join(', ') : undefined,
+        fiscalYearStartMonth: typeof org?.FiscalYearStartMonth === 'number' ? MONTHS[org.FiscalYearStartMonth] : undefined,
+        namespacePrefix: org?.NamespacePrefix || undefined,
+        monthlyPageViewsUsed: org?.MonthlyPageViewsUsed,
+        monthlyPageViewsEntitlement: org?.MonthlyPageViewsEntitlement,
+        isHyperforce: /^(GSI|AUS|IND|JPN|SGP|FRA|DEU|GBR|CAN|BRA)\w/i.test(instanceName),
+        isSandbox: org?.IsSandbox ?? false,
+        dataCenter: instanceName,
+      };
+    } catch (err) {
+      logWarning(`Could not fetch org extended details: ${getErrorMessage(err)}`);
+      const fallback = await this.getOrgEdition();
+      return { ...fallback };
+    }
+  }
+
+  /** Count sandboxes by type and scratch orgs. Best-effort — returns zeros on any error. */
+  async getEnvironmentsSummary(): Promise<EnvironmentsSummary> {
+    const result: EnvironmentsSummary = {
+      production: 1, fullSandboxes: 0, partialSandboxes: 0,
+      developerSandboxes: 0, scratchOrgs: 0, total: 1,
+    };
+    try {
+      const rows = await this.query<{ LicenseType: string }>(
+        `SELECT LicenseType FROM SandboxInfo LIMIT 2000`
+      );
+      for (const r of rows) {
+        const lt = (r.LicenseType || '').toUpperCase();
+        if (lt === 'FULL') { result.fullSandboxes++; }
+        else if (lt === 'PARTIAL') { result.partialSandboxes++; }
+        else { result.developerSandboxes++; }
+      }
+    } catch { /* SandboxInfo not available in all orgs/editions */ }
+    try {
+      const scratchRows = await this.query<{ Id: string }>(`SELECT Id FROM ActiveScratchOrg LIMIT 200`);
+      result.scratchOrgs = scratchRows.length;
+    } catch { /* Dev Hub only */ }
+    result.total = result.production + result.fullSandboxes + result.partialSandboxes +
+      result.developerSandboxes + result.scratchOrgs;
+    return result;
+  }
+
+  /** Count integration components (Named Creds, Connected Apps, etc.). Each query is independently best-effort. */
+  async getIntegrationsSummary(): Promise<IntegrationsSummary> {
+    const [nc, ca, ec, rs, ap, cert] = await Promise.allSettled([
+      this.queryCount('SELECT COUNT() FROM NamedCredential'),
+      this.queryCount('SELECT COUNT() FROM ConnectedApplication'),
+      this.toolingQuery<{ Id: string }>('SELECT Id FROM ExternalCredential LIMIT 200').then(r => r.length),
+      this.toolingQuery<{ Id: string }>('SELECT Id FROM RemoteProxy LIMIT 500').then(r => r.length),
+      this.queryCount('SELECT COUNT() FROM AuthProvider'),
+      this.toolingQuery<{ Id: string }>('SELECT Id FROM Certificate LIMIT 200').then(r => r.length),
+    ]);
+    const get = (r: PromiseSettledResult<number>) => r.status === 'fulfilled' ? r.value : 0;
+    const namedCredentials = get(nc);
+    const connectedApps = get(ca);
+    const externalCredentials = get(ec);
+    const remoteSites = get(rs);
+    const authProviders = get(ap);
+    const certificates = get(cert);
+    return {
+      namedCredentials, connectedApps, externalCredentials,
+      remoteSites, authProviders, certificates,
+      total: namedCredentials + connectedApps + externalCredentials + remoteSites + authProviders + certificates,
+    };
+  }
+
+  /** Batch COUNT queries for Quick Facts counters not available from other analyzers. */
+  async getQuickFactsCounts(): Promise<{
+    roles: number; publicGroups: number; queues: number; permissionSetGroups: number;
+    customObjects: number | null; flows: number | null;
+  }> {
+    // NOTE: EntityDefinition does not support aggregate COUNT(); the COUNT()-able
+    // metrics go through compositeQuery, while custom objects / flows are fetched
+    // as row lists and counted in JS (null ⇒ org rejected the query / unavailable).
+    const queries = [
+      'SELECT COUNT() FROM UserRole',
+      "SELECT COUNT() FROM Group WHERE Type = 'Regular'",
+      "SELECT COUNT() FROM Group WHERE Type = 'Queue'",
+      'SELECT COUNT() FROM PermissionSetGroup',
+    ];
+
+    // Custom objects: count all customizable objects ending in __c (incl. managed
+    // packages, matching Object Manager). Flows: one FlowDefinition per flow.
+    const customObjectsP = this.toolingQuery<{ QualifiedApiName: string }>(
+      `SELECT QualifiedApiName FROM EntityDefinition WHERE IsCustomizable = true AND KeyPrefix != null LIMIT 5000`
+    ).then(rows => rows.filter(r => (r.QualifiedApiName || '').endsWith('__c')).length)
+     .catch(() => null);
+    const flowsP = this.toolingQuery<{ Id: string }>(`SELECT Id FROM FlowDefinition LIMIT 5000`)
+      .then(rows => rows.length)
+      .catch(() => null);
+
+    let base: { roles: number; publicGroups: number; queues: number; permissionSetGroups: number };
+    try {
+      const [roles, grp, que, psg] = await this.compositeQuery(queries);
+      base = {
+        roles: roles?.totalSize ?? 0,
+        publicGroups: grp?.totalSize ?? 0,
+        queues: que?.totalSize ?? 0,
+        permissionSetGroups: psg?.totalSize ?? 0,
+      };
+    } catch {
+      const [roles, grp, que, psg] = await Promise.allSettled(queries.map(q => this.queryCount(q)));
+      const get = (r: PromiseSettledResult<number>) => r.status === 'fulfilled' ? r.value : 0;
+      base = { roles: get(roles), publicGroups: get(grp), queues: get(que), permissionSetGroups: get(psg) };
+    }
+    const [customObjects, flows] = await Promise.all([customObjectsP, flowsP]);
+    return { ...base, customObjects, flows };
+  }
+
+  /** Classify installed packages into Managed / Unlocked / Local by namespace presence. */
+  classifyPackages(packages: PackageInfo[]): PackageTypeSummary {
+    let managed = 0, unlocked = 0, local = 0;
+    for (const pkg of packages) {
+      const ns = pkg.SubscriberPackage?.NamespacePrefix;
+      if (ns && ns.trim()) { managed++; }
+      else if (pkg.SubscriberPackageVersion) { unlocked++; }
+      else { local++; }
+    }
+    return { managed, unlocked, local, total: managed + unlocked + local };
+  }
+
+  /** Classify existing apps by type and count experience sites. */
+  async getAppTypeSummary(existingApps: AppSummaryItem[]): Promise<AppTypeSummary> {
+    const consoleApps = existingApps.filter(a =>
+      a.type === 'ServiceDesk' || a.type === 'Console' ||
+      (a.type || '').toLowerCase().includes('console')
+    ).length;
+    const lightningApps = existingApps.length - consoleApps;
+    let experienceSites = 0;
+    try {
+      const sites = await this.query<{ Id: string }>(`SELECT Id FROM Network WHERE Status = 'Live' LIMIT 200`);
+      experienceSites = sites.length;
+    } catch {
+      try {
+        const sites = await this.toolingQuery<{ Id: string }>('SELECT Id FROM ExperienceSite LIMIT 200');
+        experienceSites = sites.length;
+      } catch { /* not available */ }
+    }
+    let connectedApps = 0;
+    try { connectedApps = await this.queryCount('SELECT COUNT() FROM ConnectedApplication'); } catch { /* ok */ }
+    return { lightningApps, experienceSites, consoleApps, connectedApps, mobileApps: 0, omniStudioApps: 0, total: lightningApps + experienceSites + consoleApps + connectedApps };
   }
 
   /**

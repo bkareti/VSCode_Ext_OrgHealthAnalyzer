@@ -1,0 +1,256 @@
+{
+  // ── Scan metadata (always present) ─────────────────────────────────────────
+  "scanMetadata": {
+    "timestamp": "2026-07-01T10:30:00.000Z",  // ISO-8601
+    "durationMs": 34820,
+    "orgId": "00D*****MASKED",                 // masked after first 3 chars
+    "apiVersion": "63.0",
+    "modelTarget": "claude-opus-4",            // which AI will receive this
+    "analyzersRan": ["apex", "automation", "dataModel", "security", ...],
+    "tokenEstimate": 8420
+  },
+
+  // ── Coverage map: which rich payloads were available ────────────────────────
+  "metadataCoverage": {
+    "hasDataModelStats": true,
+    "hasAutomationSummary": true,
+    "hasTestCoverage": true,
+    "hasLicenseSummary": true,
+    "hasQueryExplain": false,
+    "hasOrgLimits": true,
+    "hasStaleMetadata": true,
+    "hasOrgInventory": true,
+    "hasUserGovernance": true,
+    "hasProfileSecurity": true,
+    "hasScaleCenter": false,
+    "hasDependencyGraph": false,
+    "hasGovernorRisks": true,
+    "hasTrends": true,
+    "hasRecordCounts": true,
+    "hasEntryPoints": true
+  },
+
+  // ── Scored dimensions (pre-computed, AI must not recalculate) ───────────────
+  "scores": [
+    {
+      "dimension": "codeQuality",
+      "score": 72,
+      "weight": 25,
+      "grade": "C",
+      "confidence": "high",       // "high" | "medium" | "low"
+      "ruleBreakdown": [
+        { "ruleId": "soql-in-loop", "count": 4, "severity": "error", "deduction": 40 },
+        { "ruleId": "dml-in-loop",  "count": 2, "severity": "error", "deduction": 20 }
+      ],
+      "reason": "4 SOQL-in-loop errors (−40 pts) and 2 DML-in-loop errors (−20 pts); capped at 80% deduction"
+    },
+    {
+      "dimension": "automationDesign",
+      "score": 55,
+      "weight": 20,
+      "grade": "F",
+      "confidence": "high",
+      "ruleBreakdown": [...],
+      "reason": "..."
+    },
+    // ... all 7 original + 6 new dimensions below:
+    {
+      "dimension": "architecture",   // inferred from ctaArchitectureAnalyzer issues
+      "score": 60,
+      "weight": 10,
+      "grade": "D",
+      "confidence": "medium",
+      "ruleBreakdown": [...],
+      "reason": "..."
+    },
+    {
+      "dimension": "governorLimits",
+      "score": 80,
+      "weight": 10,
+      "grade": "B",
+      "confidence": "high",
+      "ruleBreakdown": [...],
+      "reason": "..."
+    },
+    {
+      "dimension": "licenseUtilization",
+      "score": 90,
+      "weight": 5,
+      "grade": "A",
+      "confidence": "high",
+      "ruleBreakdown": [],
+      "reason": "Salesforce license at 68% utilization — healthy headroom"
+    },
+    {
+      "dimension": "featureAdoption",
+      "score": 45,
+      "weight": 5,
+      "grade": "F",
+      "confidence": "low",
+      "ruleBreakdown": [],
+      "reason": "High ratio of Workflow Rules vs Flows suggests lagging adoption of modern automation"
+    },
+    {
+      "dimension": "complexity",
+      "score": 50,
+      "weight": 5,
+      "grade": "F",
+      "confidence": "medium",
+      "ruleBreakdown": [...],
+      "reason": "..."
+    },
+    {
+      "dimension": "maintainability",
+      "score": 65,
+      "weight": 5,
+      "grade": "D",
+      "confidence": "medium",
+      "ruleBreakdown": [...],
+      "reason": "..."
+    },
+    {
+      "dimension": "overall",
+      "score": 67,
+      "weight": 100,
+      "grade": "D",
+      "confidence": "high",
+      "ruleBreakdown": [],
+      "reason": "Weighted average across all dimensions"
+    }
+  ],
+
+  // ── Normalized findings grouped by domain ──────────────────────────────────
+  "findings": [
+    {
+      "domain": "code-quality",
+      "displayName": "Code Quality",
+      "criticalCount": 4,
+      "highCount": 2,
+      "mediumCount": 8,
+      "lowCount": 3,
+      "topFindings": [              // top N by severity, stripped of PII
+        {
+          "ruleId": "soql-in-loop",
+          "normalizedSeverity": "Critical",
+          "count": 4,
+          "message": "SOQL query inside for-loop risks governor limit violation",
+          "tags": ["governor-limits", "bulkification"],
+          "affectedObjects": ["Account", "Contact"]  // object names OK; no file paths
+        }
+      ]
+    }
+  ],
+
+  // ── Business context (structurally inferred, no narrative) ─────────────────
+  "businessContext": {
+    "orgComplexity": "Large",              // Small | Medium | Large | Enterprise
+    "orgComplexityEvidence": {
+      "activeUsers": 142,
+      "customObjectCount": 38,
+      "apexClassCount": 215
+    },
+    "automationComplexity": "High",        // Low | Medium | High
+    "automationComplexityEvidence": {
+      "totalTriggers": 24,
+      "totalFlows": 67,
+      "multiTriggerObjects": ["Account", "Opportunity"]
+    },
+    "architectureMaturityLevel": 2,        // 1-5
+    "architectureMaturityEvidence": ["Multi-trigger objects without handler pattern", "Process Builders still in use"],
+    "businessRisk": "High",                // Low | Medium | High | Critical
+    "scalabilityRisk": "Medium",
+    "complianceRisk": "High",
+    "complianceRiskEvidence": ["Apex without sharing detected in 3 classes"]
+  },
+
+  // ── Quick wins (prioritized, no PII) ──────────────────────────────────────
+  "quickWins": [
+    {
+      "title": "Remove unused custom fields",
+      "category": "stale-metadata",
+      "reason": "47 custom fields with no recent usage detected",
+      "priority": "High",            // High | Medium | Low
+      "impact": "Reduces schema complexity and improves data model score",
+      "complexity": "Low",           // Low | Medium | High
+      "affectedCount": 47
+    },
+    {
+      "title": "Migrate 3 Workflow Rules to Flow",
+      "category": "automation-design",
+      "reason": "Workflow Rules are deprecated; Flow provides equivalent capability",
+      "priority": "Medium",
+      "impact": "Eliminates deprecated automation debt before enforcement deadline",
+      "complexity": "Medium",
+      "affectedCount": 3
+    }
+  ],
+
+  // ── Trend analysis (structured, no narrative) ─────────────────────────────
+  "trends": {
+    "hasPreviousSnapshot": true,
+    "snapshotDeltaDays": 14,
+    "newFindingCount": 12,
+    "resolvedFindingCount": 5,
+    "scoreTrends": [
+      { "dimension": "codeQuality",      "direction": "declining", "delta": -8 },
+      { "dimension": "security",         "direction": "stable",    "delta": 0  },
+      { "dimension": "automationDesign", "direction": "improving", "delta": 5  }
+    ]
+  },
+
+  // ── Domain summaries (structured, pre-digested facts) ─────────────────────
+  "securitySummary": {
+    "overprivilegedProfileCount": 3,
+    "apexWithoutSharingCount": 5,
+    "superAdminCount": 2,
+    "publicApiEntryPoints": 4,
+    "idempotencyGapCount": 2
+  },
+
+  "performanceSummary": {
+    "fullTableScanCount": 3,
+    "soqlInLoopCount": 4,
+    "dmlInLoopCount": 2,
+    "ldvObjectCount": 1,
+    "ldvObjects": ["Opportunity_Line_Item__c"],
+    "asyncAntiPatternCount": 1,
+    "multiTriggerObjectCount": 2
+  },
+
+  "architectureSummary": {
+    "totalCustomObjects": 38,
+    "totalCustomFields": 1240,
+    "totalApexClasses": 215,
+    "totalFlows": 67,
+    "totalTriggers": 24,
+    "workflowRulesToMigrate": 3,
+    "processBuilderCount": 5,
+    "circularDependencyCount": 0,
+    "deprecatedApiUsageCount": 8
+  },
+
+  "testCoverageSummary": {
+    "averageCoverage": 74,
+    "classesBelow75Pct": 18,
+    "zeroCoverageCount": 3
+  },
+
+  "licenseUtilizationSummary": [
+    { "licenseName": "Salesforce", "totalLicenses": 200, "usedPct": 71 },
+    { "licenseName": "Salesforce Platform", "totalLicenses": 50, "usedPct": 44 }
+  ],
+
+  "governorLimitsSummary": {
+    "limitsNearThreshold": [
+      { "limitName": "DailyApiRequests", "usedPct": 78 }
+    ],
+    "highRiskClassCount": 3
+  },
+
+  // ── Optimizer report (for debugging / transparency) ────────────────────────
+  "optimizerReport": {
+    "estimatedTokens": 8420,
+    "budget": 12000,
+    "truncationsApplied": ["findings.code-quality capped at top 10", "licenseUtilizationSummary capped at 5"]
+  }
+}

@@ -88,7 +88,13 @@ export class AutomationAnalyzer {
       ]);
 
       result.totalTriggers = triggers.length;
-      result.totalFlows = flows.filter(f => f.ProcessType === 'AutoLaunchedFlow' || f.ProcessType === 'RecordTriggeredFlow').length;
+      // Flows without ProcessType come from the metadata API fallback — still valid flows, type unknown
+      result.totalFlows = flows.filter(f =>
+        f.ProcessType === 'AutoLaunchedFlow' ||
+        f.ProcessType === 'RecordTriggeredFlow' ||
+        f.ProcessType === 'Flow' ||
+        !f.ProcessType
+      ).length;
       result.totalProcessBuilders = flows.filter(f => f.ProcessType === 'Workflow').length;
       result.totalValidationRules = validationRules.length;
       result.totalScreenFlows = flows.filter(f => f.ProcessType === 'Flow').length;

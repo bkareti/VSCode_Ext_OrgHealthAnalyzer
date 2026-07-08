@@ -4,6 +4,33 @@ All notable changes to **OrgPulse — Salesforce Architecture Health & Insights*
 
 ---
 
+## [1.15.0] — 2026-06-30 ⚡ Scan Performance Overhaul & Pipeline Parallelisation
+
+### Performance
+
+- **Direct HTTPS REST for all org queries** — replaced per-query `sf` CLI spawns with a persistent HTTPS keep-alive agent (`keepAlive: true`, `maxSockets: 8`) that reuses TCP connections across the ~60–90 REST calls a full scan makes. Eliminates Node.js process-spawn overhead on every query.
+- **Parallel analyzer pipeline** — the 19-step sequential scan is now two concurrent `Promise.all()` batches: Batch 1 runs 12 independent analyzers simultaneously (Apex, Query, Automation, Data Model, Test Coverage, Permissions, Integration, Governor Limits, LWC, Technical Debt, Scale Center, Dependencies); Batch 2 runs 4 more (User Governance, Profile Security, Stale Metadata, Org Inventory). Scan time on large orgs drops significantly.
+- **Cursor-based pagination** — replaced `LIMIT`/`OFFSET` loops with native `nextRecordsUrl` pagination, removing the 2,000-record ceiling on Tooling API and Data API queries.
+- **Composite Batch API** — multiple related queries are bundled into a single `/composite/batch` HTTP POST, reducing round-trips for multi-query fetches (e.g., Data Model type counts).
+- **Per-run memoisation** — concurrent analyzers that independently fetch the same metadata (e.g., Apex triggers) now share a single in-flight request via a `memo()` deduplication layer.
+- **401 auto-retry** — `restRequest()` detects expired tokens, refreshes via `getOrgInfo()`, and retries once automatically.
+- **`fetchAccessToken()` compatibility** — handles newer `sf` CLI versions that redact the access token in `org display` output by falling back to `sf org auth show-access-token`.
+
+### Fixes
+
+- **Flow count corrected** — `totalFlows` now correctly includes `Flow` ProcessType and flows with no ProcessType (metadata API fallback), fixing an undercount in the Automation tab.
+- **Flow query field fixed** — Tooling API `Flow` object query now uses `FullName` (correct field) instead of `DeveloperName`, which was returning empty results.
+- **Code Analyzer plugin check** — changed `sf plugins list` → `sf plugins` to avoid interactive prompt failures on some plugin versions.
+- **Code Analyzer non-zero exit** — `sf code-analyzer run` exits non-zero when violations meet the severity threshold; the runner no longer throws when the results file is present, so valid findings are no longer discarded.
+- **LWC org-level count fallback** — when the workspace contains no LWC source files, `totalComponents` now falls back to the org-level component count from the REST API instead of showing 0.
+
+### Data Model
+
+- **New type-count summary** — `dataModelSummary` now includes counts of external objects, big objects, Custom Metadata Types, and custom settings (fetched via Composite Batch with per-type fallback).
+- **LWC org counts surfaced** — `lwcSummary` now exposes `orgComponentCount` (LWC) and `orgAuraComponentCount` (Aura) from the org alongside the workspace-derived count.
+
+---
+
 ## [1.14.0] — 2026-06-23 🛠️ Dashboard Fixes, Security Depth & Reliable CTA Review
 
 ### Fixes

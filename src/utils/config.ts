@@ -136,7 +136,7 @@ export interface CodeAnalyzerConfig {
 export function getCodeAnalyzerConfig(): CodeAnalyzerConfig {
   const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
   return {
-    enabled: config.get<boolean>('codeAnalyzer.enabled', false),
+    enabled: config.get<boolean>('codeAnalyzer.enabled', true),
     ruleSelector: config.get<string>('codeAnalyzer.ruleSelector', 'Recommended'),
     runGraphEngine: config.get<boolean>('codeAnalyzer.runGraphEngine', false),
   };

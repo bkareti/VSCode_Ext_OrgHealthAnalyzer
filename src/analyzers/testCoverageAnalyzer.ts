@@ -20,6 +20,7 @@ export interface TestCoverageResult {
   classesBelow75: number;
   averageCoverage: number;
   zeroCoverageCount: number;
+  classCoverageDetails: Array<{ name: string; pct: number; type: 'Class' | 'Trigger' }>;
 }
 
 // ============================================================================
@@ -38,6 +39,7 @@ export class TestCoverageAnalyzer {
       classesBelow75: 0,
       averageCoverage: 0,
       zeroCoverageCount: 0,
+      classCoverageDetails: [],
     };
 
     try {
@@ -80,6 +82,14 @@ export class TestCoverageAnalyzer {
       result.averageCoverage = aggregated.size > 0
         ? Math.round(totalPercent / aggregated.size)
         : 100;
+
+      result.classCoverageDetails = [...aggregated.entries()]
+        .map(([name, data]) => {
+          const totalLines = data.covered + data.uncovered;
+          const pct = totalLines === 0 ? 100 : Math.round((data.covered / totalLines) * 100);
+          return { name, pct, type: 'Class' as const };
+        })
+        .sort((a, b) => a.pct - b.pct);
 
       logInfo(
         `Coverage: avg=${result.averageCoverage}%, below75=${result.classesBelow75}, zero=${result.zeroCoverageCount}`
