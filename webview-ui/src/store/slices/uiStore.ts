@@ -6,16 +6,24 @@ export type TabId =
   | 'datamodel'
   | 'automation'
   | 'code'
+  | 'integrations'
   | 'perflimits'
   | 'govlimits'
   | 'secaccess'
   | 'techdebt'
-  | 'futurereadiness'
+  | 'futurereadiness-datacloud'
+  | 'futurereadiness-agentforce'
+  | 'futurereadiness-hyperforce'
   | 'cta'
   | 'askarchitect'
   | 'trendshistory'
   | 'reports'
-  | 'settings';
+  | 'settings'
+  | 'futurereadiness-overview'
+  | 'scanconfig'
+  | 'aimodels'
+  | 'users'
+  | 'about';
 
 export type SecurityMode = 'safe' | 'standard' | 'advanced';
 

@@ -367,6 +367,24 @@ export class HealthDashboardPanel {
         break;
       }
 
+      case 'runDataCloudInsights': {
+        if (this.securityMode === 'safe') {
+          break; // AI narrative disabled in Safe mode — deterministic card values still render
+        }
+        const force = (message as { force?: boolean }).force ?? false;
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runDataCloudInsights', message.model, force);
+        break;
+      }
+
+      case 'runAgentforceInsights': {
+        if (this.securityMode === 'safe') {
+          break; // AI narrative disabled in Safe mode — deterministic card values still render
+        }
+        const force = (message as { force?: boolean }).force ?? false;
+        await vscode.commands.executeCommand('sfHealthAnalyzer.runAgentforceInsights', message.model, force);
+        break;
+      }
+
       case 'getModels': {
         await this.pushAvailableModels();
         break;

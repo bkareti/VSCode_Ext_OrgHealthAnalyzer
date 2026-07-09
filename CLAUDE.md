@@ -74,6 +74,9 @@ Results persist to VS Code `globalState` (survives reload) and to a workspace `.
 ### Types — `src/types/index.ts`
 Central type definitions; `AnalysisResult` is the core payload tying analyzers, scoring, and the dashboard together.
 
+### Data wiring reference — `docs/DATA_WIRING_REFERENCE.md`
+Before investigating whether a screen renders real analyzer output or sample/mock data, or which `AnalysisResult` field to wire a screen to, check this doc first — it's a maintained per-analyzer/per-service/per-screen index built specifically to avoid re-reading `src/analyzers/`, `src/services/`, and the webview tabs from scratch. Only fall back to reading source if the doc's claim looks stale (it's a dated snapshot, not generated from live code).
+
 ## Conventions
 
 - **ESLint** (`eslint.config.mjs`) enforces (as warnings): semicolons, `===` over `==`, curly braces, no throwing literals, and camelCase/PascalCase import naming.

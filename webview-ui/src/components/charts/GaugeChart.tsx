@@ -1,9 +1,9 @@
 interface Props {
-  score: number;        // 0–100
-  size?: number;        // px, default 200
-  stroke?: number;      // arc width, default 18
+  score: number; // 0–100
+  size?: number; // px, default 200
+  stroke?: number; // arc width, default 18
   statusLabel?: string; // e.g. "Moderate Health"
-  delta?: number;       // ±pts vs previous scan
+  delta?: number; // ±pts vs previous scan
 }
 
 // Five colored bands across the 180° sweep (red → orange → yellow → lime → green)
@@ -33,27 +33,28 @@ function arcPath(cx: number, cy: number, r: number, startDeg: number, endDeg: nu
 export default function GaugeChart({ score, size = 200, stroke = 18, statusLabel, delta }: Props) {
   const cx = size / 2;
   const cy = size / 2;
-  const r  = (size - stroke) / 2;
+  const r = (size - stroke) / 2;
 
   const START_DEG = 180;
-  const END_DEG   = 360;
-  const fillEnd   = START_DEG + (score / 100) * 180;
+  const END_DEG = 360;
+  const fillEnd = START_DEG + (score / 100) * 180;
 
   const color = SCORE_COLOR(score);
-  const deltaColor = delta === undefined ? '' : delta > 0 ? '#22c55e' : delta < 0 ? '#ef4444' : '#6b7280';
+  const deltaColor =
+    delta === undefined ? '' : delta > 0 ? '#22c55e' : delta < 0 ? '#ef4444' : '#6b7280';
   const deltaArrow = delta === undefined ? '' : delta > 0 ? '↑' : delta < 0 ? '↓' : '→';
 
-  // Visible height: crop the bottom half of the SVG circle
-  const visH = size / 2 + stroke / 2 + 8;
+  // Visible height: show only the top half arc + caps
+  const visH = cy + stroke / 2 + 4;
 
   return (
-    <div className="flex flex-col items-center" style={{ width: size }}>
-      <div className="relative" style={{ width: size, height: visH }}>
+    <div className="flex w-full flex-col items-center justify-center">
+      <div className="relative" style={{ width: size, height: visH, overflow: 'hidden' }}>
         <svg
           width={size}
           height={size}
           viewBox={`0 0 ${size} ${size}`}
-          style={{ overflow: 'visible' }}
+          style={{ position: 'absolute', top: 0, left: 0 }}
         >
           {/* Rainbow band segments — always fully visible as background track */}
           {BANDS.map((band) => (
@@ -80,26 +81,43 @@ export default function GaugeChart({ score, size = 200, stroke = 18, statusLabel
           )}
 
           {/* Thin end-cap dots to clean up band joins */}
-          <circle cx={polarToCartesian(cx, cy, r, START_DEG).x} cy={polarToCartesian(cx, cy, r, START_DEG).y} r={stroke / 2} fill="#ef4444" />
-          <circle cx={polarToCartesian(cx, cy, r, END_DEG).x}   cy={polarToCartesian(cx, cy, r, END_DEG).y}   r={stroke / 2} fill="#22c55e" />
+          <circle
+            cx={polarToCartesian(cx, cy, r, START_DEG).x}
+            cy={polarToCartesian(cx, cy, r, START_DEG).y}
+            r={stroke / 2}
+            fill="#ef4444"
+          />
+          <circle
+            cx={polarToCartesian(cx, cy, r, END_DEG).x}
+            cy={polarToCartesian(cx, cy, r, END_DEG).y}
+            r={stroke / 2}
+            fill="#22c55e"
+          />
         </svg>
 
-        {/* Centered score overlay */}
+        {/* Score overlay — anchored to arc center (cx, cy) */}
         <div
-          className="absolute flex flex-col items-center justify-end"
-          style={{ inset: 0, paddingBottom: 2 }}
+          className="absolute flex flex-col items-center"
+          style={{
+            left: 0,
+            right: 0,
+            top: cy - 4,
+            transform: 'translateY(-50%)',
+          }}
         >
-          <span className="text-3xl font-bold tabular-nums leading-none" style={{ color }}>
+          <span className="text-3xl leading-none font-bold tabular-nums" style={{ color }}>
             {Math.round(score)}
           </span>
-          <span className="text-[11px] text-sf-muted mt-0.5">/100</span>
+          <span className="mt-0.5 text-[11px] text-sf-muted">/100</span>
         </div>
       </div>
 
       {/* Labels below the arc */}
-      <div className="flex flex-col items-center gap-0.5 mt-1">
+      <div className="mt-2 flex flex-col items-center gap-0.5">
         {statusLabel && (
-          <span className="text-xs font-semibold" style={{ color }}>{statusLabel}</span>
+          <span className="text-xs font-semibold" style={{ color }}>
+            {statusLabel}
+          </span>
         )}
         {delta !== undefined && (
           <span className="text-[11px]" style={{ color: deltaColor }}>

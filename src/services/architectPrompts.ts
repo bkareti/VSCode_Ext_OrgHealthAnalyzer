@@ -25,8 +25,9 @@ export interface ArchitectPromptScope {
 
 /**
  * Every dashboard tab that can host Architect Recommendations, with a sensible default
- * prompt. Only 'futurereadiness', 'cta', and 'licenserecs' are wired into a live AI call
- * today (each has a synthesis method); the rest are stored for the planned multi-tab rollout.
+ * prompt. Only 'futurereadiness', 'cta', 'licenserecs', 'datacloudreadiness', and
+ * 'agentforcereadiness' are wired into a live AI call today (each has a synthesis
+ * method); the rest are stored for the planned multi-tab rollout.
  */
 export const ARCHITECT_PROMPT_SCOPES: ArchitectPromptScope[] = [
   {
@@ -78,6 +79,16 @@ export const ARCHITECT_PROMPT_SCOPES: ArchitectPromptScope[] = [
     id: 'futurereadiness',
     label: 'Future Readiness',
     defaultPrompt: 'Assess readiness for AI/Agentforce, Data Cloud, and Hyperforce adoption. Ground every recommendation strictly in the pack scores, blocking issues, and evidence provided.',
+  },
+  {
+    id: 'datacloudreadiness',
+    label: 'Data Cloud Readiness (AI Insights)',
+    defaultPrompt: 'Write concise, evidence-cited insight cards for the Data Cloud Readiness Overview — identity resolution, ingestion, activation, and governance gaps — grounded strictly in the scores and blocking issues provided. Never invent counts or percentages.',
+  },
+  {
+    id: 'agentforcereadiness',
+    label: 'Agentforce Readiness (AI Insights)',
+    defaultPrompt: 'Write concise, evidence-cited insight cards for the Agentforce Readiness Overview — data quality, security/sharing, automation, and AI enablement gaps — grounded strictly in the scores and blocking issues provided. Never invent counts or percentages.',
   },
   {
     id: 'cta',

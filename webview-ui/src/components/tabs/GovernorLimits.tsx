@@ -1,10 +1,11 @@
-import { useState, useMemo } from 'react';
-import { useDashboardStore } from '@/store/dashboardStore';
+import { useState, useMemo, type ReactNode } from 'react';
+import { useOrgStore } from '@/store/slices/orgStore';
 import GlassCard from '@/components/common/GlassCard';
 import { EmptyState } from '@/components/common';
-import HBarChart from '@/components/charts/HBarChart';
 import GovernorGauge from '@/components/charts/GovernorGauge';
+import IssueFilters from '@/components/issues/IssueFilters';
 import { usageBand } from '@/constants/scoring';
+import { GovernorLimitsSummary } from './governorLimitsSummary';
 import type { OrgLimitInfo } from '@/types';
 
 type SubTab = 'summary' | 'api' | 'storage' | 'apex' | 'messaging' | 'data';
@@ -27,8 +28,30 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   data:      ['Data', 'Record', 'Object'],
 };
 
-function findLimit(limits: OrgLimitInfo[], name: string): OrgLimitInfo | undefined {
-  return limits.find((l) => l.name === name);
+// Anchored dropdown for the header's Scan History / Filters actions — mirrors
+// the same local helper in SecurityAccess.tsx (no shared popover component exists yet).
+function HeaderPopoverButton({ label, icon, children }: { label: string; icon: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="px-3 py-1.5 text-xs font-medium rounded border border-sf-border bg-sf-bg-2 text-sf-text hover:bg-sf-bg-3 transition-colors flex items-center gap-1.5"
+      >
+        <span>{icon}</span>
+        {label}
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 mt-2 w-72 z-20 rounded-lg border border-sf-border bg-sf-bg-2 shadow-glass p-3">
+            {children}
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 // Unified capacity bands (see constants/scoring.ts)
@@ -150,34 +173,10 @@ function CategoryTab({
 // ── Main component ────────────────────────────────────────────────────────────
 export default function GovernorLimits() {
   const [subTab, setSubTab] = useState<SubTab>('summary');
-  const results = useDashboardStore((s) => s.results);
+  const results    = useOrgStore((s) => s.results);
+  const orgHistory = useOrgStore((s) => s.orgHistory);
 
   const limits = useMemo(() => results?.orgLimits ?? [], [results]);
-
-  // 8 headline gauges
-  const apiCalls    = useMemo(() => findLimit(limits, 'DailyApiRequests'), [limits]);
-  const dailyEmail  = useMemo(() => findLimit(limits, 'DailySingleEmail'), [limits]);
-  const fileStore   = useMemo(() => findLimit(limits, 'FileStorageMB'), [limits]);
-  const dataStore   = useMemo(() => findLimit(limits, 'DataStorageMB'), [limits]);
-  const asyncApex   = useMemo(() => findLimit(limits, 'DailyAsyncApexExecutions'), [limits]);
-  const batchApex   = useMemo(() => findLimit(limits, 'DailyBulkApiBatches'), [limits]);
-  const platEvents  = useMemo(() => findLimit(limits, 'HourlyPublishedPlatformEvents'), [limits]);
-  const streaming   = useMemo(() => findLimit(limits, 'StreamingApiConcurrentClients'), [limits]);
-
-  // Limits at risk — usedPct >= 50, sorted desc, colored by capacity band.
-  // (An "average across all limits" donut was removed: averaging unrelated
-  // percentages is not a meaningful metric.)
-  const limitsAtRisk = useMemo(
-    () => [...limits]
-      .filter((l) => l.usedPct >= 50)
-      .sort((a, b) => b.usedPct - a.usedPct)
-      .map((l) => ({
-        name: l.label ?? l.name,
-        value: Math.round(l.usedPct * 10) / 10,
-        color: usageBand(l.usedPct).hex,
-      })),
-    [limits],
-  );
 
   if (!results) {
     return (
@@ -187,14 +186,51 @@ export default function GovernorLimits() {
     );
   }
 
+  const orgId = results.orgDetails?.orgId ?? results.metadata?.orgId ?? null;
+  const history = orgId ? (orgHistory[orgId] ?? []) : [];
+  const historyNewestFirst = [...history].reverse();
+
   return (
     <div className="p-6 space-y-4">
       {/* Header */}
-      <div>
-        <h1 className="text-base font-semibold text-sf-text">Platform Limits</h1>
-        <p className="text-xs text-sf-muted mt-0.5">
-          Consumption of Salesforce governor limits and system resources. Runtime performance analysis lives in the Performance tab.
-        </p>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-base font-semibold text-sf-text">Platform Usage & Limits</h1>
+          <p className="text-xs text-sf-muted mt-0.5">
+            Consumption of Salesforce governor limits and system resources. Runtime performance analysis lives in the Performance tab.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <HeaderPopoverButton label="Scan History" icon="🕐">
+            {historyNewestFirst.length > 0 ? (
+              <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                {historyNewestFirst.map((h, i) => {
+                  const prev = historyNewestFirst[i + 1];
+                  const delta = prev ? Math.round((h.scores.overall ?? 0) - (prev.scores.overall ?? 0)) : undefined;
+                  return (
+                    <div key={h.timestamp} className="flex items-center justify-between text-[11px] py-1 border-b border-sf-border/40 last:border-0">
+                      <span className="text-sf-muted">{new Date(h.timestamp).toLocaleString()}</span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="font-semibold text-sf-text tabular-nums">{Math.round(h.scores.overall ?? 0)}</span>
+                        {delta !== undefined && (
+                          <span className={delta >= 0 ? 'text-score-good' : 'text-sev-error'}>
+                            {delta >= 0 ? '▲' : '▼'} {Math.abs(delta)}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-[11px] text-sf-muted">No scan history yet — run at least 2 scans to see trends.</p>
+            )}
+          </HeaderPopoverButton>
+
+          <HeaderPopoverButton label="Filters" icon="🔍">
+            <IssueFilters />
+          </HeaderPopoverButton>
+        </div>
       </div>
 
       {/* Sub-tab bar */}
@@ -216,68 +252,7 @@ export default function GovernorLimits() {
 
       {/* ── Summary ─────────────────────────────────────────────────────────── */}
       {subTab === 'summary' && (
-        <div className="space-y-4">
-          {/* Row 1 — 8 headline gauges */}
-          <div className="grid grid-cols-4 lg:grid-cols-8 gap-3">
-            <GovernorGauge
-              label="API Calls"
-              used={apiCalls?.used ?? 0}
-              total={apiCalls?.max ?? 0}
-            />
-            <GovernorGauge
-              label="Daily Email"
-              used={dailyEmail?.used ?? 0}
-              total={dailyEmail?.max ?? 0}
-            />
-            <GovernorGauge
-              label="File Storage"
-              used={fmtGB(fileStore?.used ?? 0)}
-              total={fmtGB(fileStore?.max ?? 1)}
-              unit=" GB"
-            />
-            <GovernorGauge
-              label="Data Storage"
-              used={fmtGB(dataStore?.used ?? 0)}
-              total={fmtGB(dataStore?.max ?? 1)}
-              unit=" GB"
-            />
-            <GovernorGauge
-              label="Async Apex"
-              used={asyncApex?.used ?? 0}
-              total={asyncApex?.max ?? 0}
-            />
-            <GovernorGauge
-              label="Batch Apex"
-              used={batchApex?.used ?? 0}
-              total={batchApex?.max ?? 0}
-            />
-            <GovernorGauge
-              label="Platform Events"
-              used={platEvents?.used ?? 0}
-              total={platEvents?.max ?? 0}
-            />
-            <GovernorGauge
-              label="Streaming Events"
-              used={streaming?.used ?? 0}
-              total={streaming?.max ?? 0}
-            />
-          </div>
-
-          {/* Row 2 — all limits table + limits at risk */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <GlassCard title="Limits Usage Overview">
-              <LimitTable limits={limits} />
-            </GlassCard>
-
-            <GlassCard title={`Limits at Risk (≥50% consumed: ${limitsAtRisk.length})`}>
-              {limitsAtRisk.length === 0 ? (
-                <EmptyState title="No limits are above the 50% watch threshold" />
-              ) : (
-                <HBarChart data={limitsAtRisk.slice(0, 12)} multiColor color="#eab308" />
-              )}
-            </GlassCard>
-          </div>
-        </div>
+        <GovernorLimitsSummary results={results} limits={limits} onJumpToCategory={setSubTab} />
       )}
 
       {/* ── Category sub-tabs ────────────────────────────────────────────────── */}

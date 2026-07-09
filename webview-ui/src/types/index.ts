@@ -68,6 +68,7 @@ export type {
   OrgQuickFacts,
   OrgInfoData,
   ScanHistoryEntry,
+  SecurityCollectorSnapshot,
 } from '../../../src/types/index';
 
 // Architect Recommendations — evidence-cited pointer sections (shared across Future Readiness pilot and future tabs)
@@ -97,6 +98,8 @@ export type {
   ReadinessPackAssessment,
   FutureReadinessResult,
   FutureReadinessReport,
+  ProfileIpRangeInfo,
+  ConnectedAppInfo,
 } from '../../../src/types/futureReadiness';
 
 // License Recommendations — AI-enriched card data for the Clouds & Licenses tab
@@ -114,3 +117,32 @@ export type {
   OrgInfoRecommendationCard,
   OrgInfoRecommendationsReport,
 } from '../../../src/types/orgInfoRecommendations';
+
+// Security Recommendations — deterministic card data for the Security tab
+export type {
+  SecurityImpact,
+  SecurityRecommendationCard,
+  SecurityRecommendationsReport,
+} from '../../../src/types/securityRecommendations';
+
+// Governor Limits Recommendations — AI-enriched card data for the Governor Limits → Summary tab
+export type {
+  GovernorLimitsImpact,
+  GovernorLimitsCardId,
+  GovernorLimitsRecommendationCard,
+  GovernorLimitsRecommendationsReport,
+} from '../../../src/types/governorLimitsRecommendations';
+
+// Data Cloud Insights — AI-enriched insight cards for the Data Cloud Readiness → Overview sub-tab
+export type {
+  DataCloudInsightType,
+  DataCloudInsightCard,
+  DataCloudInsightsReport,
+} from '../../../src/types/dataCloudInsights';
+
+// Agentforce Insights — AI-enriched insight cards for the Agentforce Readiness → Overview panel
+export type {
+  AgentforceInsightType,
+  AgentforceInsightCard,
+  AgentforceInsightsReport,
+} from '../../../src/types/agentforceInsights';

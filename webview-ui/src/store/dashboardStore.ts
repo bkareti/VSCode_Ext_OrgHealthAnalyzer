@@ -8,6 +8,7 @@
  *       Migrate callers to targeted slice hooks for optimal re-render perf.
  */
 import type { AnalysisResult, CTAReview, Issue } from '@/types';
+import { TABS } from '@/constants/tabs';
 
 import { useUIStore } from './slices/uiStore';
 import type { TabId, SecurityMode } from './slices/uiStore';
@@ -90,11 +91,12 @@ interface LegacyDashboardState {
 
 /** Derive current TabId from the URL hash (e.g. #/overview → 'overview'). */
 function tabIdFromHash(): TabId {
-  const hash = window.location.hash.replace(/^#\//, '');
+  const hash = window.location.hash.replace(/^#\//, '').split('?')[0];
   const valid: TabId[] = [
     'overview', 'orginfo', 'datamodel', 'automation', 'code',
     'perflimits', 'govlimits', 'secaccess', 'techdebt', 'cta', 'askarchitect',
-    'futurereadiness', 'trendshistory', 'reports', 'settings',
+    'futurereadiness-datacloud', 'futurereadiness-agentforce', 'futurereadiness-hyperforce',
+    'trendshistory', 'reports', 'settings',
   ];
   return valid.includes(hash as TabId) ? (hash as TabId) : 'overview';
 }
@@ -116,7 +118,7 @@ export function useDashboardStore<T>(selector: (state: LegacyDashboardState) => 
     securityMode:           ui.securityMode,
     selectedModelId:        ui.selectedModelId,
     showAnalysisDialog:     ui.showAnalysisDialog,
-    setActiveTab:           (tab) => { window.location.hash = `/${tab}`; },
+    setActiveTab:           (tab) => { window.location.hash = TABS.find((t) => t.id === tab)?.path ?? `/${tab}`; },
     setSecurityMode:        ui.setSecurityMode,
     setSelectedModelId:     ui.setSelectedModelId,
     setShowAnalysisDialog:  ui.setShowAnalysisDialog,

@@ -19,6 +19,9 @@
   --color-sf-accent:   #007fd4;
   --color-sf-border:   rgba(255, 255, 255, 0.08);
 
+  /* Fixed sidebar — never changes between light and dark themes */
+  --color-sf-nav-bg:   #0d1b2e;
+
   /* Glass surfaces — used by GlassCard and table row/section stripes */
   --color-sf-glass:        rgba(255, 255, 255, 0.03);
   --color-sf-glass-soft:   rgba(255, 255, 255, 0.02);

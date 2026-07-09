@@ -24,6 +24,10 @@ import {
 import { collectReadinessData } from './services/futureReadiness/collectors';
 import { buildLicenseRecommendationsBase } from './services/licenseRecommendations';
 import { buildOrgInfoRecommendationsBase } from './services/orgInfoRecommendations';
+import { buildSecurityRecommendationsBase } from './services/securityRecommendations';
+import { buildGovernorLimitsRecommendationsBase } from './services/governorLimitsRecommendations';
+import { buildDataCloudInsightsBase } from './services/dataCloudInsights';
+import { buildAgentforceInsightsBase } from './services/agentforceInsights';
 
 // Analyzers
 import { createApexAnalyzer } from './analyzers/apexAnalyzer';
@@ -473,6 +477,96 @@ function registerCommands(context: vscode.ExtensionContext): void {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         panel.postMessage({ type: 'orgInfoRecommendationsError', message: msg });
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sfHealthAnalyzer.runGovernorLimitsRecommendations', async (modelPreference?: string, force?: boolean) => {
+      const ai = getAIService();
+      if (!ai) {
+        vscode.window.showWarningMessage('AI Service not initialised. Run a full analysis first.');
+        return;
+      }
+      if (!currentResult) {
+        vscode.window.showWarningMessage('No analysis data available. Run Salesforce: Run Org Health Analyzer first.');
+        return;
+      }
+      const panel = getDashboardPanel(context.extensionUri);
+      panel.postMessage({ type: 'governorLimitsRecommendationsLoading' });
+      try {
+        const report = await ai.synthesizeGovernorLimitsRecommendations(currentResult, modelPreference, !!force);
+        if (report) {
+          currentResult.governorLimitsRecommendations = report;
+          panel.postMessage({ type: 'governorLimitsRecommendations', data: report });
+          context.globalState.update(RESULT_STORAGE_KEY, currentResult);
+          saveCacheToFile(currentResult);
+        } else {
+          panel.postMessage({ type: 'governorLimitsRecommendationsError', message: 'No narrative was generated. Try another model or configure an API key in Settings → sfHealthAnalyzer.ai.' });
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        panel.postMessage({ type: 'governorLimitsRecommendationsError', message: msg });
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sfHealthAnalyzer.runDataCloudInsights', async (modelPreference?: string, force?: boolean) => {
+      const ai = getAIService();
+      if (!ai) {
+        vscode.window.showWarningMessage('AI Service not initialised. Run a full analysis first.');
+        return;
+      }
+      if (!currentResult) {
+        vscode.window.showWarningMessage('No analysis data available. Run Salesforce: Run Org Health Analyzer first.');
+        return;
+      }
+      const panel = getDashboardPanel(context.extensionUri);
+      panel.postMessage({ type: 'dataCloudInsightsLoading' });
+      try {
+        const report = await ai.synthesizeDataCloudInsights(currentResult, modelPreference, !!force);
+        if (report) {
+          currentResult.dataCloudInsights = report;
+          panel.postMessage({ type: 'dataCloudInsights', data: report });
+          context.globalState.update(RESULT_STORAGE_KEY, currentResult);
+          saveCacheToFile(currentResult);
+        } else {
+          panel.postMessage({ type: 'dataCloudInsightsError', message: 'No narrative was generated. Try another model or configure an API key in Settings → sfHealthAnalyzer.ai.' });
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        panel.postMessage({ type: 'dataCloudInsightsError', message: msg });
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sfHealthAnalyzer.runAgentforceInsights', async (modelPreference?: string, force?: boolean) => {
+      const ai = getAIService();
+      if (!ai) {
+        vscode.window.showWarningMessage('AI Service not initialised. Run a full analysis first.');
+        return;
+      }
+      if (!currentResult) {
+        vscode.window.showWarningMessage('No analysis data available. Run Salesforce: Run Org Health Analyzer first.');
+        return;
+      }
+      const panel = getDashboardPanel(context.extensionUri);
+      panel.postMessage({ type: 'agentforceInsightsLoading' });
+      try {
+        const report = await ai.synthesizeAgentforceInsights(currentResult, modelPreference, !!force);
+        if (report) {
+          currentResult.agentforceInsights = report;
+          panel.postMessage({ type: 'agentforceInsights', data: report });
+          context.globalState.update(RESULT_STORAGE_KEY, currentResult);
+          saveCacheToFile(currentResult);
+        } else {
+          panel.postMessage({ type: 'agentforceInsightsError', message: 'No narrative was generated. Try another model or configure an API key in Settings → sfHealthAnalyzer.ai.' });
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        panel.postMessage({ type: 'agentforceInsightsError', message: msg });
       }
     })
   );
@@ -1282,6 +1376,11 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
           currentResult.orgInfoRecommendations = buildOrgInfoRecommendationsBase(currentResult);
         } catch (e) { failStep('Org Info Recommendations', e); }
 
+        // ─── Governor Limits Recommendations (deterministic; AI narrative added on demand) ─
+        try {
+          currentResult.governorLimitsRecommendations = buildGovernorLimitsRecommendationsBase(currentResult);
+        } catch (e) { failStep('Governor Limits Recommendations', e); }
+
         // Update metadata with new counts
         if (currentResult.metadata) {
           currentResult.metadata.analyzedUsers    = analyzedUsers;
@@ -1319,7 +1418,33 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
           const edition = currentResult.orgDetails?.orgType ?? 'unknown';
           const collectors = await collectReadinessData(sfService, edition);
           currentResult.futureReadiness = futureReadinessService.assess({ result: currentResult, collectors });
+
+          // Reuse the security-relevant fields already collected above instead of
+          // discarding them — the Security tab surfaces MFA/IP-range/PII signals
+          // without any extra org queries.
+          currentResult.securityCollectorData = {
+            mfaRequired: collectors.platformFeatures?.mfaRequired,
+            profileIpRanges: collectors.profileIpRanges,
+            orgNetworkAccessRangeCount: collectors.orgNetworkAccessRangeCount,
+            piiSensitiveFieldCount: collectors.piiSensitiveFieldCount,
+            connectedAppsIpInfo: collectors.connectedApps,
+          };
         } catch (e) { failStep('Future Readiness', e); }
+
+        // ─── Security Recommendations (deterministic; mirrors Org Info pattern) ─
+        try {
+          currentResult.securityRecommendations = buildSecurityRecommendationsBase(currentResult);
+        } catch (e) { failStep('Security Recommendations', e); }
+
+        // ─── Data Cloud Insights (deterministic; AI narrative added on demand) ──
+        try {
+          currentResult.dataCloudInsights = buildDataCloudInsightsBase(currentResult);
+        } catch (e) { failStep('Data Cloud Insights', e); }
+
+        // ─── Agentforce Insights (deterministic; AI narrative added on demand) ──
+        try {
+          currentResult.agentforceInsights = buildAgentforceInsightsBase(currentResult);
+        } catch (e) { failStep('Agentforce Insights', e); }
 
         // Persist result for restore on reload
         context.globalState.update(RESULT_STORAGE_KEY, currentResult);
@@ -1344,6 +1469,14 @@ async function runFullAnalysis(context: vscode.ExtensionContext, forceRefresh = 
             info: currentResult.issues.filter(i => i.severity === 'info').length,
           },
           duration: Date.now() - startTime.getTime(),
+          kpiSnapshot: {
+            totalUsers: currentResult.orgInfoData?.quickFacts?.users ?? 0,
+            profiles: currentResult.orgInfoData?.quickFacts?.profiles ?? 0,
+            permissionSets: currentResult.orgInfoData?.quickFacts?.permissionSets ?? 0,
+            permissionSetGroups: currentResult.orgInfoData?.quickFacts?.permissionSetGroups ?? 0,
+            roles: currentResult.orgInfoData?.quickFacts?.roles ?? 0,
+            connectedApps: currentResult.orgInfoData?.integrations?.connectedApps ?? 0,
+          },
         };
         const allOrgHistory = context.globalState.get<Record<string, ScanHistoryEntry[]>>(ORG_HISTORY_KEY) ?? {};
         allOrgHistory[orgId] = [...(allOrgHistory[orgId] ?? []), scanEntry].slice(-10);
