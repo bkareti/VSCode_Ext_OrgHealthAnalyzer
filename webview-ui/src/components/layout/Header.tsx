@@ -1,45 +1,44 @@
 import { useState } from 'react';
 import { useOrgStore } from '@/store/slices/orgStore';
-import { useUIStore } from '@/store/slices/uiStore';
-import { Button } from '@/components/common';
 import ThemeToggle from '@/components/common/ThemeToggle';
 import ExportModal from '@/components/modals/ExportModal';
 
 export default function Header() {
   const [showExport, setShowExport] = useState(false);
-  const results               = useOrgStore((s) => s.results);
-  const setShowAnalysisDialog = useUIStore((s) => s.setShowAnalysisDialog);
+  const results = useOrgStore((s) => s.results);
 
-  const orgName  = results?.metadata?.orgAlias ?? results?.metadata?.orgId ?? 'No org connected';
+  const orgName = results?.metadata?.orgAlias ?? results?.metadata?.orgId ?? 'No org connected';
   const lastScan = results?.timestamp ? new Date(results.timestamp).toLocaleString() : null;
 
   return (
     <>
-      <header className="flex items-center justify-between px-4 py-2 border-b border-sf-border bg-sf-bg-2 shrink-0 z-10">
+      <header className="z-10 flex shrink-0 items-center justify-between border-b border-sf-border bg-sf-bg-2 px-4 py-2">
         {/* Brand */}
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="flex items-center gap-2 shrink-0">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex shrink-0 items-center gap-2">
             <span className="text-sm font-semibold text-sf-text">OrgPulse</span>
-            <span className="text-[10px] text-sf-muted font-mono hidden sm:block">Health Analyzer</span>
+            <span className="hidden font-mono text-[10px] text-sf-muted sm:block">
+              Health Analyzer
+            </span>
           </div>
 
           {/* Org chip */}
-          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-sf-bg-3 border border-sf-border text-xs text-sf-text-2 min-w-0">
-            <span className="w-1.5 h-1.5 rounded-full bg-score-good shrink-0" />
-            <span className="truncate max-w-40">{orgName}</span>
+          <div className="flex min-w-0 items-center gap-1.5 rounded-full border border-sf-border bg-sf-bg-3 px-2 py-0.5 text-xs text-sf-text-2">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-score-good" />
+            <span className="max-w-40 truncate">{orgName}</span>
           </div>
 
           {lastScan && (
-            <span className="text-[10px] text-sf-muted hidden md:block whitespace-nowrap">
+            <span className="hidden text-[10px] whitespace-nowrap text-sf-muted md:block">
               Last scan: {lastScan}
             </span>
           )}
         </div>
 
         {/* Actions */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex shrink-0 items-center gap-2">
           <ThemeToggle />
-          <Button variant="ghost" size="sm" onClick={() => setShowExport(true)}>
+          {/* <Button variant="ghost" size="sm" onClick={() => setShowExport(true)}>
             Export
           </Button>
           <Button
@@ -48,7 +47,7 @@ export default function Header() {
             onClick={() => setShowAnalysisDialog(true)}
           >
             Re-Analyse
-          </Button>
+          </Button> */}
         </div>
       </header>
 

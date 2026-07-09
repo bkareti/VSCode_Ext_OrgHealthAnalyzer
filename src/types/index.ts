@@ -2,9 +2,13 @@
  * Core types for the Salesforce Org Health Analyzer
  */
 
-import type { FutureReadinessReport } from './futureReadiness';
+import type { FutureReadinessReport, ProfileIpRangeInfo, ConnectedAppInfo as FRConnectedAppInfo } from './futureReadiness';
 import type { LicenseRecommendationsReport } from './licenseRecommendations';
 import type { OrgInfoRecommendationsReport } from './orgInfoRecommendations';
+import type { SecurityRecommendationsReport } from './securityRecommendations';
+import type { GovernorLimitsRecommendationsReport } from './governorLimitsRecommendations';
+import type { DataCloudInsightsReport } from './dataCloudInsights';
+import type { AgentforceInsightsReport } from './agentforceInsights';
 
 // Re-export Future Readiness types so consumers (incl. the webview) can import from '@/types'.
 export * from './futureReadiness';
@@ -14,6 +18,18 @@ export * from './licenseRecommendations';
 
 // Re-export Org Info Recommendations types so consumers (incl. the webview) can import from '@/types'.
 export * from './orgInfoRecommendations';
+
+// Re-export Security Recommendations types so consumers (incl. the webview) can import from '@/types'.
+export * from './securityRecommendations';
+
+// Re-export Governor Limits Recommendations types so consumers (incl. the webview) can import from '@/types'.
+export * from './governorLimitsRecommendations';
+
+// Re-export Data Cloud Insights types so consumers (incl. the webview) can import from '@/types'.
+export * from './dataCloudInsights';
+
+// Re-export Agentforce Insights types so consumers (incl. the webview) can import from '@/types'.
+export * from './agentforceInsights';
 
 // ============================================================================
 // Issue & Severity Types
@@ -204,6 +220,16 @@ export interface AnalysisResult {
   licenseRecommendations?: LicenseRecommendationsReport;
   /** Org profile recommendation cards for Org Info → Overview — deterministic values + optional AI evidence narrative */
   orgInfoRecommendations?: OrgInfoRecommendationsReport;
+  /** Security recommendation cards for the Security tab — deterministic values from real issues/collectors */
+  securityRecommendations?: SecurityRecommendationsReport;
+  /** Governor Limits recommendation cards for the Governor Limits → Summary tab — deterministic values + optional AI evidence narrative */
+  governorLimitsRecommendations?: GovernorLimitsRecommendationsReport;
+  /** AI Insights cards for the Data Cloud Readiness → Overview sub-tab — deterministic values + optional AI evidence narrative */
+  dataCloudInsights?: DataCloudInsightsReport;
+  /** AI Insights cards for the Agentforce Readiness → Overview panel — deterministic values + optional AI evidence narrative */
+  agentforceInsights?: AgentforceInsightsReport;
+  /** Curated subset of Future Readiness collector output reused for the Security tab (avoids re-querying the org) */
+  securityCollectorData?: SecurityCollectorSnapshot;
   /** License usage summary from UserLicense */
   licenseSummary?: LicenseSummary[];
   /** Feature license summary from FeatureLicense object */
@@ -539,6 +565,25 @@ export interface ProfileSecuritySummary {
   permissionSetGroupList?: PermissionSetGroupInfo[];
 }
 
+/**
+ * Curated subset of `ReadinessCollectorData` (see futureReadiness.ts) reused on the
+ * Security tab. Future Readiness collectors already run on every `analyzeOrg` scan;
+ * this snapshot just keeps the handful of security-relevant fields instead of
+ * discarding them, without persisting the full (much larger) collector bundle.
+ */
+export interface SecurityCollectorSnapshot {
+  /** Org-wide MFA enforcement (Organization.IsMfaRequired). */
+  mfaRequired?: boolean;
+  /** Profiles that carry at least one Login IP Range restriction. */
+  profileIpRanges?: ProfileIpRangeInfo[];
+  /** Count of org-level trusted IP ranges (Network Access). */
+  orgNetworkAccessRangeCount?: number;
+  /** Count of fields on key objects (Account/Contact/Case/Opportunity/Lead) whose API name suggests PII. */
+  piiSensitiveFieldCount?: number;
+  /** Connected Apps with IP-relaxation metadata (non-'Relaxed' ⇒ IP-restricted). */
+  connectedAppsIpInfo?: FRConnectedAppInfo[];
+}
+
 // ============================================================================
 // Stale Metadata Types
 // ============================================================================
@@ -730,6 +775,8 @@ export type DashboardMessageType =
   | 'runFutureReadiness'
   | 'runLicenseRecommendations'
   | 'runOrgInfoRecommendations'
+  | 'runDataCloudInsights'
+  | 'runAgentforceInsights'
   | 'setSecurityMode'
   | 'cancelAnalysis'
   | 'refresh'
@@ -901,6 +948,15 @@ export interface ScanHistoryEntry {
     info: number;
   };
   duration: number;
+  /** Entity-count snapshot for KPI "vs last scan" deltas (Security tab). Optional: absent on scans recorded before this field existed. */
+  kpiSnapshot?: {
+    totalUsers: number;
+    profiles: number;
+    permissionSets: number;
+    permissionSetGroups: number;
+    roles: number;
+    connectedApps: number;
+  };
 }
 
 // ============================================================================

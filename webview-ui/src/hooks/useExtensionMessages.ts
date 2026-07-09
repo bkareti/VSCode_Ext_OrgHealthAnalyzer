@@ -5,9 +5,12 @@ import { useCTAStore } from '@/store/slices/ctaStore';
 import { useFutureReadinessStore } from '@/store/slices/futureReadinessStore';
 import { useLicenseRecommendationsStore } from '@/store/slices/licenseRecommendationsStore';
 import { useOrgInfoRecommendationsStore } from '@/store/slices/orgInfoRecommendationsStore';
+import { useGovernorLimitsRecommendationsStore } from '@/store/slices/governorLimitsRecommendationsStore';
+import { useDataCloudInsightsStore } from '@/store/slices/dataCloudInsightsStore';
+import { useAgentforceInsightsStore } from '@/store/slices/agentforceInsightsStore';
 import { useArchitectPromptsStore, type ArchitectPromptScope } from '@/store/slices/architectPromptsStore';
 import { vscodeApi } from '@/hooks/useVSCode';
-import type { AnalysisResult, CTAReview, FutureReadinessReport, LicenseRecommendationsReport, OrgInfoRecommendationsReport, ScanHistoryEntry } from '@/types';
+import type { AnalysisResult, CTAReview, FutureReadinessReport, LicenseRecommendationsReport, OrgInfoRecommendationsReport, GovernorLimitsRecommendationsReport, DataCloudInsightsReport, AgentforceInsightsReport, ScanHistoryEntry } from '@/types';
 import type { ProgressData } from '@/store/slices/orgStore';
 import type { AIModel, AIExplanationData } from '@/store/slices/aiStore';
 
@@ -41,6 +44,15 @@ type InboundMessage =
   | { type: 'orgInfoRecommendationsLoading' }
   | { type: 'orgInfoRecommendations'; data: OrgInfoRecommendationsReport }
   | { type: 'orgInfoRecommendationsError'; message: string }
+  | { type: 'governorLimitsRecommendationsLoading' }
+  | { type: 'governorLimitsRecommendations'; data: GovernorLimitsRecommendationsReport }
+  | { type: 'governorLimitsRecommendationsError'; message: string }
+  | { type: 'dataCloudInsightsLoading' }
+  | { type: 'dataCloudInsights'; data: DataCloudInsightsReport }
+  | { type: 'dataCloudInsightsError'; message: string }
+  | { type: 'agentforceInsightsLoading' }
+  | { type: 'agentforceInsights'; data: AgentforceInsightsReport }
+  | { type: 'agentforceInsightsError'; message: string }
   | { type: 'architectPrompts'; data: { scopes: ArchitectPromptScope[]; overrides: Record<string, string> } };
 
 export function useExtensionMessages() {
@@ -75,6 +87,17 @@ export function useExtensionMessages() {
   const setOIRLoading = useOrgInfoRecommendationsStore((s) => s.setLoading);
   const setOIRError   = useOrgInfoRecommendationsStore((s) => s.setError);
 
+  const setGLRReport  = useGovernorLimitsRecommendationsStore((s) => s.setReport);
+  const setGLRLoading = useGovernorLimitsRecommendationsStore((s) => s.setLoading);
+  const setGLRError   = useGovernorLimitsRecommendationsStore((s) => s.setError);
+
+  const setDCIReport  = useDataCloudInsightsStore((s) => s.setReport);
+  const setDCILoading = useDataCloudInsightsStore((s) => s.setLoading);
+  const setDCIError   = useDataCloudInsightsStore((s) => s.setError);
+  const setAFIReport  = useAgentforceInsightsStore((s) => s.setReport);
+  const setAFILoading = useAgentforceInsightsStore((s) => s.setLoading);
+  const setAFIError   = useAgentforceInsightsStore((s) => s.setError);
+
   const setArchitectPrompts = useArchitectPromptsStore((s) => s.setPrompts);
 
   useEffect(() => {
@@ -89,6 +112,9 @@ export function useExtensionMessages() {
           if (msg.data.futureReadiness) { setFRReport(msg.data.futureReadiness); }
           if (msg.data.licenseRecommendations) { setLRReport(msg.data.licenseRecommendations); }
           if (msg.data.orgInfoRecommendations) { setOIRReport(msg.data.orgInfoRecommendations); }
+          if (msg.data.governorLimitsRecommendations) { setGLRReport(msg.data.governorLimitsRecommendations); }
+          if (msg.data.dataCloudInsights) { setDCIReport(msg.data.dataCloudInsights); }
+          if (msg.data.agentforceInsights) { setAFIReport(msg.data.agentforceInsights); }
           break;
 
         case 'orgHistory':
@@ -197,6 +223,42 @@ export function useExtensionMessages() {
           setOIRError(msg.message);
           break;
 
+        case 'governorLimitsRecommendationsLoading':
+          setGLRLoading(true);
+          break;
+
+        case 'governorLimitsRecommendations':
+          setGLRReport(msg.data);
+          break;
+
+        case 'governorLimitsRecommendationsError':
+          setGLRError(msg.message);
+          break;
+
+        case 'dataCloudInsightsLoading':
+          setDCILoading(true);
+          break;
+
+        case 'dataCloudInsights':
+          setDCIReport(msg.data);
+          break;
+
+        case 'dataCloudInsightsError':
+          setDCIError(msg.message);
+          break;
+
+        case 'agentforceInsightsLoading':
+          setAFILoading(true);
+          break;
+
+        case 'agentforceInsights':
+          setAFIReport(msg.data);
+          break;
+
+        case 'agentforceInsightsError':
+          setAFIError(msg.message);
+          break;
+
         case 'architectPrompts':
           setArchitectPrompts(msg.data.scopes, msg.data.overrides);
           break;
@@ -215,6 +277,8 @@ export function useExtensionMessages() {
     setFRReport, setFRLoading, setFRError,
     setLRReport, setLRLoading, setLRError,
     setOIRReport, setOIRLoading, setOIRError,
+    setGLRReport, setGLRLoading, setGLRError,
+    setDCIReport, setDCILoading, setDCIError,
     setArchitectPrompts,
   ]);
 }

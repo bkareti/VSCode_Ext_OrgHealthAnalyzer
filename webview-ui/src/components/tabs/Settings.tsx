@@ -10,7 +10,7 @@ import ProviderCard from './settings/ProviderCard';
 import ApiKeyProviderBody from './settings/ApiKeyProviderBody';
 
 /** Scopes with a live AI call wired to their custom prompt today; the rest are stored for the planned multi-tab rollout. */
-const WIRED_SCOPES = new Set(['futurereadiness', 'cta']);
+const WIRED_SCOPES = new Set(['futurereadiness', 'cta', 'datacloudreadiness', 'agentforcereadiness']);
 
 // ── Main Settings tab ─────────────────────────────────────────────────────────
 

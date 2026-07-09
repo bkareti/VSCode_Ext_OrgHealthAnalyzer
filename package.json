@@ -2,7 +2,7 @@
   "name": "sf-health-analyzer",
   "displayName": "OrgPulse",
   "description": "Salesforce Architecture Health & Insights — Built with security-first AI. No sensitive data ever leaves your org. Enterprise-grade analysis of Apex quality, automation complexity, data model health, test coverage, security, and performance.",
-  "version": "1.16.0",
+  "version": "1.18.0",
   "publisher": "babukareti",
   "license": "MIT",
   "homepage": "https://github.com/bkareti/VSCode_Ext_OrgHealthAnalyzer#readme",
@@ -109,6 +109,11 @@
       {
         "command": "sfHealthAnalyzer.runLicenseRecommendations",
         "title": "Run License Recommendations (AI narrative)",
+        "category": "OrgPulse"
+      },
+      {
+        "command": "sfHealthAnalyzer.runGovernorLimitsRecommendations",
+        "title": "Run Governor Limits Recommendations (AI narrative)",
         "category": "OrgPulse"
       },
       {

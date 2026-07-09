@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useOrgStore } from '@/store/slices/orgStore';
 import { useFutureReadinessStore } from '@/store/slices/futureReadinessStore';
 import { useVSCode } from '@/hooks/useVSCode';
@@ -8,6 +9,8 @@ import EmptyState from '@/components/common/EmptyState';
 import SegmentedTabs from '@/components/common/SegmentedTabs';
 import ModelLimitErrorBanner from '@/components/common/ModelLimitErrorBanner';
 import { ReadinessPackView, PACK_TABS } from './readinessPacks';
+import { DataCloudReadinessView } from './readinessPacks/dataCloud';
+import { AgentforceReadinessView } from './readinessPacks/agentforce';
 import type { FutureReadinessReport, PackId } from '@/types';
 
 // ── Analysis Methodology sub-tab ──────────────────────────────────────────────
@@ -222,7 +225,18 @@ export default function FutureReadiness() {
   const error = useFutureReadinessStore((s) => s.error);
   const { postMessage } = useVSCode();
 
-  const [activeTab, setActiveTab] = useState<ActiveTab>('data-cloud');
+  const [searchParams] = useSearchParams();
+  const packParam = searchParams.get('pack') as PackId | null;
+  const [activeTab, setActiveTab] = useState<ActiveTab>(packParam ?? 'data-cloud');
+
+  // Re-sync when arriving via a different sidebar pack link while already on
+  // this route — React Router does not remount the component for a
+  // query-string-only navigation.
+  useEffect(() => {
+    if (packParam && PACK_TABS.some((t) => t.id === packParam)) {
+      setActiveTab(packParam);
+    }
+  }, [packParam]);
 
   const report: FutureReadinessReport | null = storeReport ?? results?.futureReadiness ?? null;
   const hasNarrative = !!report?.narrative;
@@ -276,7 +290,13 @@ export default function FutureReadiness() {
         />
       ) : activePack ? (
         <div className="p-6">
-          <ReadinessPackView pack={activePack} modelUsed={report.modelUsed} />
+          {activePack.packId === 'data-cloud' ? (
+            <DataCloudReadinessView pack={activePack} report={report} results={results} />
+          ) : activePack.packId === 'ai-agentforce' ? (
+            <AgentforceReadinessView pack={activePack} report={report} results={results} />
+          ) : (
+            <ReadinessPackView pack={activePack} modelUsed={report.modelUsed} />
+          )}
           <p className="text-[10px] text-sf-muted/40 text-right leading-snug mt-4">
             Generated {new Date(report.generatedAt).toLocaleString()}
             {!report.modelUsed && ' · deterministic scores (no AI narrative)'}

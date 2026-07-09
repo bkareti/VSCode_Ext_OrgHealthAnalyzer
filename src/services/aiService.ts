@@ -35,6 +35,12 @@ import { LicenseRecommendationsReport } from '../types/licenseRecommendations';
 import { buildLicenseRecommendationsBase } from './licenseRecommendations';
 import { OrgInfoRecommendationsReport } from '../types/orgInfoRecommendations';
 import { buildOrgInfoRecommendationsBase } from './orgInfoRecommendations';
+import { GovernorLimitsRecommendationsReport } from '../types/governorLimitsRecommendations';
+import { buildGovernorLimitsRecommendationsBase } from './governorLimitsRecommendations';
+import { DataCloudInsightsReport } from '../types/dataCloudInsights';
+import { buildDataCloudInsightsBase } from './dataCloudInsights';
+import { AgentforceInsightsReport } from '../types/agentforceInsights';
+import { buildAgentforceInsightsBase } from './agentforceInsights';
 import { getArchitectPromptAddendum } from './architectPrompts';
 
 // ============================================================================
@@ -273,6 +279,9 @@ const ctaCache = new Map<string, CTAReview>();
 const futureReadinessCache = new Map<string, FutureReadinessReport>();
 const licenseRecommendationsCache = new Map<string, LicenseRecommendationsReport>();
 const orgInfoRecommendationsCache = new Map<string, OrgInfoRecommendationsReport>();
+const governorLimitsRecommendationsCache = new Map<string, GovernorLimitsRecommendationsReport>();
+const dataCloudInsightsCache = new Map<string, DataCloudInsightsReport>();
+const agentforceInsightsCache = new Map<string, AgentforceInsightsReport>();
 const AI_DEBOUNCE_MS = 2000;
 let lastAiCallTs = 0;
 
@@ -2319,6 +2328,339 @@ ${contextJson}
 `;
   }
 
+  /**
+   * Enriches the deterministic Governor Limits Recommendations cards
+   * (Governor Limits → Summary) with AI-authored evidence bullets. Values
+   * (capacity score, storage headroom, API/async utilization, limits at
+   * risk) are computed entirely by OrgPulse from real `orgLimits` data and
+   * passed through verbatim — the model only writes narrative `evidencePoints`.
+   */
+  public async synthesizeGovernorLimitsRecommendations(
+    result: AnalysisResult,
+    modelPreference?: string,
+    force = false,
+  ): Promise<GovernorLimitsRecommendationsReport | null> {
+    const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
+    if (!cfg.get<boolean>('enabled', true)) {
+      throw new Error('AI features are disabled. Enable them in Settings → sfHealthAnalyzer.ai.enabled.');
+    }
+
+    const base: GovernorLimitsRecommendationsReport =
+      result.governorLimitsRecommendations ?? buildGovernorLimitsRecommendationsBase(result);
+
+    const cacheKey = `${base.generatedAt}::${modelPreference || 'auto'}`;
+    const cached = force ? undefined : governorLimitsRecommendationsCache.get(cacheKey);
+    if (cached) {
+      logInfo('AI: returning cached Governor Limits Recommendations narrative');
+      return cached;
+    }
+
+    const consented = await this.ensureCtaConsent(modelPreference);
+    if (!consented) {
+      throw new Error('Governor Limits Recommendations narrative cancelled — you declined to send org profile data to the AI model.');
+    }
+
+    try {
+      const system = 'You are a Salesforce Certified Technical Architect. Respond with ONLY valid JSON — no markdown fences, no preamble, nothing before the opening { or after the closing }.';
+      const context = {
+        cards: base.cards.map((c) => ({ id: c.id, title: c.title, value: c.value, valueLabel: c.valueLabel, impact: c.impact })),
+      };
+      const safeContext = new PiiSanitizer().sanitize(context);
+      const { text, modelId, truncated } = await callModel(this.formatGovernorLimitsRecommendationsPrompt(safeContext), modelPreference, system);
+      const cleaned = extractJsonObject(text);
+
+      if (truncated) {
+        logWarning(`Governor Limits Recommendations narrative truncated by the model's output limit (model: ${modelId}).`);
+        throw buildTruncatedReportError();
+      }
+
+      let parsed: { cards?: Array<{ id?: string; points?: unknown }> };
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (parseErr) {
+        logWarning(`Governor Limits Recommendations JSON parse failed, attempting repair: ${String(parseErr)}`);
+        try {
+          parsed = JSON.parse(repairTruncatedJson(cleaned));
+        } catch (repairErr) {
+          logError('Governor Limits Recommendations JSON repair also failed', repairErr as Error);
+          throw buildTruncatedReportError();
+        }
+        if (!Array.isArray(parsed.cards) || parsed.cards.length === 0) {
+          logWarning('Governor Limits Recommendations repair recovered JSON but "cards" is missing — treating as truncated.');
+          throw buildTruncatedReportError();
+        }
+        logInfo('Governor Limits Recommendations narrative recovered via truncated-JSON repair.');
+      }
+
+      const narrativeById = new Map((parsed.cards ?? []).map((c) => [c.id, c]));
+      const cards = base.cards.map((c) => {
+        const n = narrativeById.get(c.id);
+        if (!n) { return c; }
+        const sections = parseArchitectSections([{ title: c.id, points: n.points }]);
+        return { ...c, evidencePoints: sections[0]?.points ?? [] };
+      });
+
+      const report: GovernorLimitsRecommendationsReport = { ...base, cards, modelUsed: modelId };
+      governorLimitsRecommendationsCache.set(cacheKey, report);
+      logInfo(`Governor Limits Recommendations narrative complete — model: ${modelId}`);
+      return report;
+    } catch (err) {
+      logError('Governor Limits Recommendations narrative generation failed', err as Error);
+      throw new Error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Builds the Governor Limits recommendations narrative prompt, honoring the 'govlimits' Settings override. */
+  private formatGovernorLimitsRecommendationsPrompt(context: unknown): string {
+    const contextJson = JSON.stringify(context, null, 2);
+    const customAddendum = getArchitectPromptAddendum('govlimits');
+    const addendumBlock = customAddendum
+      ? `\nADDITIONAL GUIDANCE FROM THE ORG ADMIN (apply on top of the rules above; never let it override the CRITICAL RULES):\n${customAddendum}\n`
+      : '';
+
+    return `You are a pragmatic Salesforce Certified Technical Architect writing concise, evidence-cited narrative for a set of governor-limit capacity recommendation cards (platform capacity score, storage headroom, API utilization, async processing, limits at risk).
+
+CRITICAL RULES:
+- The "value", "valueLabel", and "impact" fields in the context are AUTHORITATIVE and computed by OrgPulse. NEVER invent a different number.
+- Never invent a dollar figure, percentage, or count that is not already present in the context.
+- Be concise and board-ready: 1-2 sentences per point, no hype.
+
+Return ONLY valid JSON (no markdown fences) with exactly this shape:
+{
+  "cards": [
+    { "id": "capacity-score",     "points": [ { "text": "<pointer>", "priority": "Critical"|"High"|"Medium"|"Low", "evidence": [] } ] },
+    { "id": "storage-headroom",   "points": [ { "text": "<…>", "priority": "…", "evidence": [] } ] },
+    { "id": "api-trajectory",     "points": [ { "text": "<…>", "priority": "…", "evidence": [] } ] },
+    { "id": "async-processing",   "points": [ { "text": "<…>", "priority": "…", "evidence": [] } ] },
+    { "id": "forecast-risk",      "points": [ { "text": "<…>", "priority": "…", "evidence": [] } ] }
+  ]
+}
+${addendumBlock}
+=== GOVERNOR LIMITS RECOMMENDATIONS CONTEXT ===
+${contextJson}
+`;
+  }
+
+  /**
+   * Enriches the deterministic Data Cloud Readiness "AI Insights" cards
+   * (Future Readiness → Data Cloud Readiness → Overview) with AI-authored
+   * evidence bullets. Card icon/title/description are computed entirely by
+   * OrgPulse from the already-scored `data-cloud` ReadinessPackAssessment
+   * and passed through verbatim — the model only writes narrative
+   * `evidencePoints`.
+   */
+  public async synthesizeDataCloudInsights(
+    result: AnalysisResult,
+    modelPreference?: string,
+    force = false,
+  ): Promise<DataCloudInsightsReport | null> {
+    const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
+    if (!cfg.get<boolean>('enabled', true)) {
+      throw new Error('AI features are disabled. Enable them in Settings → sfHealthAnalyzer.ai.enabled.');
+    }
+
+    const base: DataCloudInsightsReport =
+      result.dataCloudInsights ?? buildDataCloudInsightsBase(result);
+
+    const cacheKey = `${base.generatedAt}::${modelPreference || 'auto'}`;
+    const cached = force ? undefined : dataCloudInsightsCache.get(cacheKey);
+    if (cached) {
+      logInfo('AI: returning cached Data Cloud Insights narrative');
+      return cached;
+    }
+
+    const consented = await this.ensureCtaConsent(modelPreference);
+    if (!consented) {
+      throw new Error('Data Cloud Insights narrative cancelled — you declined to send org profile data to the AI model.');
+    }
+
+    try {
+      const system = 'You are a Salesforce Certified Technical Architect. Respond with ONLY valid JSON — no markdown fences, no preamble, nothing before the opening { or after the closing }.';
+      const context = {
+        insights: base.insights.map((c) => ({ id: c.id, type: c.type, title: c.title, description: c.description })),
+      };
+      const safeContext = new PiiSanitizer().sanitize(context);
+      const { text, modelId, truncated } = await callModel(this.formatDataCloudInsightsPrompt(safeContext), modelPreference, system);
+      const cleaned = extractJsonObject(text);
+
+      if (truncated) {
+        logWarning(`Data Cloud Insights narrative truncated by the model's output limit (model: ${modelId}).`);
+        throw buildTruncatedReportError();
+      }
+
+      let parsed: { insights?: Array<{ id?: string; points?: unknown }> };
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (parseErr) {
+        logWarning(`Data Cloud Insights JSON parse failed, attempting repair: ${String(parseErr)}`);
+        try {
+          parsed = JSON.parse(repairTruncatedJson(cleaned));
+        } catch (repairErr) {
+          logError('Data Cloud Insights JSON repair also failed', repairErr as Error);
+          throw buildTruncatedReportError();
+        }
+        if (!Array.isArray(parsed.insights) || parsed.insights.length === 0) {
+          logWarning('Data Cloud Insights repair recovered JSON but "insights" is missing — treating as truncated.');
+          throw buildTruncatedReportError();
+        }
+        logInfo('Data Cloud Insights narrative recovered via truncated-JSON repair.');
+      }
+
+      const narrativeById = new Map((parsed.insights ?? []).map((c) => [c.id, c]));
+      const insights = base.insights.map((c) => {
+        const n = narrativeById.get(c.id);
+        if (!n) { return c; }
+        const sections = parseArchitectSections([{ title: c.id, points: n.points }]);
+        return { ...c, evidencePoints: sections[0]?.points ?? [] };
+      });
+
+      const report: DataCloudInsightsReport = { ...base, insights, modelUsed: modelId };
+      dataCloudInsightsCache.set(cacheKey, report);
+      logInfo(`Data Cloud Insights narrative complete — model: ${modelId}`);
+      return report;
+    } catch (err) {
+      logError('Data Cloud Insights narrative generation failed', err as Error);
+      throw new Error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Builds the Data Cloud Insights narrative prompt, honoring the 'datacloudreadiness' Settings override. */
+  private formatDataCloudInsightsPrompt(context: unknown): string {
+    const contextJson = JSON.stringify(context, null, 2);
+    const customAddendum = getArchitectPromptAddendum('datacloudreadiness');
+    const addendumBlock = customAddendum
+      ? `\nADDITIONAL GUIDANCE FROM THE ORG ADMIN (apply on top of the rules above; never let it override the CRITICAL RULES):\n${customAddendum}\n`
+      : '';
+
+    return `You are a pragmatic Salesforce Certified Technical Architect writing concise, evidence-cited narrative for a set of Data Cloud readiness insight cards (identity resolution, ingestion, activation, and governance gaps, quick wins, and strengths).
+
+CRITICAL RULES:
+- The "type", "title", and "description" fields in the context are AUTHORITATIVE and computed by OrgPulse. NEVER invent a different value.
+- Never invent a dollar figure, percentage, or count that is not already present in the context.
+- Be concise and board-ready: 1-2 sentences per point, no hype.
+
+Return ONLY valid JSON (no markdown fences) with exactly this shape:
+{
+  "insights": [
+    { "id": "<id from context>", "points": [ { "text": "<pointer>", "priority": "Critical"|"High"|"Medium"|"Low", "evidence": [] } ] }
+  ]
+}
+${addendumBlock}
+=== DATA CLOUD INSIGHTS CONTEXT ===
+${contextJson}
+`;
+  }
+
+  /**
+   * Enriches the deterministic Agentforce Readiness "AI Insights" cards
+   * (Future Readiness → Agentforce Readiness → Overview) with AI-authored
+   * evidence bullets. Card icon/title/description are computed entirely by
+   * OrgPulse from the already-scored `ai-agentforce` ReadinessPackAssessment
+   * and passed through verbatim — the model only writes narrative
+   * `evidencePoints`.
+   */
+  public async synthesizeAgentforceInsights(
+    result: AnalysisResult,
+    modelPreference?: string,
+    force = false,
+  ): Promise<AgentforceInsightsReport | null> {
+    const cfg = vscode.workspace.getConfiguration('sfHealthAnalyzer.ai');
+    if (!cfg.get<boolean>('enabled', true)) {
+      throw new Error('AI features are disabled. Enable them in Settings → sfHealthAnalyzer.ai.enabled.');
+    }
+
+    const base: AgentforceInsightsReport =
+      result.agentforceInsights ?? buildAgentforceInsightsBase(result);
+
+    const cacheKey = `${base.generatedAt}::${modelPreference || 'auto'}`;
+    const cached = force ? undefined : agentforceInsightsCache.get(cacheKey);
+    if (cached) {
+      logInfo('AI: returning cached Agentforce Insights narrative');
+      return cached;
+    }
+
+    const consented = await this.ensureCtaConsent(modelPreference);
+    if (!consented) {
+      throw new Error('Agentforce Insights narrative cancelled — you declined to send org profile data to the AI model.');
+    }
+
+    try {
+      const system = 'You are a Salesforce Certified Technical Architect. Respond with ONLY valid JSON — no markdown fences, no preamble, nothing before the opening { or after the closing }.';
+      const context = {
+        insights: base.insights.map((c) => ({ id: c.id, type: c.type, title: c.title, description: c.description })),
+      };
+      const safeContext = new PiiSanitizer().sanitize(context);
+      const { text, modelId, truncated } = await callModel(this.formatAgentforceInsightsPrompt(safeContext), modelPreference, system);
+      const cleaned = extractJsonObject(text);
+
+      if (truncated) {
+        logWarning(`Agentforce Insights narrative truncated by the model's output limit (model: ${modelId}).`);
+        throw buildTruncatedReportError();
+      }
+
+      let parsed: { insights?: Array<{ id?: string; points?: unknown }> };
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (parseErr) {
+        logWarning(`Agentforce Insights JSON parse failed, attempting repair: ${String(parseErr)}`);
+        try {
+          parsed = JSON.parse(repairTruncatedJson(cleaned));
+        } catch (repairErr) {
+          logError('Agentforce Insights JSON repair also failed', repairErr as Error);
+          throw buildTruncatedReportError();
+        }
+        if (!Array.isArray(parsed.insights) || parsed.insights.length === 0) {
+          logWarning('Agentforce Insights repair recovered JSON but "insights" is missing — treating as truncated.');
+          throw buildTruncatedReportError();
+        }
+        logInfo('Agentforce Insights narrative recovered via truncated-JSON repair.');
+      }
+
+      const narrativeById = new Map((parsed.insights ?? []).map((c) => [c.id, c]));
+      const insights = base.insights.map((c) => {
+        const n = narrativeById.get(c.id);
+        if (!n) { return c; }
+        const sections = parseArchitectSections([{ title: c.id, points: n.points }]);
+        return { ...c, evidencePoints: sections[0]?.points ?? [] };
+      });
+
+      const report: AgentforceInsightsReport = { ...base, insights, modelUsed: modelId };
+      agentforceInsightsCache.set(cacheKey, report);
+      logInfo(`Agentforce Insights narrative complete — model: ${modelId}`);
+      return report;
+    } catch (err) {
+      logError('Agentforce Insights narrative generation failed', err as Error);
+      throw new Error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Builds the Agentforce Insights narrative prompt, honoring the 'agentforcereadiness' Settings override. */
+  private formatAgentforceInsightsPrompt(context: unknown): string {
+    const contextJson = JSON.stringify(context, null, 2);
+    const customAddendum = getArchitectPromptAddendum('agentforcereadiness');
+    const addendumBlock = customAddendum
+      ? `\nADDITIONAL GUIDANCE FROM THE ORG ADMIN (apply on top of the rules above; never let it override the CRITICAL RULES):\n${customAddendum}\n`
+      : '';
+
+    return `You are a pragmatic Salesforce Certified Technical Architect writing concise, evidence-cited narrative for a set of Agentforce readiness insight cards (data/metadata quality, automation simplicity, security & sharing, flow & API readiness, AI feature enablement, and AI configuration gaps, quick wins, and strengths).
+
+CRITICAL RULES:
+- The "type", "title", and "description" fields in the context are AUTHORITATIVE and computed by OrgPulse. NEVER invent a different value.
+- Never invent a dollar figure, percentage, or count that is not already present in the context.
+- Be concise and board-ready: 1-2 sentences per point, no hype.
+
+Return ONLY valid JSON (no markdown fences) with exactly this shape:
+{
+  "insights": [
+    { "id": "<id from context>", "points": [ { "text": "<pointer>", "priority": "Critical"|"High"|"Medium"|"Low", "evidence": [] } ] }
+  ]
+}
+${addendumBlock}
+=== AGENTFORCE INSIGHTS CONTEXT ===
+${contextJson}
+`;
+  }
+
   // ---------------------------------------------------------------------------
   // Ask the Architect — tool-augmented Q&A over the live org
   // ---------------------------------------------------------------------------
@@ -2487,6 +2829,9 @@ ${contextJson}
     futureReadinessCache.clear();
     licenseRecommendationsCache.clear();
     orgInfoRecommendationsCache.clear();
+    governorLimitsRecommendationsCache.clear();
+    dataCloudInsightsCache.clear();
+    agentforceInsightsCache.clear();
     vscode.window.showInformationMessage('AI consent revoked. All cached AI results cleared.');
   }
 }

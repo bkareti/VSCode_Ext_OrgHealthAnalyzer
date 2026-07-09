@@ -17,6 +17,9 @@ export type OutboundMessage =
   | { command: 'runFutureReadiness'; model?: string; force?: boolean }
   | { command: 'runLicenseRecommendations'; model?: string; force?: boolean }
   | { command: 'runOrgInfoRecommendations'; model?: string; force?: boolean }
+  | { command: 'runGovernorLimitsRecommendations'; model?: string; force?: boolean }
+  | { command: 'runDataCloudInsights'; model?: string; force?: boolean }
+  | { command: 'runAgentforceInsights'; model?: string; force?: boolean }
   | { command: 'getModels' }
   | { command: 'authorizeClaude' }
   | { command: 'disconnectClaude' }

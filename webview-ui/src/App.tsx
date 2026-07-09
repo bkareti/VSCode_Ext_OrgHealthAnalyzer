@@ -20,6 +20,7 @@ const DataModel = lazy(() => import('@/components/tabs/DataModel'));
 const Automation = lazy(() => import('@/components/tabs/Automation'));
 const TechnicalDebt = lazy(() => import('@/components/tabs/TechnicalDebt'));
 const CodeQuality = lazy(() => import('@/components/tabs/CodeQuality'));
+const Integrations = lazy(() => import('@/components/tabs/Integrations'));
 const PerfLimits = lazy(() => import('@/components/tabs/PerfLimits'));
 const GovernorLimits = lazy(() => import('@/components/tabs/GovernorLimits'));
 const SecurityAccess = lazy(() => import('@/components/tabs/SecurityAccess'));
@@ -70,6 +71,7 @@ export default function App() {
                   <Route path="/automation" element={<Automation />} />
                   <Route path="/techdebt" element={<TechnicalDebt />} />
                   <Route path="/code" element={<CodeQuality />} />
+                  <Route path="/integrations" element={<Integrations />} />
                   <Route path="/perflimits" element={<PerfLimits />} />
                   <Route path="/govlimits" element={<GovernorLimits />} />
                   <Route path="/secaccess" element={<SecurityAccess />} />

@@ -1,3 +1,5 @@
+export { default as AIRecommendations } from './AIRecommendations';
+export type { RecommendationCardData, RecommendationImpact } from './AIRecommendations';
 export { default as ArchitectRecommendations } from './ArchitectRecommendations';
 export { default as Badge } from './Badge';
 export { default as Button } from './Button';
@@ -8,6 +10,7 @@ export { default as GlassCard } from './GlassCard';
 export { default as InfoCard } from './InfoCard';
 export { default as ModelLimitErrorBanner } from './ModelLimitErrorBanner';
 export { default as Pagination } from './Pagination';
+export { default as ProgressBar } from './ProgressBar';
 export { default as SampleMark } from './SampleMark';
 export { default as SeverityPill } from './SeverityPill';
 export { default as Skeleton } from './Skeleton';

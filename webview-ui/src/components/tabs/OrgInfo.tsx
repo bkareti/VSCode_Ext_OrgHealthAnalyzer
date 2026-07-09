@@ -14,7 +14,7 @@ import type {
 // ─── Sub-tabs ──────────────────────────────────────────────────────────────────
 const SUBTABS = [
   'Overview', 'Clouds & Licenses', 'Installed Packages',
-  'Applications', 'Environments', 'Integrations',
+  'Applications', 'Environments',
 ] as const;
 type SubTab = typeof SUBTABS[number];
 
@@ -705,35 +705,6 @@ export default function OrgInfo() {
               </div>
             </dl>
           ) : <p className="text-xs text-sf-muted text-center py-8">Sandbox data not available for this org.</p>}
-        </GlassCard>
-      )}
-
-      {/* ════ INTEGRATIONS ═══════════════════════════════════════════════════════ */}
-      {subTab === 'Integrations' && (
-        <GlassCard title={`Integrations${intSum ? ` (${intSum.total} total)` : ''}`}>
-          {intSum ? (
-            <dl className="divide-y divide-sf-border/50">
-              {([
-                ['🔑', 'rgba(20,184,166,.15)', 'Named Credentials',    intSum.namedCredentials   ],
-                ['🔗', 'rgba(59,130,246,.15)', 'Connected Apps',       intSum.connectedApps      ],
-                ['🌐', 'rgba(139,92,246,.15)', 'External Credentials', intSum.externalCredentials],
-                ['📡', 'rgba(245,158,11,.15)', 'Remote Sites',         intSum.remoteSites        ],
-                ['🛡️', 'rgba(34,197,94,.15)',  'Auth. Providers',      intSum.authProviders      ],
-                ['📜', 'rgba(249,115,22,.15)', 'Certificates',         intSum.certificates       ],
-              ] as [string, string, string, number][]).map(([icon, bg, label, val]) => (
-                <div key={label} className="flex items-center gap-3 py-3">
-                  <div className="w-8 h-8 rounded-lg flex items-center justify-center text-sm shrink-0"
-                    style={{ background: bg }}>{icon}</div>
-                  <dt className="text-sm text-sf-text flex-1">{label}</dt>
-                  <dd className="text-sm font-bold text-sf-text tabular-nums">{val}</dd>
-                </div>
-              ))}
-              <div className="flex justify-between py-3 font-bold">
-                <span className="text-sm text-sf-text">Total Integrations</span>
-                <span className="text-sm tabular-nums" style={{ color: '#0176d3' }}>{intSum.total}</span>
-              </div>
-            </dl>
-          ) : <p className="text-xs text-sf-muted text-center py-8">Integration data not available.</p>}
         </GlassCard>
       )}
 
